@@ -1,0 +1,14 @@
+services:
+  ravens-bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
+      TIME_ZONE: ${TIME_ZONE:-America/New_York}
+    volumes:
+      - ravens_bot_data:/data
+    restart: unless-stopped
+
+volumes:
+  ravens_bot_data:
