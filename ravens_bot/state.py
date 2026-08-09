@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 
 LOGGER = logging.getLogger(__name__)
 CHANNEL_KEY_SEPARATOR = "@"
+_LEGACY_DATED_TRANSACTION_KEY = re.compile(r"^transaction:\d{4}-\d{2}-\d{2}:")
 
 
 def channel_key(key: str, target: int | str) -> str:
     return f"{key}{CHANNEL_KEY_SEPARATOR}{target}"
+
+
+def migrate_key(key: str) -> str:
+    """Drop the date from keys written before transactions were keyed by id alone."""
+    return _LEGACY_DATED_TRANSACTION_KEY.sub("transaction:", key, count=1)
 
 
 class AnnouncementState:
@@ -26,7 +33,7 @@ class AnnouncementState:
                 return
             data = json.loads(self._path.read_text(encoding="utf-8"))
             raw = data.get("announced", []) if isinstance(data, dict) else []
-            self._announced = {str(item) for item in raw}
+            self._announced = {migrate_key(str(item)) for item in raw}
         except (OSError, json.JSONDecodeError) as exc:
             LOGGER.warning("Could not read announcement state; starting fresh: %s", exc)
             self._announced = set()
