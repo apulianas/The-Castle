@@ -270,7 +270,7 @@ def _require_espn(bot: RavensBot) -> EspnClient:
 
 
 def transaction_announcement_key(transaction: Transaction) -> str:
-    return f"transaction:{transaction.date.isoformat()}:{transaction.transaction_id}"
+    return f"transaction:{transaction.transaction_id}"
 
 
 def inactive_announcement_key(report: InactiveReport) -> str:

@@ -111,8 +111,8 @@ def parse_schedule(payload: dict[str, Any]) -> list[Game]:
     return games
 
 
-def _transaction_date(payload: dict[str, Any]) -> date | None:
-    for key in ("date", "lastModified", "createDate"):
+def _date_from_keys(payload: dict[str, Any], keys: tuple[str, ...]) -> date | None:
+    for key in keys:
         raw = payload.get(key)
         if isinstance(raw, str):
             parsed = parse_datetime(raw)
@@ -125,6 +125,16 @@ def _transaction_date(payload: dict[str, Any]) -> date | None:
     return None
 
 
+def _transaction_date(payload: dict[str, Any]) -> date | None:
+    """Prefer immutable date fields; lastModified is a last resort because ESPN bumps it."""
+    return _date_from_keys(payload, ("date", "createDate", "lastModified"))
+
+
+def _stable_transaction_date(payload: dict[str, Any]) -> date | None:
+    """Only dates that never change, so they are safe to build an identity from."""
+    return _date_from_keys(payload, ("date", "createDate"))
+
+
 def _transaction_team_ids(payload: dict[str, Any]) -> set[str]:
     ids: set[str] = set()
     for key in ("team", "teams"):
@@ -135,6 +145,16 @@ def _transaction_team_ids(payload: dict[str, Any]) -> set[str]:
             if team_id:
                 ids.add(team_id)
     return ids
+
+
+def _transaction_id(payload: dict[str, Any], description: str) -> str:
+    """Identify a transaction the same way on every poll, so it is only announced once."""
+    raw_id = payload.get("id")
+    if raw_id is not None and str(raw_id).strip():
+        return str(raw_id).strip()
+    stable_date = _stable_transaction_date(payload)
+    stamp = stable_date.isoformat() if stable_date else "undated"
+    return f"{stamp}:{description}"
 
 
 def parse_transactions(payload: dict[str, Any], target_date: date) -> list[Transaction]:
@@ -158,7 +178,7 @@ def parse_transactions(payload: dict[str, Any], target_date: date) -> list[Trans
         )
         transactions.append(
             Transaction(
-                transaction_id=str(item.get("id") or f"{item_date}:{description}"),
+                transaction_id=_transaction_id(item, description),
                 date=item_date,
                 description=description,
                 type_text=type_text,
