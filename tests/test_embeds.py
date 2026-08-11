@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
+
+from ravens_bot.embeds import (
+    MAX_DESCRIPTION_CHARS,
+    MAX_EMBED_FIELDS,
+    MAX_FIELD_CHARS,
+    _limit_description,
+    _limit_field,
+    error_embed,
+    help_embed,
+    inactive_embeds,
+    next_game_embed,
+    schedule_embed,
+    standings_embed,
+    transaction_embeds,
+)
+from ravens_bot.models import (
+    Game,
+    GameTeam,
+    InactivePlayer,
+    InactiveReport,
+    PlayerRef,
+    Standing,
+    TeamRef,
+    Transaction,
+)
+
+
+EASTERN = ZoneInfo("America/New_York")
+
+RAVENS_TEAM = TeamRef(
+    team_id="33",
+    name="Baltimore Ravens",
+    abbreviation="BAL",
+    slug="bal",
+    logo="https://example.test/bal.png",
+)
+JETS_TEAM = TeamRef(
+    team_id="20",
+    name="New York Jets",
+    abbreviation="NYJ",
+    slug="nyj",
+    logo="https://example.test/nyj.png",
+)
+
+
+def build_game(event_id: str = "9") -> Game:
+    return Game(
+        event_id=event_id,
+        name="New York Jets at Baltimore Ravens",
+        short_name="NYJ @ BAL",
+        start_time=datetime(2025, 11, 23, 18, 0, tzinfo=timezone.utc),
+        status="Scheduled",
+        home=GameTeam(team=RAVENS_TEAM, is_home=True, record="6-5"),
+        away=GameTeam(team=JETS_TEAM, is_home=False, record="2-9"),
+        venue="M&T Bank Stadium",
+        location="Baltimore, MD",
+        broadcast="CBS",
+        week="Week 12",
+    )
+
+
+def build_transaction(
+    index: int = 0, players: tuple[PlayerRef, ...] = ()
+) -> Transaction:
+    return Transaction(
+        transaction_id=f"tx{index}",
+        date=date(2025, 11, 4),
+        description=f"Signed player {index} to the active roster.",
+        players=players,
+    )
+
+
+def field_names(embed) -> list[str]:
+    return [field.name for field in embed.fields]
+
+
+def test_limit_description_marks_where_it_cut() -> None:
+    text = "a" * (MAX_DESCRIPTION_CHARS + 50)
+
+    result = _limit_description(text)
+
+    assert len(result) == MAX_DESCRIPTION_CHARS
+    assert result.endswith("…")
+
+
+def test_limit_description_leaves_short_text_untouched() -> None:
+    assert _limit_description("short") == "short"
+
+
+def test_limit_field_respects_the_discord_field_budget() -> None:
+    result = _limit_field("b" * (MAX_FIELD_CHARS + 10))
+
+    assert len(result) == MAX_FIELD_CHARS
+    assert result.endswith("…")
+
+
+def test_transaction_embed_says_so_when_there_were_no_moves() -> None:
+    embed = transaction_embeds([], date(2025, 11, 4))[0]
+
+    assert embed.title == "Ravens transactions — November 4, 2025"
+    assert "No Baltimore Ravens roster transactions" in embed.description
+    assert embed.fields == []
+
+
+def test_transaction_embed_adds_one_field_per_move() -> None:
+    embed = transaction_embeds(
+        [build_transaction(0), build_transaction(1)], date(2025, 11, 4)
+    )[0]
+
+    assert len(embed.fields) == 2
+    assert embed.url is not None
+
+
+def test_solo_transaction_gets_a_full_size_headshot() -> None:
+    """A signing is about one person, so their photo carries the post."""
+    player = PlayerRef(name="Keondre Jackson", athlete_id="4878287")
+
+    embed = transaction_embeds(
+        [build_transaction(players=(player,))], date(2025, 11, 4)
+    )[0]
+
+    assert embed.image.url is not None
+    assert "4878287" in embed.image.url
+    assert embed.thumbnail.url is None
+
+
+def test_multi_player_move_uses_a_thumbnail_instead() -> None:
+    """One face would misrepresent a post covering several players."""
+    players = (
+        PlayerRef(name="Player One", athlete_id="1"),
+        PlayerRef(name="Player Two", athlete_id="2"),
+    )
+
+    embed = transaction_embeds(
+        [build_transaction(players=players)], date(2025, 11, 4)
+    )[0]
+
+    assert embed.image.url is None
+    assert embed.thumbnail.url is not None and "full%2F1.png" in embed.thumbnail.url
+
+
+def test_transaction_without_a_resolved_player_falls_back_to_the_logo() -> None:
+    embed = transaction_embeds([build_transaction()], date(2025, 11, 4))[0]
+
+    assert embed.image.url is None
+    assert embed.thumbnail.url is not None and "bal" in embed.thumbnail.url
+
+
+def test_transaction_embed_reports_how_many_moves_were_hidden() -> None:
+    """Discord caps an embed at 25 fields, so the count has to be stated."""
+    transactions = [build_transaction(index) for index in range(30)]
+
+    embed = transaction_embeds(transactions, date(2025, 8, 26))[0]
+
+    assert len(embed.fields) == MAX_EMBED_FIELDS
+    assert embed.footer.text.startswith("Showing 25 of 30 moves")
+
+
+def test_transaction_embed_footer_is_plain_when_nothing_is_hidden() -> None:
+    embed = transaction_embeds([build_transaction()], date(2025, 11, 4))[0]
+
+    assert embed.footer.text == "Data: ESPN"
+
+
+def test_transaction_field_names_stay_within_the_title_budget() -> None:
+    transaction = Transaction(
+        transaction_id="tx",
+        date=date(2025, 11, 4),
+        description="x" * 5000,
+    )
+
+    embed = transaction_embeds([transaction], date(2025, 11, 4))[0]
+
+    assert len(embed.fields[0].name) <= 256
+    assert len(embed.fields[0].value) <= MAX_FIELD_CHARS
+
+
+def test_standings_embed_lists_every_team_and_summarises_the_ravens() -> None:
+    standings = [
+        Standing(team=RAVENS_TEAM, record="12-5", rank=1, division_record="4-2"),
+        Standing(
+            team=TeamRef(team_id="23", name="Pittsburgh Steelers", abbreviation="PIT"),
+            record="10-7",
+            rank=2,
+        ),
+    ]
+
+    embed = standings_embed(standings)
+
+    assert "Baltimore Ravens" in embed.description
+    assert "Pittsburgh Steelers" in embed.description
+    assert field_names(embed) == ["BAL"]
+    assert embed.footer.text.startswith("Baltimore Ravens: 12-5")
+
+
+def test_standings_embed_handles_an_empty_division() -> None:
+    embed = standings_embed([])
+
+    assert "unavailable" in embed.description
+    assert embed.fields == []
+
+
+def test_next_game_embed_shows_kickoff_venue_and_records() -> None:
+    embed = next_game_embed(build_game(), EASTERN)
+
+    assert embed.title == "Baltimore Ravens vs New York Jets"
+    assert "CBS" in embed.description
+    assert "M&T Bank Stadium (Baltimore, MD)" in embed.description
+    assert "NYJ 2-9 • BAL 6-5" in embed.description
+    assert embed.url == "https://www.espn.com/nfl/game/_/gameId/9"
+
+
+def test_next_game_embed_uses_the_opponent_logo() -> None:
+    """The Ravens are in every post, so the opponent is the informative crest."""
+    embed = next_game_embed(build_game(), EASTERN)
+
+    assert embed.thumbnail.url == "https://example.test/nyj.png"
+
+
+def test_next_game_embed_handles_an_empty_schedule() -> None:
+    embed = next_game_embed(None, EASTERN)
+
+    assert embed.description == "No upcoming Ravens game found."
+    assert embed.thumbnail.url is not None
+
+
+def test_schedule_embed_adds_one_field_per_game() -> None:
+    embed = schedule_embed([build_game("1"), build_game("2")], EASTERN)
+
+    assert len(embed.fields) == 2
+    assert embed.fields[0].name == "Week 12 — Baltimore Ravens vs New York Jets"
+
+
+def test_schedule_embed_reports_the_window_it_searched() -> None:
+    embed = schedule_embed([], EASTERN, days=14)
+
+    assert embed.description == "No Ravens games scheduled in the next 14 days."
+
+
+def test_schedule_embed_reports_how_many_games_were_hidden() -> None:
+    games = [build_game(str(index)) for index in range(30)]
+
+    embed = schedule_embed(games, EASTERN)
+
+    assert len(embed.fields) == MAX_EMBED_FIELDS
+    assert embed.footer.text.startswith("Showing 25 of 30 games")
+
+
+def test_inactive_embed_groups_players_by_team() -> None:
+    report = InactiveReport(
+        game=build_game(),
+        players=[
+            InactivePlayer(
+                name="Raven One",
+                team="Baltimore Ravens",
+                reason="Healthy scratch",
+                position="WR",
+            ),
+            InactivePlayer(name="Raven Two", team="Baltimore Ravens"),
+            InactivePlayer(name="Jet One", team="New York Jets"),
+        ],
+    )
+
+    embed = inactive_embeds([report], date(2025, 11, 23), EASTERN)[0]
+
+    assert field_names(embed) == ["Baltimore Ravens (2)", "New York Jets (1)"]
+    assert "WR Raven One — Healthy scratch" in embed.fields[0].value
+
+
+def test_inactive_embed_explains_an_unpublished_list() -> None:
+    embed = inactive_embeds(
+        [InactiveReport(game=build_game(), players=[])], date(2025, 11, 23), EASTERN
+    )[0]
+
+    assert "has not published" in embed.fields[0].value
+
+
+def test_inactive_embeds_report_when_there_is_no_game() -> None:
+    embed = inactive_embeds([], date(2025, 11, 23), EASTERN)[0]
+
+    assert "No Baltimore Ravens game found" in embed.description
+
+
+def test_error_embed_is_visually_distinct() -> None:
+    embed = error_embed("ESPN did not respond.")
+
+    assert embed.description == "ESPN did not respond."
+    assert embed.color.value == 0xB00020
+
+
+def test_help_embed_documents_every_command() -> None:
+    names = {field.name.split()[0] for field in help_embed().fields}
+
+    assert names == {
+        "/transactions",
+        "/inactives",
+        "/standings",
+        "/nextgame",
+        "/schedule",
+        "/help",
+    }
