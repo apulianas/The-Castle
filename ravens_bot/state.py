@@ -21,6 +21,18 @@ def migrate_key(key: str) -> str:
     return _LEGACY_DATED_TRANSACTION_KEY.sub("transaction:", key, count=1)
 
 
+def _load_keys(raw: str) -> set[str]:
+    """Both spellings of a stored key, since one migration now runs backwards.
+
+    ESPN's NFL transactions carry no id, so the fallback identity is
+    "date:description" and a current key looks exactly like the legacy dated
+    form the migration strips. Rewriting it on load would leave nothing matching
+    the key the bot computes, and every move would be announced again after a
+    restart. Keeping both means old keys still suppress and current ones match.
+    """
+    return {raw, migrate_key(raw)}
+
+
 class AnnouncementState:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
@@ -33,7 +45,9 @@ class AnnouncementState:
                 return
             data = json.loads(self._path.read_text(encoding="utf-8"))
             raw = data.get("announced", []) if isinstance(data, dict) else []
-            self._announced = {migrate_key(str(item)) for item in raw}
+            self._announced = {
+                key for item in raw for key in _load_keys(str(item))
+            }
         except (OSError, json.JSONDecodeError) as exc:
             LOGGER.warning("Could not read announcement state; starting fresh: %s", exc)
             self._announced = set()

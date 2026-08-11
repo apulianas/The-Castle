@@ -100,9 +100,10 @@ class RavensBot(commands.Bot):
         for transaction in transactions:
             key = transaction_announcement_key(transaction)
             embeds = transaction_embeds([transaction], target_date)
+            content = transaction.headline
             for target in targets:
                 if self.announcement_state.unseen(channel_key(key, target.key_id)):
-                    await self._announce(target, key, "Ravens roster transaction", embeds)
+                    await self._announce(target, key, f"Ravens roster move: {content}", embeds)
 
     async def _post_new_inactives(
         self,
@@ -240,7 +241,7 @@ def _schedule_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(embed=schedule_embed(games, bot.config.time_zone))
+        await interaction.followup.send(embed=schedule_embed(games, bot.config.time_zone, days))
 
     return schedule
 
