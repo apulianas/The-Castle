@@ -4,10 +4,12 @@ from datetime import date
 from zoneinfo import ZoneInfo
 
 from .espn_urls import link
+from .fourthdown import FourthDownAdvice, Option
 from .models import (
     RAVENS_NAME,
     SNAP_UNITS,
     Game,
+    GameSituation,
     InactivePlayer,
     PlayerSnaps,
     PlayerSnapTotals,
@@ -339,4 +341,84 @@ def format_unknown_snap_player(query: str, suggestions: list[str]) -> str:
     if suggestions:
         names = ", ".join(suggestions)
         return f"{text} Did you mean: {names}?"
+    return text
+
+
+def format_expected_points(value: float) -> str:
+    """Expected points to one decimal, with the sign always stated."""
+    if value == float("-inf"):
+        return NO_STAT
+    rounded = round(value, 1) + 0.0
+    return f"+{rounded:.1f}" if rounded > 0 else f"{rounded:.1f}"
+
+
+def format_fourth_down_option(option: Option, best: bool = False) -> str:
+    """One option's worth and why, e.g. "+0.9 expected points • 68% convert"."""
+    parts = [f"{format_expected_points(option.expected_points)} expected points"]
+    if option.detail:
+        parts.append(option.detail)
+    line = " • ".join(parts)
+    return f"**{line}**" if best else line
+
+
+def format_fourth_down_matchup(game: Game) -> str:
+    """The teams, in the order ESPN lists them, for any game not just Ravens."""
+    away, home = game.away, game.home
+    if away is None or home is None:
+        return game.name
+    return f"{away.team.name} at {home.team.name}"
+
+
+def format_fourth_down_situation(game: Game, situation: GameSituation) -> str:
+    lines = [situation.summary, format_fourth_down_matchup(game)]
+    scores = [
+        f"{side.team.short_name} {side.score}"
+        for side in game.teams
+        if side.score is not None
+    ]
+    if scores:
+        lines.append(" – ".join(scores))
+    return "\n".join(lines)
+
+
+def format_fourth_down_call(advice: FourthDownAdvice) -> str:
+    """The headline call, hedged when the top two options are a coin flip."""
+    best = advice.best
+    if best is None:
+        return "No recommendation"
+    if advice.is_close:
+        runner_up = advice.options[1]
+        return f"Too close to call: {best.label} or {runner_up.label.lower()}"
+    return best.label
+
+
+def format_fourth_down(game: Game, advice: FourthDownAdvice) -> str:
+    """The whole recommendation as plain text, for a log line or a test."""
+    lines = [
+        format_fourth_down_call(advice),
+        format_fourth_down_situation(game, advice.situation),
+    ]
+    for index, option in enumerate(advice.options):
+        lines.append(
+            f"{option.label}: {format_fourth_down_option(option, best=index == 0)}"
+        )
+    lines.extend(advice.caveats)
+    return "\n".join(lines)
+
+
+def format_no_live_game() -> str:
+    return (
+        "No NFL game is being played right now. Ask again during a game, or name "
+        "a team that is playing."
+    )
+
+
+def format_not_fourth_down(game: Game, reason: str) -> str:
+    return f"{format_fourth_down_matchup(game)}: {reason}"
+
+
+def format_unknown_team(query: str, suggestions: list[str]) -> str:
+    text = f"No live game found for “{query}”."
+    if suggestions:
+        return f"{text} Playing right now: {', '.join(suggestions)}."
     return text

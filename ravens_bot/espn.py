@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable, Iterable
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,6 +18,7 @@ from .models import (
     RAVENS_SLUG,
     RAVENS_TEAM_ID,
     Game,
+    GameSituation,
     GameTeam,
     InactivePlayer,
     InactiveReport,
@@ -37,6 +39,9 @@ CORE_BASE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl"
 ESPN_TIME_ZONE = ZoneInfo("America/Los_Angeles")
 
 STANDINGS_TTL_SECONDS = 300.0
+# A live down and distance is stale within a play, so this cache exists only to
+# collapse a burst of commands, not to spare ESPN a request a minute.
+LIVE_TTL_SECONDS = 12.0
 SCHEDULE_TTL_SECONDS = 180.0
 ROSTER_TTL_SECONDS = 3600.0
 
@@ -296,6 +301,109 @@ def _week_number(event: dict[str, Any]) -> int | None:
     return _as_int(_as_dict(event.get("week")).get("number"))
 
 
+def _situation_teams(
+    competition: dict[str, Any], possession_id: str | None
+) -> tuple[TeamRef | None, TeamRef | None, int | None]:
+    """The team with the ball, the team defending, and the score difference."""
+    offense = defense = None
+    offense_score = defense_score = None
+    for competitor in _as_list(competition.get("competitors")):
+        data = _as_dict(competitor)
+        team = team_ref(data.get("team"))
+        score = _score(data.get("score"))
+        if possession_id is not None and _team_id(data.get("team")) == possession_id:
+            offense, offense_score = team, score
+        else:
+            defense, defense_score = team, score
+    differential = None
+    if offense_score is not None and defense_score is not None:
+        differential = offense_score - defense_score
+    return offense, defense, differential
+
+
+def _yards_to_goal_from_spot(spot: str, offense: TeamRef) -> int | None:
+    """Read "BAL 45" as a distance to the end zone the offence is attacking.
+
+    The marker alone is ambiguous — every yard line but the fifty exists twice —
+    so the abbreviation in front of it is what says which half of the field the
+    ball is on. On the offence's own side the distance is the complement.
+    """
+    match = re.match(r"\s*([A-Za-z]{2,4})\s+(\d{1,2})\s*$", spot)
+    if match is None:
+        return None
+    marker = int(match.group(2))
+    if not 1 <= marker <= 50:
+        return None
+    side = match.group(1).upper()
+    own = {
+        value.upper()
+        for value in (offense.abbreviation, offense.slug)
+        if value
+    }
+    if marker == 50:
+        return 50
+    return 100 - marker if side in own else marker
+
+
+def _situation_yards_to_goal(
+    situation: dict[str, Any], offense: TeamRef
+) -> tuple[int | None, str | None]:
+    """Yards to the goal line, plus the spot as ESPN words it.
+
+    ESPN publishes the spot three ways and they do not always all appear:
+    ``yardsToEndzone`` says outright what is wanted, ``possessionText`` names the
+    half of the field, and ``yardLine`` is counted from the offence's own goal
+    line. They are read in that order of directness, and a ``yardLine`` that
+    contradicts the named spot is discarded rather than averaged in.
+    """
+    spot = _text(situation.get("possessionText"))
+    from_spot = _yards_to_goal_from_spot(spot, offense) if spot else None
+
+    direct = _as_int(situation.get("yardsToEndzone"))
+    if direct is not None and 0 <= direct <= 100:
+        return direct, spot
+
+    if from_spot is not None:
+        return from_spot, spot
+
+    yard_line = _as_int(situation.get("yardLine"))
+    if yard_line is not None and 0 <= yard_line <= 100:
+        return 100 - yard_line, spot
+    return None, spot
+
+
+def _parse_situation(
+    competition: dict[str, Any], state: str
+) -> GameSituation | None:
+    """The live down and distance, or None when the game is not being played."""
+    if state != "in":
+        return None
+    situation = _as_dict(competition.get("situation"))
+    if not situation:
+        return None
+    possession_id = situation.get("possession")
+    possession_id = str(possession_id) if possession_id is not None else None
+    offense, defense, differential = _situation_teams(competition, possession_id)
+    if offense is None:
+        return None
+    yards_to_goal, spot = _situation_yards_to_goal(situation, offense)
+    status = _as_dict(competition.get("status"))
+    return GameSituation(
+        possession=offense,
+        defense=defense,
+        down=_as_int(situation.get("down")),
+        distance=_as_int(situation.get("distance")),
+        yards_to_goal=yards_to_goal,
+        period=_as_int(status.get("period")),
+        clock=_text(status.get("displayClock")),
+        score_differential=differential,
+        is_red_zone=bool(situation.get("isRedZone")),
+        spot=spot,
+        down_distance_text=_text(situation.get("downDistanceText"))
+        or _text(situation.get("shortDownDistanceText")),
+    )
+
+
 def _game_from_event(event: dict[str, Any]) -> Game:
     competitions = _as_list(event.get("competitions"))
     competition = _as_dict(competitions[0]) if competitions else {}
@@ -313,8 +421,8 @@ def _game_from_event(event: dict[str, Any]) -> Game:
 
     return Game(
         event_id=str(event.get("id", "")),
-        name=str(event.get("name") or event.get("shortName") or "Ravens game"),
-        short_name=str(event.get("shortName") or event.get("name") or "BAL"),
+        name=str(event.get("name") or event.get("shortName") or "NFL game"),
+        short_name=str(event.get("shortName") or event.get("name") or "NFL"),
         start_time=parse_datetime(event.get("date") or competition.get("date")),
         status=_status_text(status),
         venue=_display_name(venue) or _text(venue.get("fullName")),
@@ -328,6 +436,7 @@ def _game_from_event(event: dict[str, Any]) -> Game:
         season=_season_year(event),
         season_type=_season_type(event),
         week_number=_week_number(event),
+        situation=_parse_situation(competition, state),
     )
 
 
@@ -340,8 +449,9 @@ def event_has_ravens(event: dict[str, Any]) -> bool:
     return False
 
 
-def parse_schedule(payload: dict[str, Any]) -> list[Game]:
-    """Ravens games from a scoreboard or team schedule payload."""
+def _parse_events(
+    payload: dict[str, Any], keep: Callable[[dict[str, Any]], bool]
+) -> list[Game]:
     # A scoreboard states the season and week once for the whole payload, while
     # a team schedule states them per event, so payload level values are used
     # only as a fallback.
@@ -351,10 +461,108 @@ def parse_schedule(payload: dict[str, Any]) -> list[Game]:
     games = []
     for event in _as_list(payload.get("events")):
         event_data = _as_dict(event)
-        if event_has_ravens(event_data):
+        if keep(event_data):
             games.append(_game_from_event({**defaults, **event_data}))
     games.sort(key=lambda game: (game.start_time is None, game.start_time or datetime.min))
     return games
+
+
+def parse_schedule(payload: dict[str, Any]) -> list[Game]:
+    """Ravens games from a scoreboard or team schedule payload."""
+    return _parse_events(payload, event_has_ravens)
+
+
+def parse_scoreboard(payload: dict[str, Any]) -> list[Game]:
+    """Every game in a scoreboard payload, whoever is playing.
+
+    The insight commands answer for any team, so unlike the Ravens-only feeds
+    this keeps the whole slate and leaves filtering to the caller.
+    """
+    return _parse_events(payload, lambda event: True)
+
+
+def _team_keys(team: TeamRef) -> set[str]:
+    """Every spelling of a team a person might type."""
+    keys = {
+        normalize_name(value)
+        for value in (team.name, team.abbreviation, team.slug, team.short_name)
+        if value
+    }
+    # "Ravens" should find Baltimore without spelling out the city.
+    name = normalize_name(team.name)
+    if " " in name:
+        keys.add(name.rsplit(" ", 1)[-1])
+    return {key for key in keys if key}
+
+
+def team_matches(team: TeamRef, query: str) -> bool:
+    wanted = normalize_name(query)
+    return bool(wanted) and wanted in _team_keys(team)
+
+
+def match_team_games(games: Iterable[Game], query: str) -> list[Game]:
+    """Games featuring a team named by abbreviation, city, or nickname."""
+    wanted = normalize_name(query)
+    if not wanted:
+        return []
+    exact = [
+        game
+        for game in games
+        if any(team_matches(side.team, query) for side in game.teams)
+    ]
+    if exact:
+        return exact
+    return [
+        game
+        for game in games
+        if any(
+            any(wanted in key for key in _team_keys(side.team))
+            for side in game.teams
+        )
+    ]
+
+
+def team_names(games: Iterable[Game]) -> list[str]:
+    """The teams on offer, for a search that found nothing."""
+    names: list[str] = []
+    for game in games:
+        for side in game.teams:
+            if side.team.name not in names:
+                names.append(side.team.name)
+    return sorted(names)
+
+
+def select_insight_game(
+    games: Iterable[Game],
+    preferred_team: str | None = None,
+    now: datetime | None = None,
+) -> Game | None:
+    """The live game a live question is most likely about.
+
+    Discord tells the bot nothing about where a person is sitting, and ESPN
+    publishes no regional broadcast map, so "the game on near me" is answered by
+    a stated order of preference instead of a guess: the Ravens, then whichever
+    second team the deployment configured, then whatever kicked off most
+    recently, which on a Sunday afternoon is the game still being played.
+    """
+    live = [game for game in games if game.in_progress]
+    if not live:
+        return None
+    ravens = next((game for game in live if any(side.team.is_ravens for side in game.teams)), None)
+    if ravens is not None:
+        return ravens
+    if preferred_team:
+        preferred = match_team_games(live, preferred_team)
+        if preferred:
+            return preferred[0]
+    moment = now or datetime.now(tz=ESPN_TIME_ZONE)
+
+    def started_ago(game: Game) -> tuple[int, float]:
+        if game.start_time is None:
+            return (1, 0.0)
+        return (0, abs((moment - game.start_time).total_seconds()))
+
+    return min(live, key=started_ago)
 
 
 def _date_from_keys(payload: dict[str, Any], keys: tuple[str, ...]) -> date | None:
@@ -804,6 +1012,9 @@ class EspnClient:
         self._roster_cache: AsyncTtlCache[str, dict[str, PlayerRef]] = AsyncTtlCache(
             ROSTER_TTL_SECONDS
         )
+        self._live_cache: AsyncTtlCache[str, list[Game]] = AsyncTtlCache(
+            LIVE_TTL_SECONDS, max_entries=4
+        )
 
     async def _json(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -915,6 +1126,21 @@ class EspnClient:
             summary = await self._json(f"{SITE_BASE}/summary", {"event": game.event_id})
             reports.append(parse_inactive_report(summary, game))
         return reports
+
+    async def fetch_live_games(self) -> list[Game]:
+        """Every NFL game being played right now, league wide.
+
+        The default scoreboard is the current slate, which is what a live
+        question is about; anything not in progress is dropped here so callers
+        never have to re-check a status.
+        """
+
+        async def load() -> list[Game]:
+            payload = await self._json(f"{SITE_BASE}/scoreboard")
+            return [game for game in parse_scoreboard(payload) if game.in_progress]
+
+        games = await self._live_cache.get_or_fetch("live", load)
+        return list(games)
 
     async def fetch_standings(self) -> list[Standing]:
         async def load() -> list[Standing]:
