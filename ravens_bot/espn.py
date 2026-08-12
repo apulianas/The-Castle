@@ -844,23 +844,22 @@ def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
             if name.lower() not in BOXSCORE_CATEGORIES:
                 continue
             labels = [
-                str(label).strip()
-                for label in _as_list(category_data.get("labels"))
-                if str(label).strip()
+                str(label).strip() for label in _as_list(category_data.get("labels"))
             ]
             for athlete_entry in _as_list(category_data.get("athletes")):
                 athlete_data = _as_dict(athlete_entry)
-                player = _player_ref(athlete_entry.get("athlete") or athlete_entry)
-                stats = [
-                    str(value).strip()
-                    for value in _as_list(athlete_data.get("stats"))
+                player = _player_ref(athlete_data.get("athlete") or athlete_data)
+                # A value keeps its own column's label, so a blank in the middle
+                # of the row cannot shift every later number onto the wrong one.
+                pairs = [
+                    (str(value).strip(), labels[index] if index < len(labels) else "")
+                    for index, value in enumerate(_as_list(athlete_data.get("stats")))
                     if str(value).strip()
                 ]
-                if player is None or not stats:
+                if player is None or not pairs:
                     continue
                 detail = ", ".join(
-                    f"{value} {labels[index]}" if index < len(labels) else value
-                    for index, value in enumerate(stats)
+                    f"{value} {label}" if label else value for value, label in pairs
                 )
                 lines.append(
                     PlayerGameStats(

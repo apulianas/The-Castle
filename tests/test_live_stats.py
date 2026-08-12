@@ -291,6 +291,35 @@ def test_parse_leaders_falls_back_to_the_player_box_score() -> None:
     assert leaders[0].detail == "17 CAR, 94 YDS, 1 TD"
 
 
+def test_parse_leaders_keeps_a_blank_column_from_shifting_labels() -> None:
+    payload = {
+        "boxscore": {
+            "players": [
+                {
+                    "team": {"id": "33", "abbreviation": "BAL"},
+                    "statistics": [
+                        {
+                            "name": "passing",
+                            "labels": ["C/ATT", "YDS", "TD", "INT", "SACKS", "RTG"],
+                            "athletes": [
+                                {
+                                    "athlete": {"displayName": "Lamar Jackson"},
+                                    "stats": ["18/24", "212", "2", "", "0-0", "130.2"],
+                                },
+                                "not a dictionary",
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+    leaders = parse_leaders(payload)
+
+    assert leaders[0].detail == "18/24 C/ATT, 212 YDS, 2 TD, 0-0 SACKS, 130.2 RTG"
+
+
 def test_parse_leaders_lists_the_ravens_first() -> None:
     payload = {
         "leaders": [
