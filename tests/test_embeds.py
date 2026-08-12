@@ -308,6 +308,7 @@ def test_help_embed_documents_every_command() -> None:
         "/inactives",
         "/standings",
         "/nextgame",
+        "/live",
         "/schedule",
         "/snapcounts",
         "/help",

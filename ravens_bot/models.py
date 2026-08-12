@@ -300,3 +300,101 @@ class PlayerSnapTotals:
     @property
     def primary_unit(self) -> str:
         return max(SNAP_UNITS, key=lambda unit: (self.snaps(unit), SNAP_UNITS.index(unit) * -1))
+
+
+@dataclass(frozen=True)
+class GameSituation:
+    """Where a game stands right now: clock, possession, and down and distance.
+
+    Every field is optional because ESPN publishes this block only while a game
+    is being played, and drops parts of it between drives and at a break.
+    """
+
+    clock: str | None = None
+    period: int | None = None
+    possession: TeamRef | None = None
+    down_distance: str | None = None
+    field_position: str | None = None
+    is_red_zone: bool = False
+    last_play: str | None = None
+
+    @property
+    def has_detail(self) -> bool:
+        return any(
+            (
+                self.clock,
+                self.period,
+                self.possession,
+                self.down_distance,
+                self.last_play,
+            )
+        )
+
+
+@dataclass(frozen=True)
+class TeamGameStats:
+    """One team's box score totals, kept as ESPN's own label and value pairs."""
+
+    team: TeamRef
+    stats: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def is_ravens(self) -> bool:
+        return self.team.is_ravens
+
+    def value(self, label: str) -> str | None:
+        wanted = label.strip().lower()
+        for name, value in self.stats:
+            if name.strip().lower() == wanted:
+                return value
+        return None
+
+
+@dataclass(frozen=True)
+class PlayerGameStats:
+    """One player's line in one statistical category, e.g. passing."""
+
+    player: PlayerRef
+    category: str
+    detail: str
+    team: TeamRef | None = None
+
+    @property
+    def is_ravens(self) -> bool:
+        return self.team is not None and self.team.is_ravens
+
+
+@dataclass(frozen=True)
+class LiveGameReport:
+    """A snapshot of one game: score, situation, team totals, and leaders."""
+
+    game: Game
+    situation: GameSituation | None = None
+    teams: tuple[TeamGameStats, ...] = ()
+    leaders: tuple[PlayerGameStats, ...] = ()
+
+    @property
+    def is_live(self) -> bool:
+        return self.game.state == "in"
+
+    @property
+    def ravens_stats(self) -> TeamGameStats | None:
+        return next((entry for entry in self.teams if entry.is_ravens), None)
+
+    @property
+    def opponent_stats(self) -> TeamGameStats | None:
+        return next((entry for entry in self.teams if not entry.is_ravens), None)
+
+    @property
+    def stat_labels(self) -> tuple[str, ...]:
+        """Every label either team reported, in the order ESPN listed them."""
+        labels: list[str] = []
+        for entry in self.teams:
+            for label, _ in entry.stats:
+                if label not in labels:
+                    labels.append(label)
+        return tuple(labels)
+
+    @property
+    def has_details(self) -> bool:
+        return bool(self.teams or self.leaders)

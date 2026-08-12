@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,11 +18,15 @@ from .models import (
     RAVENS_SLUG,
     RAVENS_TEAM_ID,
     Game,
+    GameSituation,
     GameTeam,
     InactivePlayer,
     InactiveReport,
+    LiveGameReport,
+    PlayerGameStats,
     PlayerRef,
     Standing,
+    TeamGameStats,
     TeamRef,
     Transaction,
 )
@@ -39,6 +44,12 @@ ESPN_TIME_ZONE = ZoneInfo("America/Los_Angeles")
 STANDINGS_TTL_SECONDS = 300.0
 SCHEDULE_TTL_SECONDS = 180.0
 ROSTER_TTL_SECONDS = 3600.0
+# A live game moves play by play, so this cache exists only to absorb a burst of
+# commands rather than to spare ESPN the traffic.
+LIVE_STATS_TTL_SECONDS = 45.0
+
+# Box score groups worth a leader line when ESPN omits its own leaders block.
+BOXSCORE_CATEGORIES = ("passing", "rushing", "receiving")
 
 # Position codes ESPN uses inside transaction prose, e.g. "Waived TE Jordan Murray."
 # Descriptions also pluralize them for a group, as in "Waived CBs A and B".
@@ -214,12 +225,15 @@ def _score(value: Any) -> int | None:
 
 
 def _record_summary(competitor: dict[str, Any]) -> str | None:
-    for item in _as_list(competitor.get("records")):
-        entry = _as_dict(item)
-        if str(entry.get("type") or "").lower() in {"total", "overall"}:
-            summary = entry.get("summary")
-            if isinstance(summary, str) and summary.strip():
-                return summary.strip()
+    # A scoreboard competitor carries "records"; the summary header spells the
+    # same list "record", so both are read.
+    for key in ("records", "record"):
+        for item in _as_list(competitor.get(key)):
+            entry = _as_dict(item)
+            if str(entry.get("type") or "").lower() in {"total", "overall"}:
+                summary = entry.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    return summary.strip()
     return None
 
 
@@ -664,6 +678,226 @@ def parse_inactive_report(summary: dict[str, Any], game: Game) -> InactiveReport
     return InactiveReport(game=game, players=tuple(unique))
 
 
+def _header_competition(summary: dict[str, Any]) -> dict[str, Any]:
+    header = _as_dict(summary.get("header"))
+    competitions = _as_list(header.get("competitions"))
+    return _as_dict(competitions[0]) if competitions else {}
+
+
+def _refresh_game(game: Game, summary: dict[str, Any]) -> Game:
+    """Re-read score and status from a summary, which leads the scoreboard.
+
+    The scoreboard is cached for minutes, which is a lifetime during a game, so
+    the numbers shown come from the summary whenever it carries them.
+    """
+    competition = _header_competition(summary)
+    if not competition:
+        return game
+
+    updates: dict[str, Any] = {}
+    status = competition.get("status") or _as_dict(summary.get("header")).get("status")
+    if _as_dict(status):
+        state, completed = _status_state(status)
+        updates.update(status=_status_text(status), state=state, completed=completed)
+
+    for competitor in _as_list(competition.get("competitors")):
+        side = _game_team(competitor)
+        existing = game.home if side.is_home else game.away
+        if existing is not None:
+            side = replace(
+                existing,
+                score=side.score if side.score is not None else existing.score,
+                is_winner=side.is_winner or existing.is_winner,
+                record=side.record or existing.record,
+            )
+        updates["home" if side.is_home else "away"] = side
+
+    return replace(game, **updates) if updates else game
+
+
+def _possession_team(game: Game, value: Any) -> TeamRef | None:
+    """ESPN names the team with the ball by id, so it is matched to the game."""
+    team_identifier = _team_id(value) if isinstance(value, dict) else _text(value)
+    if not team_identifier:
+        return None
+    for side in (game.home, game.away):
+        if side is not None and side.team.team_id == str(team_identifier):
+            return side.team
+    return None
+
+
+def parse_situation(summary: dict[str, Any], game: Game) -> GameSituation | None:
+    """Clock, quarter, possession, and down and distance, when published."""
+    competition = _header_competition(summary)
+    status = _as_dict(competition.get("status"))
+    situation = _as_dict(competition.get("situation")) or _as_dict(
+        summary.get("situation")
+    )
+    if not situation:
+        situation = _as_dict(_as_dict(summary.get("drives")).get("current"))
+
+    down_distance = _text(situation.get("downDistanceText")) or _text(
+        situation.get("shortDownDistanceText")
+    )
+    last_play = _text(_as_dict(situation.get("lastPlay")).get("text")) or _text(
+        situation.get("lastPlay")
+    )
+    result = GameSituation(
+        clock=_text(status.get("displayClock")),
+        period=_as_int(status.get("period")),
+        possession=_possession_team(game, situation.get("possession")),
+        down_distance=down_distance,
+        field_position=_text(situation.get("possessionText")),
+        is_red_zone=bool(situation.get("isRedZone")),
+        last_play=last_play,
+    )
+    return result if result.has_detail else None
+
+
+def _team_stat_pairs(entry: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in _as_list(entry.get("statistics")):
+        stat = _as_dict(raw)
+        label = _text(stat.get("label")) or _text(stat.get("name"))
+        value = _text(stat.get("displayValue"))
+        if value is None and stat.get("value") is not None:
+            value = str(stat.get("value"))
+        if not label or value is None or label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        pairs.append((label, value))
+    return tuple(pairs)
+
+
+def parse_team_stats(summary: dict[str, Any]) -> tuple[TeamGameStats, ...]:
+    """Per-team box score totals, away side first as ESPN orders them."""
+    boxscore = _as_dict(summary.get("boxscore"))
+    teams: list[TeamGameStats] = []
+    for raw in _as_list(boxscore.get("teams")):
+        entry = _as_dict(raw)
+        stats = _team_stat_pairs(entry)
+        if not stats:
+            continue
+        teams.append(TeamGameStats(team=team_ref(entry.get("team")), stats=stats))
+    return tuple(teams)
+
+
+def _player_ref(value: Any) -> PlayerRef | None:
+    athlete = _as_dict(value)
+    name = _display_name(athlete)
+    if not name:
+        return None
+    return PlayerRef(
+        name=name,
+        athlete_id=_athlete_id(athlete),
+        position=_position_text(athlete.get("position")),
+        headshot=_text(_as_dict(athlete.get("headshot")).get("href"))
+        or _text(athlete.get("headshot")),
+    )
+
+
+def _leaders_from_block(
+    block: dict[str, Any], team: TeamRef | None
+) -> list[PlayerGameStats]:
+    lines: list[PlayerGameStats] = []
+    for raw in _as_list(block.get("leaders")):
+        category = _as_dict(raw)
+        label = (
+            _text(category.get("shortDisplayName"))
+            or _text(category.get("displayName"))
+            or _text(category.get("name"))
+        )
+        for item in _as_list(category.get("leaders")):
+            leader = _as_dict(item)
+            player = _player_ref(leader.get("athlete"))
+            detail = _text(leader.get("displayValue"))
+            if player is None or not detail or not label:
+                continue
+            lines.append(
+                PlayerGameStats(
+                    player=player,
+                    category=label,
+                    detail=detail,
+                    team=team_ref(leader.get("team")) if leader.get("team") else team,
+                )
+            )
+            # One name per category keeps a live post readable.
+            break
+    return lines
+
+
+def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
+    """Top line per category from the player box score.
+
+    ESPN drops the `leaders` block on some games, but the box score carries the
+    same numbers as labelled columns, with the leading player listed first.
+    """
+    boxscore = _as_dict(summary.get("boxscore"))
+    lines: list[PlayerGameStats] = []
+    for raw in _as_list(boxscore.get("players")):
+        entry = _as_dict(raw)
+        team = team_ref(entry.get("team"))
+        for group in _as_list(entry.get("statistics")):
+            category_data = _as_dict(group)
+            name = _text(category_data.get("name")) or ""
+            if name.lower() not in BOXSCORE_CATEGORIES:
+                continue
+            labels = [
+                str(label).strip()
+                for label in _as_list(category_data.get("labels"))
+                if str(label).strip()
+            ]
+            for athlete_entry in _as_list(category_data.get("athletes")):
+                athlete_data = _as_dict(athlete_entry)
+                player = _player_ref(athlete_entry.get("athlete") or athlete_entry)
+                stats = [
+                    str(value).strip()
+                    for value in _as_list(athlete_data.get("stats"))
+                    if str(value).strip()
+                ]
+                if player is None or not stats:
+                    continue
+                detail = ", ".join(
+                    f"{value} {labels[index]}" if index < len(labels) else value
+                    for index, value in enumerate(stats)
+                )
+                lines.append(
+                    PlayerGameStats(
+                        player=player,
+                        category=name.capitalize(),
+                        detail=detail,
+                        team=team,
+                    )
+                )
+                break
+    return lines
+
+
+def parse_leaders(summary: dict[str, Any]) -> tuple[PlayerGameStats, ...]:
+    """A leading player per category, Ravens first."""
+    lines: list[PlayerGameStats] = []
+    for raw in _as_list(summary.get("leaders")):
+        block = _as_dict(raw)
+        team = team_ref(block.get("team")) if block.get("team") else None
+        lines.extend(_leaders_from_block(block, team))
+    if not lines:
+        lines = _leaders_from_boxscore(summary)
+    lines.sort(key=lambda line: not line.is_ravens)
+    return tuple(lines)
+
+
+def parse_live_game(summary: dict[str, Any], game: Game) -> LiveGameReport:
+    """A game snapshot, degrading to score and clock when ESPN publishes no more."""
+    refreshed = _refresh_game(game, summary)
+    return LiveGameReport(
+        game=refreshed,
+        situation=parse_situation(summary, refreshed),
+        teams=parse_team_stats(summary),
+        leaders=parse_leaders(summary),
+    )
+
+
 def _stat_values(entry: dict[str, Any]) -> dict[str, Any]:
     """Flatten an entry's stats into name/type keyed display values."""
     values: dict[str, Any] = {}
@@ -804,6 +1038,9 @@ class EspnClient:
         self._roster_cache: AsyncTtlCache[str, dict[str, PlayerRef]] = AsyncTtlCache(
             ROSTER_TTL_SECONDS
         )
+        self._summary_cache: AsyncTtlCache[str, dict[str, Any]] = AsyncTtlCache(
+            LIVE_STATS_TTL_SECONDS
+        )
 
     async def _json(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -915,6 +1152,33 @@ class EspnClient:
             summary = await self._json(f"{SITE_BASE}/summary", {"event": game.event_id})
             reports.append(parse_inactive_report(summary, game))
         return reports
+
+    async def fetch_game_summary(self, event_id: str) -> dict[str, Any]:
+        async def load() -> dict[str, Any]:
+            return await self._json(f"{SITE_BASE}/summary", {"event": event_id})
+
+        return await self._summary_cache.get_or_fetch(event_id, load)
+
+    async def fetch_game_stats(self, game: Game) -> LiveGameReport:
+        """A score, situation, and stats snapshot for one game."""
+        summary = await self.fetch_game_summary(game.event_id)
+        return parse_live_game(summary, game)
+
+    async def fetch_live_game(self, today: date) -> LiveGameReport | None:
+        """Today's Ravens game, preferring one in progress over one already final.
+
+        A double header is impossible, but a scoreboard query for a date can
+        still return a game that has finished and one that has not started when
+        the date rolls over mid-evening, so an in-progress game wins.
+        """
+        games = await self.fetch_schedule(DateWindow(today, today))
+        if not games:
+            return None
+        game = next(
+            (item for item in games if item.state == "in"),
+            next((item for item in games if item.completed), games[0]),
+        )
+        return await self.fetch_game_stats(game)
 
     async def fetch_standings(self) -> list[Standing]:
         async def load() -> list[Standing]:
