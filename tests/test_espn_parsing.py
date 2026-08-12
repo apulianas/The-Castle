@@ -519,3 +519,43 @@ def test_division_rank_is_the_standings_order_not_the_playoff_seed() -> None:
 
     assert [item.rank for item in standings] == [1, 2]
     assert [item.playoff_seed for item in standings] == [3, 6]
+
+
+def test_parse_schedule_reads_season_metadata_from_the_event() -> None:
+    payload = {
+        "events": [
+            {
+                "id": "3",
+                "name": "Baltimore Ravens at Buffalo Bills",
+                "season": {"year": 2025, "type": 3},
+                "week": {"number": 2},
+                "competitions": [{"competitors": [{"team": {"id": "33"}}]}],
+            }
+        ]
+    }
+
+    game = parse_schedule(payload)[0]
+
+    assert game.season == 2025
+    assert game.season_type == 3
+    assert game.week_number == 2
+
+
+def test_parse_schedule_falls_back_to_payload_season_and_week() -> None:
+    payload = {
+        "season": {"year": 2024, "type": 2},
+        "week": {"number": 7},
+        "events": [
+            {
+                "id": "4",
+                "name": "Baltimore Ravens at Tampa Bay Buccaneers",
+                "competitions": [{"competitors": [{"team": {"id": "33"}}]}],
+            }
+        ],
+    }
+
+    game = parse_schedule(payload)[0]
+
+    assert game.season == 2024
+    assert game.season_type == 2
+    assert game.week_number == 7

@@ -13,12 +13,20 @@ from ravens_bot.formatting import (
     format_inactive_player,
     format_long_date,
     format_matchup,
+    format_no_snap_counts,
+    format_no_snap_games,
+    format_player_snap_totals,
+    format_player_snaps,
     format_ravens_standing,
     format_records,
+    format_snap_breakdown,
+    format_snap_period,
+    format_snap_share,
     format_score,
     format_standings_detail,
     format_standings_row,
     format_transaction,
+    format_unknown_snap_player,
     format_win_percent,
     ordinal,
 )
@@ -27,6 +35,9 @@ from ravens_bot.models import (
     GameTeam,
     InactivePlayer,
     PlayerRef,
+    PlayerSnaps,
+    PlayerSnapTotals,
+    SnapCountReport,
     Standing,
     TeamRef,
     Transaction,
@@ -286,3 +297,103 @@ def test_ordinal_handles_the_teens() -> None:
         "13th",
         "21st",
     ]
+
+
+def _snap_game(week: str | None = "Week 2") -> Game:
+    return Game(
+        event_id="9",
+        name="Baltimore Ravens at Cleveland Browns",
+        short_name="BAL @ CLE",
+        start_time=None,
+        status="Final",
+        home=GameTeam(team=TeamRef(name="Cleveland Browns", team_id="5"), is_home=True),
+        away=GameTeam(
+            team=TeamRef(name="Baltimore Ravens", team_id="33"), is_winner=True
+        ),
+        state="post",
+        completed=True,
+        week=week,
+    )
+
+
+def test_format_snap_share_states_the_share_and_the_counts() -> None:
+    assert format_snap_share(42, 68) == "42 of 68 (62%)"
+    assert format_snap_share(68, 68) == "68 of 68 (100%)"
+    assert format_snap_share(0, 68) == "0 of 68 (0%)"
+
+
+def test_format_snap_share_drops_an_unusable_denominator() -> None:
+    assert format_snap_share(5, 0) == "5"
+    assert format_snap_share(5, -1) == "5"
+    assert format_snap_share(70, 68) == "70"
+
+
+def test_format_player_snaps_lists_only_units_played() -> None:
+    entry = PlayerSnaps(
+        player=PlayerRef(name="Zay Flowers", position="WR"), offense=54, special_teams=3
+    )
+    report = SnapCountReport(
+        game=_snap_game(),
+        players=(entry,),
+        offense_total=68,
+        defense_total=60,
+        special_teams_total=25,
+    )
+
+    assert format_player_snaps(entry, report) == (
+        "Offense: 54 of 68 (79%) snaps\nSpecial teams: 3 of 25 (12%) snaps"
+    )
+
+
+def test_format_player_snaps_states_a_player_who_never_took_the_field() -> None:
+    entry = PlayerSnaps(player=PlayerRef(name="Deep Reserve"))
+    report = SnapCountReport(game=_snap_game(), players=(entry,), offense_total=68)
+
+    assert format_player_snaps(entry, report) == "Did not play a snap."
+
+
+def test_format_player_snap_totals_sums_across_games() -> None:
+    totals = PlayerSnapTotals(
+        player=PlayerRef(name="Zay Flowers", position="WR"),
+        offense=94,
+        offense_total=118,
+    )
+
+    assert format_player_snap_totals(totals) == "Offense: 94 of 118 (80%) snaps"
+
+
+def test_format_snap_breakdown_names_the_week_and_the_matchup() -> None:
+    game = _snap_game()
+    entry = PlayerSnaps(player=PlayerRef(name="Zay Flowers"), offense=54)
+    report = SnapCountReport(game=game, players=(entry,), offense_total=68)
+
+    assert format_snap_breakdown(game, entry, report) == (
+        "Week 2 — Baltimore Ravens at Cleveland Browns: 54 of 68 (79%) offense"
+    )
+
+
+def test_format_snap_period_reads_as_a_period() -> None:
+    assert format_snap_period(1) == "last game"
+    assert format_snap_period(4) == "last 4 games"
+
+
+def test_snap_empty_states_explain_themselves() -> None:
+    assert format_no_snap_games() == (
+        "No completed Baltimore Ravens game found to report snap counts for."
+    )
+    assert format_no_snap_counts() == (
+        "Snap counts have not been published for that game yet."
+    )
+    assert format_no_snap_counts(_snap_game()) == (
+        "Snap counts have not been published for "
+        "Baltimore Ravens at Cleveland Browns yet."
+    )
+
+
+def test_format_unknown_snap_player_offers_close_names() -> None:
+    assert format_unknown_snap_player("Nobody", []) == (
+        "No snap counts found for “Nobody”."
+    )
+    assert format_unknown_snap_player("smith", ["Roquan Smith", "Josh Smith"]) == (
+        "No snap counts found for “smith”. Did you mean: Roquan Smith, Josh Smith?"
+    )
