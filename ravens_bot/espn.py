@@ -272,6 +272,30 @@ def _week_text(event: dict[str, Any]) -> str | None:
     return label
 
 
+def _season_year(event: dict[str, Any]) -> int | None:
+    """The season a game belongs to, which is not always its calendar year."""
+    for source in (event.get("season"), event.get("league")):
+        year = _as_int(_as_dict(source).get("year"))
+        if year:
+            return year
+    return None
+
+
+def _season_type(event: dict[str, Any]) -> int | None:
+    """ESPN's season type: 1 preseason, 2 regular season, 3 postseason."""
+    for source in (event.get("seasonType"), event.get("season")):
+        data = _as_dict(source)
+        for key in ("type", "id"):
+            value = _as_int(data.get(key))
+            if value:
+                return value
+    return None
+
+
+def _week_number(event: dict[str, Any]) -> int | None:
+    return _as_int(_as_dict(event.get("week")).get("number"))
+
+
 def _game_from_event(event: dict[str, Any]) -> Game:
     competitions = _as_list(event.get("competitions"))
     competition = _as_dict(competitions[0]) if competitions else {}
@@ -301,6 +325,9 @@ def _game_from_event(event: dict[str, Any]) -> Game:
         broadcast=_broadcast(competition),
         week=_week_text(event),
         location=_venue_location(venue),
+        season=_season_year(event),
+        season_type=_season_type(event),
+        week_number=_week_number(event),
     )
 
 
@@ -315,11 +342,17 @@ def event_has_ravens(event: dict[str, Any]) -> bool:
 
 def parse_schedule(payload: dict[str, Any]) -> list[Game]:
     """Ravens games from a scoreboard or team schedule payload."""
+    # A scoreboard states the season and week once for the whole payload, while
+    # a team schedule states them per event, so payload level values are used
+    # only as a fallback.
+    defaults = {
+        key: payload[key] for key in ("season", "week") if isinstance(payload.get(key), dict)
+    }
     games = []
     for event in _as_list(payload.get("events")):
         event_data = _as_dict(event)
         if event_has_ravens(event_data):
-            games.append(_game_from_event(event_data))
+            games.append(_game_from_event({**defaults, **event_data}))
     games.sort(key=lambda game: (game.start_time is None, game.start_time or datetime.min))
     return games
 
@@ -838,13 +871,42 @@ class EspnClient:
         games = await self._schedule_cache.get_or_fetch(key, load)
         return list(games)
 
-    async def fetch_season_schedule(self) -> list[Game]:
+    async def fetch_season_schedule(self, season: int | None = None) -> list[Game]:
+        key = "season" if season is None else f"season:{season}"
+
         async def load() -> list[Game]:
-            payload = await self._json(f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule")
+            params = None if season is None else {"season": str(season)}
+            payload = await self._json(
+                f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule", params
+            )
             return parse_schedule(payload)
 
-        games = await self._schedule_cache.get_or_fetch("season", load)
+        games = await self._schedule_cache.get_or_fetch(key, load)
         return list(games)
+
+    async def fetch_recent_games(self, count: int, today: date) -> list[Game]:
+        """The most recent completed Ravens games, oldest first.
+
+        Completion comes from ESPN's status rather than from comparing dates,
+        so a game in progress is not reported as played. Early in a season, and
+        all through the offseason, the games asked for are in the season before
+        the one the schedule endpoint defaults to.
+        """
+        schedule = await self.fetch_season_schedule()
+        games = [game for game in schedule if game.completed]
+        if len(games) < count:
+            season = next(
+                (game.season for game in reversed(schedule) if game.season), None
+            )
+            if season is None:
+                # The NFL season is named for the year it kicks off in.
+                season = today.year if today.month >= 3 else today.year - 1
+            try:
+                earlier = await self.fetch_season_schedule(season - 1)
+            except EspnApiError:
+                earlier = []
+            games = [game for game in earlier if game.completed] + games
+        return games[-count:]
 
     async def fetch_inactives(self, target_date: date) -> list[InactiveReport]:
         games = await self.fetch_schedule(DateWindow(target_date, target_date))

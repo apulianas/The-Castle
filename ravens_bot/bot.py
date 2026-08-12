@@ -18,17 +18,31 @@ from .embeds import (
     help_embed,
     inactive_embeds,
     next_game_embed,
+    no_snap_counts_embed,
+    player_snap_embed,
+    player_snap_totals_embed,
     schedule_embed,
+    snap_count_embed,
+    snap_totals_embed,
     standings_embed,
     transaction_embeds,
 )
 from .espn import EspnApiError, EspnClient
-from .models import InactiveReport, Transaction
+from .formatting import (
+    format_no_snap_counts,
+    format_no_snap_games,
+    format_unknown_snap_player,
+)
+from .models import InactiveReport, PlayerRef, SnapCountReport, Transaction
+from .snapcounts import SnapCountClient, SnapCountError, aggregate, match_players
 from .state import AnnouncementState, channel_key
 
 
 LOGGER = logging.getLogger(__name__)
 ScheduleDays = app_commands.Range[int, 1, 30]
+SnapWeeks = app_commands.Range[int, 1, 18]
+# How many close names a failed player search offers back.
+MAX_PLAYER_SUGGESTIONS = 5
 
 
 @dataclass(frozen=True)
@@ -48,17 +62,20 @@ class RavensBot(commands.Bot):
         self.config = config
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
+        self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
 
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession()
         self.espn = EspnClient(self.session)
+        self.snap_counts = SnapCountClient(self.session)
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
         self.tree.add_command(_inactives_command(self))
         self.tree.add_command(_standings_command(self))
         self.tree.add_command(_next_game_command(self))
         self.tree.add_command(_schedule_command(self))
+        self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_help_command())
         await self.tree.sync()
         if self.config.has_announcement_targets:
@@ -246,6 +263,99 @@ def _schedule_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     return schedule
 
 
+def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(name="snapcounts", description="Show Ravens snap counts.")
+    @app_commands.describe(
+        player="Optional player name; omit for the full team report",
+        weeks="How many recent games to cover (1-18, default 1)",
+    )
+    async def snapcounts(
+        interaction: discord.Interaction,
+        player: str | None = None,
+        weeks: SnapWeeks = 1,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            reports = await _recent_snap_reports(bot, weeks)
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        except SnapCountError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+
+        if reports is None:
+            await interaction.followup.send(
+                embed=no_snap_counts_embed(format_no_snap_games())
+            )
+            return
+        if not reports:
+            await interaction.followup.send(
+                embed=no_snap_counts_embed(format_no_snap_counts())
+            )
+            return
+
+        totals = aggregate(reports)
+        if player is None:
+            if weeks == 1:
+                await interaction.followup.send(embed=snap_count_embed(reports[-1]))
+            else:
+                await interaction.followup.send(
+                    embed=snap_totals_embed(totals, reports, weeks)
+                )
+            return
+
+        matches = match_players(totals, player)
+        if len(matches) != 1:
+            suggestions = [item.player.name for item in matches][
+                :MAX_PLAYER_SUGGESTIONS
+            ]
+            await interaction.followup.send(
+                embed=no_snap_counts_embed(
+                    format_unknown_snap_player(player, suggestions)
+                ),
+                ephemeral=True,
+            )
+            return
+
+        match = matches[0]
+        if weeks == 1:
+            report = reports[-1]
+            entry = next(
+                (item for item in report.players if item.player.name == match.player.name),
+                None,
+            )
+            if entry is None:
+                await interaction.followup.send(
+                    embed=no_snap_counts_embed(format_no_snap_counts(report.game)),
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(embed=player_snap_embed(entry, report))
+            return
+        await interaction.followup.send(
+            embed=player_snap_totals_embed(match, reports, weeks)
+        )
+
+    return snapcounts
+
+
+async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountReport] | None:
+    """Reports for the last ``weeks`` completed games, or None when none exist."""
+    espn = _require_espn(bot)
+    games = await espn.fetch_recent_games(weeks, today_in_zone(bot.config.time_zone))
+    if not games:
+        return None
+    roster: dict[str, PlayerRef] = {}
+    try:
+        roster = await espn.fetch_roster()
+    except EspnApiError:
+        # Player art and links are a bonus; a roster outage should not hide the
+        # snap counts themselves.
+        LOGGER.warning("Snap counts posted without roster art")
+    return await _require_snap_counts(bot).fetch_reports(games, roster)
+
+
 def _help_command() -> app_commands.Command[Any, ..., None]:
     @app_commands.command(name="help", description="Show Ravens bot command help.")
     async def help_command(interaction: discord.Interaction) -> None:
@@ -268,6 +378,12 @@ def _require_espn(bot: RavensBot) -> EspnClient:
     if bot.espn is None:
         raise RuntimeError("ESPN client is not initialized")
     return bot.espn
+
+
+def _require_snap_counts(bot: RavensBot) -> SnapCountClient:
+    if bot.snap_counts is None:
+        raise RuntimeError("Snap count client is not initialized")
+    return bot.snap_counts
 
 
 def transaction_announcement_key(transaction: Transaction) -> str:

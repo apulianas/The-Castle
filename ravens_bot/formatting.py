@@ -6,8 +6,12 @@ from zoneinfo import ZoneInfo
 from .espn_urls import link
 from .models import (
     RAVENS_NAME,
+    SNAP_UNITS,
     Game,
     InactivePlayer,
+    PlayerSnaps,
+    PlayerSnapTotals,
+    SnapCountReport,
     Standing,
     Transaction,
 )
@@ -248,3 +252,91 @@ def ordinal(number: int) -> str:
 
 def format_no_standings() -> str:
     return "Standings are unavailable right now. Try again shortly."
+
+
+def format_snap_share(snaps: int, total: int) -> str:
+    """A count against its unit total, e.g. "42 of 68 (62%)".
+
+    The team total is derived from published shares, so it is stated only when
+    it is at least as large as the count it is measuring; a stale or missing
+    denominator should not produce a share above 100%.
+    """
+    if total <= 0 or snaps > total:
+        return f"{snaps}"
+    return f"{snaps} of {total} ({round(snaps * 100 / total)}%)"
+
+
+def format_player_snaps(entry: PlayerSnaps, report: SnapCountReport) -> str:
+    """Every unit a player took a snap in, for a single player answer."""
+    lines = [
+        f"{unit.capitalize()}: {format_snap_share(entry.snaps(unit), report.total(unit))} snaps"
+        for unit in SNAP_UNITS
+        if entry.snaps(unit)
+    ]
+    if not lines:
+        return "Did not play a snap."
+    return "\n".join(lines)
+
+
+def format_player_snap_totals(totals: PlayerSnapTotals) -> str:
+    lines = [
+        f"{unit.capitalize()}: {format_snap_share(totals.snaps(unit), totals.total(unit))} snaps"
+        for unit in SNAP_UNITS
+        if totals.snaps(unit)
+    ]
+    if not lines:
+        return "Did not play a snap."
+    return "\n".join(lines)
+
+
+def format_snap_row(entry: PlayerSnaps, report: SnapCountReport, unit: str) -> str:
+    name = link(entry.player.name, entry.player.page_url)
+    if entry.position:
+        name = f"{entry.position} {name}"
+    return f"{name} — {format_snap_share(entry.snaps(unit), report.total(unit))}"
+
+
+def format_snap_totals_row(totals: PlayerSnapTotals, unit: str) -> str:
+    name = link(totals.player.name, totals.player.page_url)
+    if totals.player.position:
+        name = f"{totals.player.position} {name}"
+    games = f"{totals.games} game" if totals.games == 1 else f"{totals.games} games"
+    return f"{name} — {format_snap_share(totals.snaps(unit), totals.total(unit))} over {games}"
+
+
+def format_snap_breakdown(game: Game, entry: PlayerSnaps, report: SnapCountReport) -> str:
+    """One game's line in a multi-week breakdown."""
+    prefix = f"{game.week} — " if game.week else ""
+    unit = entry.primary_unit
+    return (
+        f"{prefix}{format_matchup(game)}: "
+        f"{format_snap_share(entry.snaps(unit), report.total(unit))} {unit}"
+    )
+
+
+def format_snap_game_line(game: Game) -> str:
+    prefix = f"{game.week} — " if game.week else ""
+    return f"{prefix}{format_game_title(game)}"
+
+
+def format_snap_period(weeks: int) -> str:
+    return "last game" if weeks <= 1 else f"last {weeks} games"
+
+
+def format_no_snap_games() -> str:
+    return f"No completed {RAVENS_NAME} game found to report snap counts for."
+
+
+def format_no_snap_counts(game: Game | None = None) -> str:
+    """Snaps trail the game book, so a fresh game is pending rather than broken."""
+    if game is None:
+        return "Snap counts have not been published for that game yet."
+    return f"Snap counts have not been published for {format_matchup(game)} yet."
+
+
+def format_unknown_snap_player(query: str, suggestions: list[str]) -> str:
+    text = f"No snap counts found for “{query}”."
+    if suggestions:
+        names = ", ".join(suggestions)
+        return f"{text} Did you mean: {names}?"
+    return text

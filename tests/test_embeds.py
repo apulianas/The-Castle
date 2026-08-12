@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from ravens_bot.embeds import (
     MAX_DESCRIPTION_CHARS,
+    MAX_EMBED_CHARS,
     MAX_EMBED_FIELDS,
     MAX_FIELD_CHARS,
     _limit_description,
@@ -13,7 +14,11 @@ from ravens_bot.embeds import (
     help_embed,
     inactive_embeds,
     next_game_embed,
+    player_snap_embed,
+    player_snap_totals_embed,
     schedule_embed,
+    snap_count_embed,
+    snap_totals_embed,
     standings_embed,
     transaction_embeds,
 )
@@ -23,6 +28,9 @@ from ravens_bot.models import (
     InactivePlayer,
     InactiveReport,
     PlayerRef,
+    PlayerSnaps,
+    PlayerSnapTotals,
+    SnapCountReport,
     Standing,
     TeamRef,
     Transaction,
@@ -301,5 +309,190 @@ def test_help_embed_documents_every_command() -> None:
         "/standings",
         "/nextgame",
         "/schedule",
+        "/snapcounts",
         "/help",
     }
+
+
+def _snap_report(players: tuple[PlayerSnaps, ...]) -> SnapCountReport:
+    game = Game(
+        event_id="77",
+        name="Baltimore Ravens at Cleveland Browns",
+        short_name="BAL @ CLE",
+        start_time=datetime(2025, 9, 14, 17, 0, tzinfo=timezone.utc),
+        status="Final",
+        home=GameTeam(team=JETS_TEAM, is_home=True, score=10),
+        away=GameTeam(team=RAVENS_TEAM, score=27, is_winner=True),
+        state="post",
+        completed=True,
+        week="Week 2",
+        season=2025,
+        season_type=2,
+    )
+    return SnapCountReport(
+        game=game,
+        players=players,
+        offense_total=68,
+        defense_total=60,
+        special_teams_total=25,
+    )
+
+
+def test_snap_count_embed_groups_players_by_unit() -> None:
+    report = _snap_report(
+        (
+            PlayerSnaps(
+                player=PlayerRef(name="Lamar Jackson", position="QB", athlete_id="1"),
+                offense=68,
+            ),
+            PlayerSnaps(
+                player=PlayerRef(name="Roquan Smith", position="ILB"), defense=60
+            ),
+            PlayerSnaps(player=PlayerRef(name="Nick Moore", position="LS"), special_teams=25),
+        )
+    )
+
+    embed = snap_count_embed(report)
+
+    assert [field.name for field in embed.fields] == [
+        "Offense (68 snaps)",
+        "Defense (60 snaps)",
+        "Special teams (25 snaps)",
+    ]
+    assert "68 of 68 (100%)" in (embed.fields[0].value or "")
+    assert embed.footer.text == "Data: NFL game book via nflverse"
+
+
+def test_snap_count_embed_states_a_game_with_no_published_snaps() -> None:
+    embed = snap_count_embed(_snap_report(()))
+
+    assert embed.fields == []
+    assert embed.description is not None
+    assert "have not been published" in embed.description
+
+
+def test_snap_count_embed_keeps_a_full_roster_inside_discord_limits() -> None:
+    players = tuple(
+        PlayerSnaps(
+            player=PlayerRef(name=f"Player Number{index:02d}", position="WR"),
+            offense=60 - index,
+        )
+        for index in range(48)
+    )
+
+    embed = snap_count_embed(_snap_report(players))
+
+    assert len(embed.fields) <= MAX_EMBED_FIELDS
+    assert all(len(field.value or "") <= MAX_FIELD_CHARS for field in embed.fields)
+    assert [field.name for field in embed.fields][:2] == [
+        "Offense (68 snaps)",
+        "Offense (68 snaps) (cont.)",
+    ]
+    assert embed.footer.text == "Data: NFL game book via nflverse"
+
+
+def test_snap_count_embed_reports_players_it_had_to_hide() -> None:
+    players = tuple(
+        PlayerSnaps(
+            player=PlayerRef(name=f"Player Number{index:03d} Of The Baltimore Ravens"),
+            offense=1,
+        )
+        for index in range(900)
+    )
+
+    embed = snap_count_embed(_snap_report(players))
+
+    assert len(embed) <= MAX_EMBED_CHARS
+    assert len(embed.fields) <= MAX_EMBED_FIELDS
+    assert embed.footer.text is not None
+    assert embed.footer.text.startswith("Showing ")
+    assert "of 900 players" in embed.footer.text
+
+
+def test_snap_totals_embed_stays_inside_the_whole_embed_budget() -> None:
+    entries = tuple(
+        PlayerSnaps(
+            player=PlayerRef(
+                name=f"Player Number{index:03d}",
+                position="WR",
+                athlete_id=f"44296{index:03d}",
+            ),
+            offense=60 - index % 40,
+        )
+        for index in range(70)
+    )
+    report = _snap_report(entries)
+    totals = [
+        PlayerSnapTotals(
+            player=entry.player,
+            entries=tuple((report.game, entry) for _ in range(18)),
+            offense=entry.offense * 18,
+            offense_total=68 * 18,
+        )
+        for entry in entries
+    ]
+
+    embed = snap_totals_embed(totals, [report], 18)
+
+    assert len(embed) <= MAX_EMBED_CHARS
+    assert embed.footer.text is not None
+    assert embed.footer.text.startswith("Showing ")
+
+
+def test_player_snap_embed_uses_the_feature_headshot() -> None:
+    entry = PlayerSnaps(
+        player=PlayerRef(name="Zay Flowers", position="WR", athlete_id="4429615"),
+        offense=54,
+        special_teams=3,
+    )
+    report = _snap_report((entry,))
+
+    embed = player_snap_embed(entry, report)
+
+    assert embed.image.url is not None
+    assert "w=520" in embed.image.url
+    assert embed.fields[0].value == (
+        "Offense: 54 of 68 (79%) snaps\nSpecial teams: 3 of 25 (12%) snaps"
+    )
+
+
+def test_player_snap_embed_falls_back_to_the_team_logo() -> None:
+    entry = PlayerSnaps(player=PlayerRef(name="Unrostered Player"), offense=4)
+
+    embed = player_snap_embed(entry, _snap_report((entry,)))
+
+    assert embed.image.url is None
+    assert embed.thumbnail.url is not None
+
+
+def test_player_snap_totals_embed_breaks_the_period_down_by_game() -> None:
+    entry = PlayerSnaps(player=PlayerRef(name="Zay Flowers", position="WR"), offense=54)
+    report = _snap_report((entry,))
+    totals = PlayerSnapTotals(
+        player=entry.player,
+        entries=((report.game, entry),),
+        offense=54,
+        offense_total=68,
+    )
+
+    embed = player_snap_totals_embed(totals, [report], 4)
+
+    assert [field.name for field in embed.fields] == ["Totals", "By game"]
+    assert "Week 2" in (embed.fields[1].value or "")
+
+
+def test_snap_totals_embed_lists_the_games_it_covered() -> None:
+    entry = PlayerSnaps(player=PlayerRef(name="Zay Flowers", position="WR"), offense=54)
+    report = _snap_report((entry,))
+    totals = PlayerSnapTotals(
+        player=entry.player,
+        entries=((report.game, entry),),
+        offense=54,
+        offense_total=68,
+    )
+
+    embed = snap_totals_embed([totals], [report], 3)
+
+    assert embed.title == "Ravens snap counts — last 3 games"
+    assert embed.description is not None and "Week 2" in embed.description
+    assert "over 1 game" in (embed.fields[0].value or "")
