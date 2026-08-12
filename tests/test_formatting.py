@@ -7,6 +7,11 @@ from ravens_bot.formatting import (
     MAX_LINKED_PLAYERS,
     NO_STAT,
     format_differential,
+    format_expected_points,
+    format_fourth_down,
+    format_fourth_down_call,
+    format_fourth_down_option,
+    format_fourth_down_situation,
     format_full_date,
     format_game_time,
     format_games_back,
@@ -27,11 +32,14 @@ from ravens_bot.formatting import (
     format_standings_row,
     format_transaction,
     format_unknown_snap_player,
+    format_unknown_team,
     format_win_percent,
     ordinal,
 )
+from ravens_bot.fourthdown import advise
 from ravens_bot.models import (
     Game,
+    GameSituation,
     GameTeam,
     InactivePlayer,
     PlayerRef,
@@ -397,3 +405,64 @@ def test_format_unknown_snap_player_offers_close_names() -> None:
     assert format_unknown_snap_player("smith", ["Roquan Smith", "Josh Smith"]) == (
         "No snap counts found for “smith”. Did you mean: Roquan Smith, Josh Smith?"
     )
+
+
+def build_situation(down: int = 4, distance: int = 3, yards_to_goal: int = 10) -> GameSituation:
+    return GameSituation(
+        possession=RAVENS_TEAM,
+        defense=JETS_TEAM,
+        down=down,
+        distance=distance,
+        yards_to_goal=yards_to_goal,
+        period=3,
+        clock="5:21",
+        score_differential=-4,
+        spot="NYJ 10",
+        down_distance_text="4th & 3",
+    )
+
+
+def test_format_expected_points_always_states_the_sign() -> None:
+    assert format_expected_points(1.24) == "+1.2"
+    assert format_expected_points(-0.61) == "-0.6"
+    assert format_expected_points(0.0) == "0.0"
+    assert format_expected_points(float("-inf")) == "—"
+
+
+def test_format_fourth_down_option_bolds_the_recommended_one() -> None:
+    advice = advise(build_situation())
+    best = advice.options[0]
+
+    assert format_fourth_down_option(best, best=True).startswith("**")
+    assert not format_fourth_down_option(best).startswith("**")
+    assert "expected points" in format_fourth_down_option(best)
+
+
+def test_format_fourth_down_situation_names_the_teams_and_the_score() -> None:
+    text = format_fourth_down_situation(build_game(ravens_score=17, jets_score=21), build_situation())
+
+    assert "4th & 3" in text
+    assert "New York Jets at Baltimore Ravens" in text
+    assert "NYJ 21" in text and "BAL 17" in text
+    assert "trailing by 4" in text
+
+
+def test_format_fourth_down_call_hedges_a_close_one() -> None:
+    advice = advise(build_situation(distance=5, yards_to_goal=60))
+
+    assert advice.is_close
+    assert format_fourth_down_call(advice).startswith("Too close to call")
+
+
+def test_format_fourth_down_lists_the_call_then_every_option() -> None:
+    advice = advise(build_situation())
+
+    lines = format_fourth_down(build_game(), advice).splitlines()
+
+    assert lines[0] == "Field goal"
+    assert [line.split(":")[0] for line in lines[-3:]] == ["Field goal", "Go for it", "Punt"]
+
+
+def test_format_unknown_team_offers_who_is_playing() -> None:
+    assert "Playing right now: Baltimore Ravens" in format_unknown_team("Seahawks", ["Baltimore Ravens"])
+    assert format_unknown_team("Seahawks", []).endswith("“Seahawks”.")

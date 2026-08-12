@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from ravens_bot.espn import (
     apply_roster,
     extract_players,
+    match_team_games,
     parse_inactive_report,
     parse_roster,
     parse_schedule,
+    parse_scoreboard,
     parse_standings,
     parse_transactions,
+    select_insight_game,
+    team_names,
 )
 from ravens_bot.formatting import format_transaction
 from ravens_bot.models import AFC_NORTH_GROUP_ID, Game
@@ -559,3 +563,283 @@ def test_parse_schedule_falls_back_to_payload_season_and_week() -> None:
     assert game.season == 2024
     assert game.season_type == 2
     assert game.week_number == 7
+
+
+def _live_event(
+    situation: dict[str, object] | None,
+    *,
+    event_id: str = "401671800",
+    home_id: str = "4",
+    home_abbr: str = "CIN",
+    away_id: str = "33",
+    away_abbr: str = "BAL",
+    state: str = "in",
+    home_score: str = "17",
+    away_score: str = "21",
+    start: str = "2025-11-23T18:00Z",
+) -> dict[str, object]:
+    """A scoreboard event shaped the way ESPN sends a game in progress."""
+    competition: dict[str, object] = {
+        "date": start,
+        "status": {
+            "period": 3,
+            "displayClock": "5:21",
+            "type": {"state": state, "completed": state == "post", "description": "In Progress"},
+        },
+        "competitors": [
+            {
+                "homeAway": "home",
+                "score": home_score,
+                "team": {"id": home_id, "displayName": f"{home_abbr} team", "abbreviation": home_abbr},
+            },
+            {
+                "homeAway": "away",
+                "score": away_score,
+                "team": {"id": away_id, "displayName": f"{away_abbr} team", "abbreviation": away_abbr},
+            },
+        ],
+    }
+    if situation is not None:
+        competition["situation"] = situation
+    return {
+        "id": event_id,
+        "name": f"{away_abbr} at {home_abbr}",
+        "shortName": f"{away_abbr} @ {home_abbr}",
+        "date": start,
+        "competitions": [competition],
+    }
+
+
+def test_parse_scoreboard_keeps_every_game_not_only_the_ravens() -> None:
+    payload = {
+        "events": [
+            _live_event(None, event_id="1"),
+            _live_event(None, event_id="2", home_id="1", home_abbr="ATL", away_id="2", away_abbr="BUF"),
+        ]
+    }
+
+    games = parse_scoreboard(payload)
+
+    assert [game.event_id for game in games] == ["1", "2"]
+    assert parse_schedule(payload)[0].event_id == "1"
+
+
+def test_parse_situation_reads_a_spot_on_the_defence_side_of_the_field() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {
+                    "down": 4,
+                    "distance": 3,
+                    "yardLine": 90,
+                    "possessionText": "CIN 10",
+                    "downDistanceText": "4th & 3",
+                    "isRedZone": True,
+                    "possession": "33",
+                }
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None
+    assert situation.possession.abbreviation == "BAL"
+    assert situation.defense is not None and situation.defense.abbreviation == "CIN"
+    assert situation.yards_to_goal == 10
+    assert situation.is_fourth_down
+    assert situation.is_red_zone
+    assert situation.score_differential == 4
+    assert situation.period == 3
+    assert situation.clock == "5:21"
+
+
+def test_parse_situation_reads_a_spot_on_the_offence_own_side() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {
+                    "down": 4,
+                    "distance": 12,
+                    "yardLine": 22,
+                    "possessionText": "BAL 22",
+                    "possession": "33",
+                }
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None
+    assert situation.yards_to_goal == 78
+
+
+def test_parse_situation_reads_midfield_the_same_from_either_side() -> None:
+    for text in ("BAL 50", "CIN 50"):
+        payload = {"events": [_live_event({"down": 4, "distance": 1, "possessionText": text, "possession": "33"})]}
+
+        situation = parse_scoreboard(payload)[0].situation
+
+        assert situation is not None and situation.yards_to_goal == 50
+
+
+def test_parse_situation_prefers_the_named_spot_over_a_contradicting_yard_line() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {
+                    "down": 4,
+                    "distance": 2,
+                    # A yard line that would read as the offence's own 30.
+                    "yardLine": 30,
+                    "possessionText": "CIN 30",
+                    "possession": "33",
+                }
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None and situation.yards_to_goal == 30
+
+
+def test_parse_situation_falls_back_to_the_yard_line_without_a_spot() -> None:
+    payload = {"events": [_live_event({"down": 4, "distance": 2, "yardLine": 35, "possession": "33"})]}
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None and situation.yards_to_goal == 65
+
+
+def test_parse_situation_trusts_yards_to_endzone_when_espn_sends_it() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {
+                    "down": 4,
+                    "distance": 2,
+                    "yardsToEndzone": 41,
+                    "yardLine": 12,
+                    "possessionText": "CIN 41",
+                    "possession": "33",
+                }
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None and situation.yards_to_goal == 41
+
+
+def test_parse_situation_is_absent_without_one_in_the_payload() -> None:
+    payload = {"events": [_live_event(None)]}
+
+    assert parse_scoreboard(payload)[0].situation is None
+
+
+def test_parse_situation_is_absent_before_kickoff() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {"down": 4, "distance": 2, "possessionText": "CIN 30", "possession": "33"},
+                state="pre",
+            )
+        ]
+    }
+
+    game = parse_scoreboard(payload)[0]
+
+    assert game.situation is None
+    assert not game.in_progress
+
+
+def test_situation_summary_reads_as_a_sentence() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {
+                    "down": 4,
+                    "distance": 3,
+                    "possessionText": "CIN 10",
+                    "downDistanceText": "4th & 3",
+                    "possession": "33",
+                }
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None
+    assert situation.summary == "BAL 4th & 3 at the CIN 10 • Q3 5:21 • leading by 4"
+
+
+def test_select_insight_game_prefers_the_ravens() -> None:
+    payload = {
+        "events": [
+            _live_event(None, event_id="1", home_id="1", home_abbr="ATL", away_id="2", away_abbr="BUF"),
+            _live_event(None, event_id="2"),
+        ]
+    }
+    games = parse_scoreboard(payload)
+
+    chosen = select_insight_game(games, "Buffalo Bills")
+
+    assert chosen is not None and chosen.event_id == "2"
+
+
+def test_select_insight_game_falls_back_to_the_configured_team() -> None:
+    payload = {
+        "events": [
+            _live_event(None, event_id="1", home_id="1", home_abbr="ATL", away_id="5", away_abbr="DAL"),
+            _live_event(None, event_id="2", home_id="3", home_abbr="BUF", away_id="6", away_abbr="MIA"),
+        ]
+    }
+    games = parse_scoreboard(payload)
+
+    chosen = select_insight_game(games, "BUF")
+
+    assert chosen is not None and chosen.event_id == "2"
+
+
+def test_select_insight_game_falls_back_to_the_nearest_kickoff() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                None, event_id="1", home_id="1", home_abbr="ATL", away_id="5", away_abbr="DAL",
+                start="2025-11-23T18:00Z",
+            ),
+            _live_event(
+                None, event_id="2", home_id="3", home_abbr="BUF", away_id="6", away_abbr="MIA",
+                start="2025-11-23T21:25Z",
+            ),
+        ]
+    }
+    games = parse_scoreboard(payload)
+
+    chosen = select_insight_game(games, None, datetime(2025, 11, 23, 21, 40, tzinfo=timezone.utc))
+
+    assert chosen is not None and chosen.event_id == "2"
+
+
+def test_select_insight_game_ignores_games_that_are_not_being_played() -> None:
+    payload = {"events": [_live_event(None, event_id="1", state="post")]}
+
+    assert select_insight_game(parse_scoreboard(payload)) is None
+
+
+def test_match_team_games_accepts_an_abbreviation_a_city_or_a_nickname() -> None:
+    payload = {"events": [_live_event(None, event_id="1", home_id="1", home_abbr="ATL", away_id="2", away_abbr="BUF")]}
+    games = parse_scoreboard(payload)
+    assert [game.event_id for game in match_team_games(games, "BUF")] == ["1"]
+    assert [game.event_id for game in match_team_games(games, "atl")] == ["1"]
+    assert match_team_games(games, "Seattle") == []
+
+
+def test_team_names_lists_who_is_playing() -> None:
+    payload = {"events": [_live_event(None, event_id="1")]}
+
+    assert team_names(parse_scoreboard(payload)) == ["BAL team", "CIN team"]

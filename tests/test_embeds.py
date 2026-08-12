@@ -10,10 +10,13 @@ from ravens_bot.embeds import (
     MAX_FIELD_CHARS,
     _limit_description,
     _limit_field,
+    FOURTH_DOWN_FOOTER,
     error_embed,
+    fourth_down_embed,
     help_embed,
     inactive_embeds,
     next_game_embed,
+    no_fourth_down_embed,
     player_snap_embed,
     player_snap_totals_embed,
     schedule_embed,
@@ -22,8 +25,11 @@ from ravens_bot.embeds import (
     standings_embed,
     transaction_embeds,
 )
+from ravens_bot.fourthdown import advise
+from ravens_bot.formatting import format_no_live_game
 from ravens_bot.models import (
     Game,
+    GameSituation,
     GameTeam,
     InactivePlayer,
     InactiveReport,
@@ -497,3 +503,59 @@ def test_snap_totals_embed_lists_the_games_it_covered() -> None:
     assert embed.title == "Ravens snap counts — last 3 games"
     assert embed.description is not None and "Week 2" in embed.description
     assert "over 1 game" in (embed.fields[0].value or "")
+
+
+def build_situation(down: int = 4, distance: int = 3, yards_to_goal: int = 10) -> GameSituation:
+    return GameSituation(
+        possession=RAVENS_TEAM,
+        defense=JETS_TEAM,
+        down=down,
+        distance=distance,
+        yards_to_goal=yards_to_goal,
+        period=3,
+        clock="5:21",
+        score_differential=4,
+        spot="NYJ 10",
+        down_distance_text="4th & 3",
+    )
+
+
+def test_fourth_down_embed_states_the_call_and_prices_every_option() -> None:
+    game = build_game()
+    advice = advise(build_situation())
+
+    embed = fourth_down_embed(game, advice)
+
+    assert embed.title == "Field goal"
+    assert "4th & 3" in embed.description
+    assert field_names(embed) == ["Field goal", "Go for it", "Punt"]
+    assert all("expected points" in field.value for field in embed.fields)
+    assert embed.thumbnail.url == RAVENS_TEAM.logo
+    assert embed.url == "https://www.espn.com/nfl/game/_/gameId/9"
+    assert embed.footer.text == FOURTH_DOWN_FOOTER
+
+
+def test_fourth_down_embed_adds_a_field_for_every_caveat() -> None:
+    advice = advise(
+        GameSituation(
+            possession=RAVENS_TEAM,
+            down=4,
+            distance=2,
+            yards_to_goal=40,
+            period=4,
+            score_differential=-9,
+        )
+    )
+
+    embed = fourth_down_embed(build_game(), advice)
+
+    assert field_names(embed).count("Worth knowing") == len(advice.caveats)
+    assert advice.caveats
+
+
+def test_no_fourth_down_embed_falls_back_to_a_logo_without_a_game() -> None:
+    embed = no_fourth_down_embed(format_no_live_game())
+
+    assert embed.title == "Fourth down"
+    assert "No NFL game" in embed.description
+    assert embed.thumbnail.url is not None
