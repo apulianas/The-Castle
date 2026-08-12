@@ -116,6 +116,88 @@ class GameTeam:
     record: str | None = None
 
 
+def down_text(down: int) -> str:
+    """"4th" for 4, and so on, for a down and distance line."""
+    suffix = {1: "st", 2: "nd", 3: "rd"}.get(down, "th")
+    return f"{down}{suffix}"
+
+
+@dataclass(frozen=True)
+class GameSituation:
+    """Where the ball is in a game that is being played right now.
+
+    ``yards_to_goal`` is the only field position the decision model wants: the
+    distance from the ball to the end zone the team in possession is attacking.
+    ESPN states field position from either side of the fifty, so the parser
+    resolves it once here rather than leaving every caller to guess.
+    """
+
+    possession: TeamRef
+    defense: TeamRef | None = None
+    down: int | None = None
+    distance: int | None = None
+    yards_to_goal: int | None = None
+    period: int | None = None
+    clock: str | None = None
+    # Points the team in possession leads by; negative when they are trailing.
+    score_differential: int | None = None
+    is_red_zone: bool = False
+    spot: str | None = None
+    down_distance_text: str | None = None
+
+    @property
+    def is_fourth_down(self) -> bool:
+        return self.down == 4
+
+    @property
+    def is_goal_to_go(self) -> bool:
+        if self.distance is None or self.yards_to_goal is None:
+            return False
+        return self.distance >= self.yards_to_goal
+
+    @property
+    def down_distance(self) -> str | None:
+        if self.down_distance_text:
+            return self.down_distance_text
+        if self.down is None or self.distance is None:
+            return None
+        distance = "Goal" if self.is_goal_to_go else str(self.distance)
+        return f"{down_text(self.down)} & {distance}"
+
+    @property
+    def clock_text(self) -> str | None:
+        parts = []
+        if self.period:
+            parts.append("OT" if self.period > 4 else f"Q{self.period}")
+        if self.clock:
+            parts.append(self.clock)
+        return " ".join(parts) or None
+
+    @property
+    def score_text(self) -> str | None:
+        """The score from the point of view of the team with the ball."""
+        if self.score_differential is None:
+            return None
+        if self.score_differential > 0:
+            return f"leading by {self.score_differential}"
+        if self.score_differential < 0:
+            return f"trailing by {abs(self.score_differential)}"
+        return "tied"
+
+    @property
+    def summary(self) -> str:
+        """A one-line situation, e.g. "BAL 4th & 3 at the CIN 10 • Q3 5:21"."""
+        parts = [self.possession.short_name]
+        down_distance = self.down_distance
+        if down_distance:
+            parts.append(down_distance)
+        if self.spot:
+            parts.append(f"at the {self.spot}")
+        line = " ".join(parts)
+        extras = [text for text in (self.clock_text, self.score_text) if text]
+        return " • ".join([line, *extras])
+
+
 @dataclass(frozen=True)
 class Game:
     event_id: str
@@ -135,10 +217,29 @@ class Game:
     # ESPN's season type: 1 preseason, 2 regular season, 3 postseason.
     season_type: int | None = None
     week_number: int | None = None
+    # Only a game in progress has one, and only then when ESPN publishes it.
+    situation: GameSituation | None = None
 
     @property
     def has_started(self) -> bool:
         return self.state in {"in", "post"}
+
+    @property
+    def in_progress(self) -> bool:
+        return self.state == "in" and not self.completed
+
+    @property
+    def teams(self) -> tuple[GameTeam, ...]:
+        return tuple(side for side in (self.away, self.home) if side is not None)
+
+    def side_for(self, team: TeamRef | None) -> GameTeam | None:
+        """The competitor entry for a team, so its score can be read back."""
+        if team is None:
+            return None
+        for side in self.teams:
+            if side.team.team_id is not None and side.team.team_id == team.team_id:
+                return side
+        return None
 
     @property
     def ravens(self) -> GameTeam | None:
@@ -303,7 +404,7 @@ class PlayerSnapTotals:
 
 
 @dataclass(frozen=True)
-class GameSituation:
+class LiveSituation:
     """Where a game stands right now: clock, possession, and down and distance.
 
     Every field is optional because ESPN publishes this block only while a game
@@ -369,7 +470,7 @@ class LiveGameReport:
     """A snapshot of one game: score, situation, team totals, and leaders."""
 
     game: Game
-    situation: GameSituation | None = None
+    situation: LiveSituation | None = None
     teams: tuple[TeamGameStats, ...] = ()
     leaders: tuple[PlayerGameStats, ...] = ()
 

@@ -11,7 +11,7 @@ from ravens_bot.espn import (
     EspnClient,
     parse_leaders,
     parse_live_game,
-    parse_situation,
+    parse_live_situation,
     parse_team_stats,
 )
 from ravens_bot.formatting import (
@@ -23,7 +23,7 @@ from ravens_bot.formatting import (
 )
 from ravens_bot.models import (
     Game,
-    GameSituation,
+    LiveSituation,
     GameTeam,
     LiveGameReport,
     PlayerGameStats,
@@ -204,7 +204,7 @@ def test_parse_situation_is_none_at_halftime_without_a_drive() -> None:
         }
     }
 
-    assert parse_situation(payload, build_game()) is None
+    assert parse_live_situation(payload, build_game()) is None
 
 
 def test_parse_situation_reads_a_current_drive_when_the_header_has_none() -> None:
@@ -218,7 +218,7 @@ def test_parse_situation_reads_a_current_drive_when_the_header_has_none() -> Non
         },
     }
 
-    situation = parse_situation(payload, build_game())
+    situation = parse_live_situation(payload, build_game())
 
     assert situation is not None
     assert situation.possession == BROWNS_TEAM
@@ -373,15 +373,15 @@ def test_format_live_score_reads_away_side_first() -> None:
 
 
 def test_format_situation_skips_missing_parts() -> None:
-    situation = GameSituation(clock="7:21", period=3, possession=RAVENS_TEAM)
+    situation = LiveSituation(clock="7:21", period=3, possession=RAVENS_TEAM)
 
     assert format_situation(situation) == "7:21 Q3 • 🏈 BAL"
     assert format_situation(None) is None
-    assert format_situation(GameSituation()) is None
+    assert format_situation(LiveSituation()) is None
 
 
 def test_format_situation_marks_the_red_zone() -> None:
-    situation = GameSituation(
+    situation = LiveSituation(
         clock="0:41",
         period=4,
         possession=RAVENS_TEAM,

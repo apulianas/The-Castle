@@ -13,6 +13,7 @@ day inactives, standings, live in-game stats, and upcoming games.
   - `/live` — live score, clock, possession, team totals, and leaders for today's game.
   - `/schedule [days]` — upcoming Ravens games over the next 1-30 days.
   - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-18 games.
+  - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt.
   - `/help` — command help.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
   player, team, and game pages.
@@ -49,6 +50,12 @@ means the wording is unit tested without constructing a client.
   publishes these sections at different points in a game, so the post degrades
   to the score and clock rather than failing when a section is missing. The
   footer states when the snapshot was taken, because the numbers move.
+- **Fourth downs** name the call as the title, the live situation as the
+  description, and one field per option carrying its expected points and the
+  reasoning behind them — the conversion rate, the kick distance and its make
+  rate, or where a punt leaves the opponent. A call the model rates as a coin
+  flip says so instead of picking a side, and anything the model cannot see is
+  added as its own field.
 - **Snap counts** list players by unit — offence, defence, special teams — each
   in the unit they played most, sorted by snaps. A player is a line inside a
   unit's field rather than a field of their own, because a full report names
@@ -63,13 +70,15 @@ time, and any list longer than 25 fields states how many entries were hidden.
 
 `ravens_bot/cache.py` holds a small TTL cache in front of the slower endpoints:
 standings for 5 minutes, the schedule for 3, the roster for an hour, a game
-summary for 45 seconds, and a season of snap counts for 6 hours, since a
-finished game's snaps never change and the file only grows a week at a time. A
-live game moves play by play, so its short entry exists to absorb a burst of
-`/live` calls rather than to spare ESPN the traffic; the score shown always
-comes from the summary, which leads the cached scoreboard. Each key has its own
-lock, so a burst of commands on a cold key waits on one in-flight request
-instead of issuing several identical ones.
+summary for 45 seconds, a season of snap counts for 6 hours, since a finished
+game's snaps never change and the file only grows a week at a time, and the live
+scoreboard for 12 seconds, which is only long enough to collapse a burst of
+commands without ever answering with last play's down. A live game moves play by
+play, so the short summary entry exists to absorb a burst of `/live` calls
+rather than to spare ESPN the traffic; the score shown always comes from the
+summary, which leads the cached scoreboard. Each key has its own lock, so a
+burst of commands on a cold key waits on one in-flight request instead of
+issuing several identical ones.
 
 ## Setup
 
@@ -95,6 +104,7 @@ container restarts.
 | `DISCORD_WEBHOOK_URL` | No | | One Discord webhook URL, or several separated by commas, for background announcements. |
 | `POLL_INTERVAL_SECONDS` | No | `300` | Poll interval for automatic announcements. Minimum 30 seconds. |
 | `TIME_ZONE` | No | `America/New_York` | Time zone used for "today" and display times. |
+| `SECONDARY_TEAM` | No | | A second team, by name, city, or abbreviation, that `/fourthdown` falls back on when the Ravens are not playing. |
 
 ## Discord permissions and intents
 
@@ -123,6 +133,39 @@ python -m compileall ravens_bot tests
 ```
 
 Tests use local sample payloads and do not call the network.
+
+## Fourth down recommendations
+
+`/fourthdown` answers a live game. ESPN's scoreboard publishes a `situation`
+block for a game in progress — down, distance, the spot, who has the ball — and
+that is read straight, on a twelve second cache, since a down and distance is
+stale within a play.
+
+Which game gets answered is a stated order of preference rather than a guess.
+Discord tells the bot nothing about where a person is sitting and ESPN publishes
+no regional broadcast map, so "the game on near me" cannot be answered honestly.
+Instead: the Ravens if they are playing, then whichever team `SECONDARY_TEAM`
+names, then whatever kicked off most recently. Naming a team in the command
+overrides all of it.
+
+The recommendation itself is computed in `ravens_bot/fourthdown.py`. The
+published fourth down bot, `nfl4th`, is an R package, and nflverse distributes
+no per-situation decision feed, so there is nothing to look the answer up in.
+The module is a small expected points model built from four league-average
+curves — fourth down conversion rate by distance, field goal rate by kick
+distance, where a punt leaves the receiving team, and expected points by field
+position — each documented in the module docstring with the shape it comes from.
+It reads no data at runtime, so it is unit tested exactly like the formatters.
+
+Two limits are stated in the embed footer rather than hidden:
+
+- The model is score-blind and clock-blind. Maximising expected points is the
+  right objective for most of a game and the wrong one once the clock decides
+  the result, so a fourth quarter or end of half call is flagged instead of
+  being answered confidently. A win probability model is the proper fix and is
+  deliberately not part of this.
+- Every number is a league average, so it knows nothing about the two teams
+  actually playing.
 
 ## Data source
 

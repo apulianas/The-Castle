@@ -23,8 +23,11 @@ from .formatting import (
     format_live_score,
     format_long_date,
     format_matchup,
+    format_fourth_down_call,
+    format_fourth_down_option,
+    format_fourth_down_situation,
     format_no_game,
-    format_no_live_game,
+    format_no_game_today,
     format_no_live_stats,
     format_no_inactives,
     format_no_scheduled_games,
@@ -52,6 +55,7 @@ from .formatting import (
     format_transaction,
     format_venue,
 )
+from .fourthdown import FourthDownAdvice
 from .models import (
     AFC_NORTH_GROUP_ID,
     RAVENS_SLUG,
@@ -82,6 +86,12 @@ LIVE_FOOTER_RESERVE = 160
 DATA_SOURCE = "Data: ESPN"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
+# Every number behind a fourth down call is a league average, so the footer says
+# so rather than letting the recommendation read as a scouted opinion.
+FOURTH_DOWN_FOOTER = (
+    "League-average expected points. Ignores the clock, the score, and how good "
+    "either team is. • Live data: ESPN"
+)
 
 
 def _limit_description(text: str, max_chars: int = MAX_DESCRIPTION_CHARS) -> str:
@@ -289,6 +299,40 @@ def next_game_embed(game: Game | None, time_zone: ZoneInfo) -> discord.Embed:
     return embed
 
 
+def fourth_down_embed(game: Game, advice: FourthDownAdvice) -> discord.Embed:
+    """The call, the situation behind it, and what each option is worth."""
+    embed = _base_embed(
+        format_fourth_down_call(advice),
+        format_fourth_down_situation(game, advice.situation),
+        url=game_url(game.event_id),
+    )
+    for index, option in enumerate(advice.options):
+        embed.add_field(
+            name=option.label,
+            value=_limit_field(format_fourth_down_option(option, best=index == 0)),
+            inline=False,
+        )
+    for caveat in advice.caveats:
+        embed.add_field(name="Worth knowing", value=_limit_field(caveat), inline=False)
+    embed.set_thumbnail(url=advice.situation.possession.logo_url or team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=FOURTH_DOWN_FOOTER)
+    return embed
+
+
+def no_fourth_down_embed(message: str, game: Game | None = None) -> discord.Embed:
+    """Used both when nothing is being played and when it is not fourth down."""
+    embed = _base_embed("Fourth down", message, url=game_url(game.event_id) if game else None)
+    logo = None
+    if game is not None:
+        possession = game.situation.possession if game.situation else None
+        logo = possession.logo_url if possession else None
+        if logo is None and game.home is not None:
+            logo = game.home.team.logo_url
+    embed.set_thumbnail(url=logo or team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=DATA_SOURCE)
+    return embed
+
+
 def help_embed() -> discord.Embed:
     embed = _base_embed(
         "The Castle commands",
@@ -340,6 +384,16 @@ def help_embed() -> discord.Embed:
             "Snap counts from the NFL game book for the last game, or the last "
             "1-18 games. Name a player for their own line and a per-game "
             "breakdown; omit one for the full team report by unit."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/fourthdown [team]",
+        value=(
+            "Whether the team with the ball in a live fourth down should go for "
+            "it, kick, or punt, with the expected points behind each option. "
+            "Defaults to the Ravens game, then the configured second team, then "
+            "whatever else is being played."
         ),
         inline=False,
     )
@@ -527,7 +581,7 @@ def player_snap_totals_embed(
 
 
 def no_live_game_embed(target_date: date) -> discord.Embed:
-    embed = _base_embed("Ravens live stats", format_no_live_game(target_date))
+    embed = _base_embed("Ravens live stats", format_no_game_today(target_date))
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
     embed.set_footer(text=DATA_SOURCE)
     return embed

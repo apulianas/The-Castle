@@ -23,6 +23,9 @@ class BotConfig:
     poll_interval_seconds: int
     time_zone: ZoneInfo
     state_file: str = STATE_FILE
+    # A second team to fall back on for live insight commands when the Ravens
+    # are not playing.
+    secondary_team: str | None = None
 
     @property
     def has_announcement_targets(self) -> bool:
@@ -74,6 +77,23 @@ def _webhook_urls(value: str | None) -> tuple[str, ...]:
     return tuple(urls)
 
 
+MAX_TEAM_NAME_CHARS = 40
+_TEAM_NAME_RE = re.compile(r"^[A-Za-z0-9 .'\-]+$")
+
+
+def _team_name(value: str | None) -> str | None:
+    """A team a person could have typed, not a free-form string."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if len(text) > MAX_TEAM_NAME_CHARS or not _TEAM_NAME_RE.match(text):
+        raise ValueError(
+            "SECONDARY_TEAM must be a team name, city, or abbreviation, "
+            "such as BUF or Buffalo Bills"
+        )
+    return text
+
+
 def load_config() -> BotConfig:
     token = os.getenv("DISCORD_TOKEN", "").strip()
     if not token:
@@ -99,4 +119,5 @@ def load_config() -> BotConfig:
         discord_webhook_urls=_webhook_urls(os.getenv("DISCORD_WEBHOOK_URL")),
         poll_interval_seconds=poll_interval,
         time_zone=time_zone,
+        secondary_team=_team_name(os.getenv("SECONDARY_TEAM")),
     )
