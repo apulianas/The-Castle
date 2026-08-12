@@ -62,6 +62,11 @@ ERROR_RED = 0xB00020
 MAX_EMBED_FIELDS = 25
 MAX_DESCRIPTION_CHARS = 4096
 MAX_FIELD_CHARS = 1024
+# Discord counts a whole embed, not just its parts; a long report hits this
+# ceiling well before it runs out of fields.
+MAX_EMBED_CHARS = 6000
+# Room for the footer, which is written after the fields are filled.
+SNAP_FOOTER_RESERVE = 120
 DATA_SOURCE = "Data: ESPN"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
@@ -340,7 +345,11 @@ def _add_snap_blocks(
 
     A full report names forty players, which is past Discord's 25 field limit
     if each player were a field, so players are lines inside a unit's field.
+    Several games of totals then run past the whole embed's character budget
+    long before the field limit, so both ceilings are honoured and whatever is
+    dropped is counted for the footer.
     """
+    budget = MAX_EMBED_CHARS - SNAP_FOOTER_RESERVE
     shown = 0
     for name, lines in blocks:
         if not lines:
@@ -350,23 +359,33 @@ def _add_snap_blocks(
         part = 0
         for line in lines:
             if chunk and length + len(line) + 1 > MAX_FIELD_CHARS:
-                if len(embed.fields) >= MAX_EMBED_FIELDS:
-                    return shown
+                title = name if part == 0 else f"{name} (cont.)"
+                if not _add_snap_field(embed, title, chunk, budget):
+                    return shown - len(chunk)
                 part += 1
-                title = name if part == 1 else f"{name} (cont.)"
-                embed.add_field(name=title, value="\n".join(chunk), inline=False)
                 chunk = []
                 length = 0
             chunk.append(line)
             length += len(line) + 1
             shown += 1
         if chunk:
-            if len(embed.fields) >= MAX_EMBED_FIELDS:
+            title = name if part == 0 else f"{name} (cont.)"
+            if not _add_snap_field(embed, title, chunk, budget):
                 return shown - len(chunk)
-            part += 1
-            title = name if part == 1 else f"{name} (cont.)"
-            embed.add_field(name=title, value="\n".join(chunk), inline=False)
     return shown
+
+
+def _add_snap_field(
+    embed: discord.Embed, title: str, lines: list[str], budget: int
+) -> bool:
+    """Add one field unless it would breach a Discord limit."""
+    value = "\n".join(lines)
+    if len(embed.fields) >= MAX_EMBED_FIELDS:
+        return False
+    if len(embed) + len(title) + len(value) > budget:
+        return False
+    embed.add_field(name=title, value=value, inline=False)
+    return True
 
 
 def no_snap_counts_embed(message: str) -> discord.Embed:

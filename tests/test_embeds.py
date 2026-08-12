@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from ravens_bot.embeds import (
     MAX_DESCRIPTION_CHARS,
+    MAX_EMBED_CHARS,
     MAX_EMBED_FIELDS,
     MAX_FIELD_CHARS,
     _limit_description,
@@ -401,10 +402,41 @@ def test_snap_count_embed_reports_players_it_had_to_hide() -> None:
 
     embed = snap_count_embed(_snap_report(players))
 
-    assert len(embed.fields) == MAX_EMBED_FIELDS
+    assert len(embed) <= MAX_EMBED_CHARS
+    assert len(embed.fields) <= MAX_EMBED_FIELDS
     assert embed.footer.text is not None
     assert embed.footer.text.startswith("Showing ")
     assert "of 900 players" in embed.footer.text
+
+
+def test_snap_totals_embed_stays_inside_the_whole_embed_budget() -> None:
+    entries = tuple(
+        PlayerSnaps(
+            player=PlayerRef(
+                name=f"Player Number{index:03d}",
+                position="WR",
+                athlete_id=f"44296{index:03d}",
+            ),
+            offense=60 - index % 40,
+        )
+        for index in range(70)
+    )
+    report = _snap_report(entries)
+    totals = [
+        PlayerSnapTotals(
+            player=entry.player,
+            entries=tuple((report.game, entry) for _ in range(18)),
+            offense=entry.offense * 18,
+            offense_total=68 * 18,
+        )
+        for entry in entries
+    ]
+
+    embed = snap_totals_embed(totals, [report], 18)
+
+    assert len(embed) <= MAX_EMBED_CHARS
+    assert embed.footer.text is not None
+    assert embed.footer.text.startswith("Showing ")
 
 
 def test_player_snap_embed_uses_the_feature_headshot() -> None:
