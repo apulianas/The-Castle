@@ -11,8 +11,12 @@ class DateWindow:
     end: date
 
 
+def now_in_zone(time_zone: ZoneInfo) -> datetime:
+    return datetime.now(time_zone)
+
+
 def today_in_zone(time_zone: ZoneInfo) -> date:
-    return datetime.now(time_zone).date()
+    return now_in_zone(time_zone).date()
 
 
 def parse_user_date(raw: str | None, time_zone: ZoneInfo) -> date:

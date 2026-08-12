@@ -310,6 +310,7 @@ def test_help_embed_documents_every_command() -> None:
         "/nextgame",
         "/schedule",
         "/snapcounts",
+        "/fourthdown",
         "/help",
     }
 

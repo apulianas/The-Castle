@@ -12,12 +12,14 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from .config import BotConfig, load_config, webhook_id
-from .dates import parse_user_date, today_in_zone, upcoming_window
+from .dates import now_in_zone, parse_user_date, today_in_zone, upcoming_window
 from .embeds import (
     error_embed,
+    fourth_down_embed,
     help_embed,
     inactive_embeds,
     next_game_embed,
+    no_fourth_down_embed,
     no_snap_counts_embed,
     player_snap_embed,
     player_snap_totals_embed,
@@ -27,11 +29,21 @@ from .embeds import (
     standings_embed,
     transaction_embeds,
 )
-from .espn import EspnApiError, EspnClient
+from .espn import (
+    EspnApiError,
+    EspnClient,
+    match_team_games,
+    select_insight_game,
+    team_names,
+)
+from .fourthdown import advise
 from .formatting import (
+    format_no_live_game,
     format_no_snap_counts,
     format_no_snap_games,
+    format_not_fourth_down,
     format_unknown_snap_player,
+    format_unknown_team,
 )
 from .models import InactiveReport, PlayerRef, SnapCountReport, Transaction
 from .snapcounts import SnapCountClient, SnapCountError, aggregate, match_players
@@ -43,6 +55,8 @@ ScheduleDays = app_commands.Range[int, 1, 30]
 SnapWeeks = app_commands.Range[int, 1, 18]
 # How many close names a failed player search offers back.
 MAX_PLAYER_SUGGESTIONS = 5
+# How many live teams a failed team search offers back.
+MAX_TEAM_SUGGESTIONS = 8
 
 
 @dataclass(frozen=True)
@@ -76,6 +90,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_next_game_command(self))
         self.tree.add_command(_schedule_command(self))
         self.tree.add_command(_snapcounts_command(self))
+        self.tree.add_command(_fourthdown_command(self))
         self.tree.add_command(_help_command())
         await self.tree.sync()
         if self.config.has_announcement_targets:
@@ -338,6 +353,79 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         )
 
     return snapcounts
+
+
+def _fourthdown_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(
+        name="fourthdown",
+        description="Should the team with the ball go for it, kick, or punt?",
+    )
+    @app_commands.describe(
+        team="Optional team; omit for the Ravens game, or whatever else is live"
+    )
+    async def fourthdown(
+        interaction: discord.Interaction, team: str | None = None
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            games = await _require_espn(bot).fetch_live_games()
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+
+        if not games:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(format_no_live_game()), ephemeral=True
+            )
+            return
+
+        if team:
+            matches = match_team_games(games, team)
+            if not matches:
+                await interaction.followup.send(
+                    embed=no_fourth_down_embed(
+                        format_unknown_team(team, team_names(games)[:MAX_TEAM_SUGGESTIONS])
+                    ),
+                    ephemeral=True,
+                )
+                return
+            game = matches[0]
+        else:
+            game = select_insight_game(
+                games, bot.config.secondary_team, now_in_zone(bot.config.time_zone)
+            )
+        if game is None:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(format_no_live_game()), ephemeral=True
+            )
+            return
+
+        situation = game.situation
+        if situation is None:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(
+                    format_not_fourth_down(
+                        game, "ESPN has not published a down for this game yet."
+                    ),
+                    game,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        advice = advise(situation)
+        if not advice.can_advise:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(
+                    format_not_fourth_down(game, advice.reason or "No recommendation."),
+                    game,
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(embed=fourth_down_embed(game, advice))
+
+    return fourthdown
 
 
 async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountReport] | None:
