@@ -18,8 +18,10 @@ from .embeds import (
     fourth_down_embed,
     help_embed,
     inactive_embeds,
+    live_game_embed,
     next_game_embed,
     no_fourth_down_embed,
+    no_live_game_embed,
     no_snap_counts_embed,
     player_snap_embed,
     player_snap_totals_embed,
@@ -88,6 +90,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_inactives_command(self))
         self.tree.add_command(_standings_command(self))
         self.tree.add_command(_next_game_command(self))
+        self.tree.add_command(_live_command(self))
         self.tree.add_command(_schedule_command(self))
         self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_fourthdown_command(self))
@@ -442,6 +445,28 @@ async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountRepo
         # snap counts themselves.
         LOGGER.warning("Snap counts posted without roster art")
     return await _require_snap_counts(bot).fetch_reports(games, roster)
+
+
+def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(
+        name="live", description="Show live in-game stats for the Ravens."
+    )
+    async def live(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        today = today_in_zone(bot.config.time_zone)
+        try:
+            report = await _require_espn(bot).fetch_live_game(today)
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        if report is None:
+            await interaction.followup.send(embed=no_live_game_embed(today))
+            return
+        await interaction.followup.send(
+            embed=live_game_embed(report, bot.config.time_zone)
+        )
+
+    return live
 
 
 def _help_command() -> app_commands.Command[Any, ..., None]:

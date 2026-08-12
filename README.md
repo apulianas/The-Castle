@@ -1,7 +1,7 @@
 # The-Castle
 
 A Dockerized Python Discord bot for Baltimore Ravens roster transactions, game
-day inactives, standings, and upcoming games.
+day inactives, standings, live in-game stats, and upcoming games.
 
 ## Features
 
@@ -10,6 +10,7 @@ day inactives, standings, and upcoming games.
   - `/inactives [date]` — game day inactive reports when ESPN publishes them.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
+  - `/live` — live score, clock, possession, team totals, and leaders for today's game.
   - `/schedule [days]` — upcoming Ravens games over the next 1-30 days.
   - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-18 games.
   - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt.
@@ -41,6 +42,14 @@ means the wording is unit tested without constructing a client.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
 - **Inactives** are grouped by team with position and reason.
+- **Live stats** lead with the score, clock, quarter, possession, and down and
+  distance, then list both teams' box score totals side by side and a leading
+  player per category, Ravens first. A game that has not kicked off points at
+  `/nextgame` instead, since there is nothing to report yet, and a finished game
+  shows the same layout as a live one, which is what a final box score is. ESPN
+  publishes these sections at different points in a game, so the post degrades
+  to the score and clock rather than failing when a section is missing. The
+  footer states when the snapshot was taken, because the numbers move.
 - **Fourth downs** name the call as the title, the live situation as the
   description, and one field per option carrying its expected points and the
   reasoning behind them — the conversion rate, the kick distance and its make
@@ -60,13 +69,16 @@ time, and any list longer than 25 fields states how many entries were hidden.
 ## Caching
 
 `ravens_bot/cache.py` holds a small TTL cache in front of the slower endpoints:
-standings for 5 minutes, the schedule for 3, the roster for an hour, and a
-season of snap counts for 6 hours, since a finished game's snaps never change
-and the file only grows a week at a time, and the live scoreboard for 12
-seconds, which is only long enough to collapse a burst of commands without ever
-answering with last play's down. Each
-key has its own lock, so a burst of commands on a cold key waits on one in-flight
-request instead of issuing several identical ones.
+standings for 5 minutes, the schedule for 3, the roster for an hour, a game
+summary for 45 seconds, a season of snap counts for 6 hours, since a finished
+game's snaps never change and the file only grows a week at a time, and the live
+scoreboard for 12 seconds, which is only long enough to collapse a burst of
+commands without ever answering with last play's down. A live game moves play by
+play, so the short summary entry exists to absorb a burst of `/live` calls
+rather than to spare ESPN the traffic; the score shown always comes from the
+summary, which leads the cached scoreboard. Each key has its own lock, so a
+burst of commands on a cold key waits on one in-flight request instead of
+issuing several identical ones.
 
 ## Setup
 

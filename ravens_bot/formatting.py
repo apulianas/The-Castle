@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .espn_urls import link
@@ -11,10 +11,14 @@ from .models import (
     Game,
     GameSituation,
     InactivePlayer,
+    LiveGameReport,
+    LiveSituation,
+    PlayerGameStats,
     PlayerSnaps,
     PlayerSnapTotals,
     SnapCountReport,
     Standing,
+    TeamGameStats,
     Transaction,
 )
 
@@ -342,6 +346,108 @@ def format_unknown_snap_player(query: str, suggestions: list[str]) -> str:
         names = ", ".join(suggestions)
         return f"{text} Did you mean: {names}?"
     return text
+
+
+def format_time_of_day(moment: datetime, time_zone: ZoneInfo) -> str:
+    """A wall clock time, for stating when a snapshot was taken."""
+    local = moment.astimezone(time_zone)
+    hour = local.hour % 12 or 12
+    zone = local.tzname()
+    stamp = f"{hour}:{local:%M} {local:%p}"
+    return f"{stamp} {zone}" if zone else stamp
+
+
+def format_period(period: int | None) -> str | None:
+    """A quarter number as people say it, with overtime counted from the fifth."""
+    if period is None or period < 1:
+        return None
+    if period <= 4:
+        return f"Q{period}"
+    return "OT" if period == 5 else f"OT{period - 4}"
+
+
+def format_live_score(game: Game) -> str:
+    """The running score, written away side first the way a scoreboard reads."""
+    sides = [side for side in (game.away, game.home) if side is not None]
+    parts = [
+        f"{side.team.short_name} {side.score if side.score is not None else 0}"
+        for side in sides
+    ]
+    return " — ".join(parts) if parts else game.status
+
+
+def format_situation(situation: LiveSituation | None) -> str | None:
+    """Clock, quarter, and possession, skipping whatever ESPN left out."""
+    if situation is None:
+        return None
+    parts = []
+    period = format_period(situation.period)
+    clock = situation.clock
+    if clock and period:
+        parts.append(f"{clock} {period}")
+    elif clock or period:
+        parts.append(clock or period or "")
+    if situation.possession is not None:
+        marker = f"🏈 {situation.possession.short_name}"
+        parts.append(f"{marker} (red zone)" if situation.is_red_zone else marker)
+    if situation.down_distance:
+        parts.append(situation.down_distance)
+    elif situation.field_position:
+        parts.append(situation.field_position)
+    return " • ".join(part for part in parts if part) or None
+
+
+def format_last_play(situation: LiveSituation | None) -> str | None:
+    if situation is None or not situation.last_play:
+        return None
+    return f"Last play: {situation.last_play}"
+
+
+def format_team_stat_row(label: str, teams: list[TeamGameStats]) -> str:
+    values = " | ".join(entry.value(label) or NO_STAT for entry in teams)
+    return f"{label}: {values}"
+
+
+def format_team_stat_lines(report: LiveGameReport) -> list[str]:
+    """A compact table of both teams' totals, one line per statistic."""
+    teams = list(report.teams)
+    if not teams:
+        return []
+    header = " | ".join(entry.team.short_name for entry in teams)
+    lines = [f"({header})"]
+    lines.extend(format_team_stat_row(label, teams) for label in report.stat_labels)
+    return lines
+
+
+def format_team_stats(report: LiveGameReport) -> str | None:
+    lines = format_team_stat_lines(report)
+    return "\n".join(lines) if lines else None
+
+
+def format_player_stat_line(line: PlayerGameStats) -> str:
+    name = link(line.player.name, line.player.page_url)
+    team = line.team.short_name if line.team is not None else None
+    prefix = f"{team} " if team else ""
+    return f"{line.category}: {prefix}{name} — {line.detail}"
+
+
+def format_no_game_today(target_date: date) -> str:
+    """No game today is the normal case six days a week, so it reads plainly."""
+    return (
+        f"No {RAVENS_NAME} game today ({format_full_date(target_date)}). "
+        "Try `/nextgame` for the next matchup."
+    )
+
+
+def format_pregame(game: Game, time_zone: ZoneInfo) -> str:
+    return (
+        f"{format_matchup(game)} has not kicked off yet.\n"
+        f"{format_kickoff(game, time_zone)}"
+    )
+
+
+def format_no_live_stats() -> str:
+    return "ESPN has not published stats for this game yet."
 
 
 def format_expected_points(value: float) -> str:

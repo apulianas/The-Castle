@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import discord
@@ -19,23 +19,30 @@ from .formatting import (
     format_game_title,
     format_inactive_player,
     format_kickoff,
+    format_last_play,
+    format_live_score,
     format_long_date,
     format_matchup,
     format_fourth_down_call,
     format_fourth_down_option,
     format_fourth_down_situation,
     format_no_game,
+    format_no_game_today,
+    format_no_live_stats,
     format_no_inactives,
     format_no_scheduled_games,
     format_no_standings,
     format_no_snap_counts,
     format_no_transactions,
     format_player_snap_totals,
+    format_player_stat_line,
+    format_pregame,
     format_player_snaps,
     format_ravens_standing,
     format_records,
     format_schedule_day,
     format_schedule_entry,
+    format_situation,
     format_snap_breakdown,
     format_snap_game_line,
     format_snap_period,
@@ -43,6 +50,8 @@ from .formatting import (
     format_snap_totals_row,
     format_standings,
     format_standings_detail,
+    format_time_of_day,
+    format_team_stat_lines,
     format_transaction,
     format_venue,
 )
@@ -53,6 +62,7 @@ from .models import (
     SNAP_UNITS,
     Game,
     InactiveReport,
+    LiveGameReport,
     PlayerSnaps,
     PlayerSnapTotals,
     SnapCountReport,
@@ -71,6 +81,8 @@ MAX_FIELD_CHARS = 1024
 MAX_EMBED_CHARS = 6000
 # Room for the footer, which is written after the fields are filled.
 SNAP_FOOTER_RESERVE = 120
+# The live footer also carries a timestamp, so it reserves a little more.
+LIVE_FOOTER_RESERVE = 160
 DATA_SOURCE = "Data: ESPN"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
@@ -353,6 +365,15 @@ def help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="/live",
+        value=(
+            "Live score, clock, possession, and down and distance for today's "
+            "game, with team totals and leading players. Shows the final box "
+            "score once the game ends."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="/schedule [days]",
         value="Upcoming Ravens games for 1-30 days, with kickoff, broadcast, and venue.",
         inline=False,
@@ -392,18 +413,20 @@ def _snap_footer(shown: int, available: int, extra: str | None = None) -> str:
     return " • ".join(parts)
 
 
-def _add_snap_blocks(
-    embed: discord.Embed, blocks: list[tuple[str, list[str]]]
+def _add_field_blocks(
+    embed: discord.Embed,
+    blocks: list[tuple[str, list[str]]],
+    reserve: int = SNAP_FOOTER_RESERVE,
 ) -> int:
-    """Add one field per unit, splitting a unit that outgrows a field.
+    """Add one field per block, splitting a block that outgrows a field.
 
-    A full report names forty players, which is past Discord's 25 field limit
-    if each player were a field, so players are lines inside a unit's field.
-    Several games of totals then run past the whole embed's character budget
-    long before the field limit, so both ceilings are honoured and whatever is
-    dropped is counted for the footer.
+    A full snap report names forty players, which is past Discord's 25 field
+    limit if each player were a field, so players are lines inside a unit's
+    field. Several games of totals then run past the whole embed's character
+    budget long before the field limit, so both ceilings are honoured and
+    whatever is dropped is counted for the footer.
     """
-    budget = MAX_EMBED_CHARS - SNAP_FOOTER_RESERVE
+    budget = MAX_EMBED_CHARS - reserve
     shown = 0
     for name, lines in blocks:
         if not lines:
@@ -414,7 +437,7 @@ def _add_snap_blocks(
         for line in lines:
             if chunk and length + len(line) + 1 > MAX_FIELD_CHARS:
                 title = name if part == 0 else f"{name} (cont.)"
-                if not _add_snap_field(embed, title, chunk, budget):
+                if not _add_block_field(embed, title, chunk, budget):
                     return shown - len(chunk)
                 part += 1
                 chunk = []
@@ -424,12 +447,12 @@ def _add_snap_blocks(
             shown += 1
         if chunk:
             title = name if part == 0 else f"{name} (cont.)"
-            if not _add_snap_field(embed, title, chunk, budget):
+            if not _add_block_field(embed, title, chunk, budget):
                 return shown - len(chunk)
     return shown
 
 
-def _add_snap_field(
+def _add_block_field(
     embed: discord.Embed, title: str, lines: list[str], budget: int
 ) -> bool:
     """Add one field unless it would breach a Discord limit."""
@@ -471,7 +494,7 @@ def snap_count_embed(report: SnapCountReport) -> discord.Embed:
             (title, [format_snap_row(entry, report, unit) for entry in entries])
         )
     available = sum(len(lines) for _, lines in blocks)
-    shown = _add_snap_blocks(embed, blocks)
+    shown = _add_field_blocks(embed, blocks)
     embed.set_footer(text=_snap_footer(shown, available))
     return embed
 
@@ -501,7 +524,7 @@ def snap_totals_embed(
             (unit.capitalize(), [format_snap_totals_row(item, unit) for item in entries])
         )
     available = sum(len(lines) for _, lines in blocks)
-    shown = _add_snap_blocks(embed, blocks)
+    shown = _add_field_blocks(embed, blocks)
     embed.set_footer(text=_snap_footer(shown, available, f"{len(reports)} games"))
     return embed
 
@@ -554,4 +577,67 @@ def player_snap_totals_embed(
     else:
         embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
     embed.set_footer(text=SNAP_DATA_SOURCE)
+    return embed
+
+
+def no_live_game_embed(target_date: date) -> discord.Embed:
+    embed = _base_embed("Ravens live stats", format_no_game_today(target_date))
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=DATA_SOURCE)
+    return embed
+
+
+def _live_title(game: Game) -> str:
+    if game.state == "in":
+        return f"{format_matchup(game)} — live"
+    if game.completed:
+        return f"{format_game_title(game)} — final"
+    return f"{format_matchup(game)} — pregame"
+
+
+def _add_live_fields(embed: discord.Embed, report: LiveGameReport) -> None:
+    """Team totals and leader lines, within Discord's field and size limits."""
+    blocks = [
+        ("Team stats", format_team_stat_lines(report)),
+        ("Leaders", [format_player_stat_line(line) for line in report.leaders]),
+    ]
+    _add_field_blocks(embed, blocks, LIVE_FOOTER_RESERVE)
+
+
+def live_game_embed(
+    report: LiveGameReport, time_zone: ZoneInfo, as_of: datetime | None = None
+) -> discord.Embed:
+    """A live snapshot, or the closest thing ESPN publishes for this game.
+
+    A game that has not kicked off has no stats to show, so it points at
+    `/nextgame` instead; a finished game shows the same layout as a live one,
+    which is what a final box score is.
+    """
+    game = report.game
+    lines = []
+    if game.state == "pre" and not game.completed:
+        lines.append(format_pregame(game, time_zone))
+        lines.append("Use `/nextgame` for broadcast, venue, and records.")
+    else:
+        lines.append(f"**{format_live_score(game)}**")
+        situation = format_situation(report.situation)
+        if situation:
+            lines.append(situation)
+        lines.append(format_game_status(game))
+        last_play = format_last_play(report.situation)
+        if last_play:
+            lines.append(last_play)
+        if not report.has_details:
+            lines.append(format_no_live_stats())
+
+    embed = _base_embed(
+        _live_title(game), "\n".join(lines), url=game_url(game.event_id)
+    )
+    _set_game_art(embed, game)
+    if game.state != "pre" or game.completed:
+        _add_live_fields(embed, report)
+
+    moment = as_of or datetime.now(timezone.utc)
+    stamp = format_time_of_day(moment, time_zone)
+    embed.set_footer(text=f"As of {stamp} • {DATA_SOURCE}")
     return embed
