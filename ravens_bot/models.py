@@ -131,6 +131,10 @@ class Game:
     broadcast: str | None = None
     week: str | None = None
     location: str | None = None
+    season: int | None = None
+    # ESPN's season type: 1 preseason, 2 regular season, 3 postseason.
+    season_type: int | None = None
+    week_number: int | None = None
 
     @property
     def has_started(self) -> bool:
@@ -196,3 +200,103 @@ class Standing:
     @property
     def is_ravens(self) -> bool:
         return self.team.is_ravens
+
+
+OFFENSE = "offense"
+DEFENSE = "defense"
+SPECIAL_TEAMS = "special teams"
+SNAP_UNITS = (OFFENSE, DEFENSE, SPECIAL_TEAMS)
+
+
+@dataclass(frozen=True)
+class PlayerSnaps:
+    """One player's snaps in one game, by unit."""
+
+    player: PlayerRef
+    offense: int = 0
+    defense: int = 0
+    special_teams: int = 0
+
+    @property
+    def name(self) -> str:
+        return self.player.name
+
+    @property
+    def position(self) -> str | None:
+        return self.player.position
+
+    @property
+    def total(self) -> int:
+        return self.offense + self.defense + self.special_teams
+
+    def snaps(self, unit: str) -> int:
+        if unit == OFFENSE:
+            return self.offense
+        if unit == DEFENSE:
+            return self.defense
+        return self.special_teams
+
+    @property
+    def primary_unit(self) -> str:
+        """The unit a player belongs to, so a report lists them exactly once."""
+        return max(SNAP_UNITS, key=lambda unit: (self.snaps(unit), SNAP_UNITS.index(unit) * -1))
+
+
+@dataclass(frozen=True)
+class SnapCountReport:
+    """Ravens snap counts for one game, with the team totals used as denominators."""
+
+    game: Game
+    players: tuple[PlayerSnaps, ...] = ()
+    offense_total: int = 0
+    defense_total: int = 0
+    special_teams_total: int = 0
+
+    def total(self, unit: str) -> int:
+        if unit == OFFENSE:
+            return self.offense_total
+        if unit == DEFENSE:
+            return self.defense_total
+        return self.special_teams_total
+
+    def unit(self, unit: str) -> tuple[PlayerSnaps, ...]:
+        """Players whose game was mostly this unit, most snaps first."""
+        entries = [entry for entry in self.players if entry.primary_unit == unit and entry.snaps(unit)]
+        entries.sort(key=lambda entry: (-entry.snaps(unit), entry.name))
+        return tuple(entries)
+
+
+@dataclass(frozen=True)
+class PlayerSnapTotals:
+    """One player's snaps summed across several games, plus the per-game rows."""
+
+    player: PlayerRef
+    entries: tuple[tuple[Game, PlayerSnaps], ...] = ()
+    offense: int = 0
+    defense: int = 0
+    special_teams: int = 0
+    offense_total: int = 0
+    defense_total: int = 0
+    special_teams_total: int = 0
+
+    @property
+    def games(self) -> int:
+        return len(self.entries)
+
+    def snaps(self, unit: str) -> int:
+        if unit == OFFENSE:
+            return self.offense
+        if unit == DEFENSE:
+            return self.defense
+        return self.special_teams
+
+    def total(self, unit: str) -> int:
+        if unit == OFFENSE:
+            return self.offense_total
+        if unit == DEFENSE:
+            return self.defense_total
+        return self.special_teams_total
+
+    @property
+    def primary_unit(self) -> str:
+        return max(SNAP_UNITS, key=lambda unit: (self.snaps(unit), SNAP_UNITS.index(unit) * -1))

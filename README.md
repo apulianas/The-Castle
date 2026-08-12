@@ -11,6 +11,7 @@ day inactives, standings, and upcoming games.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
   - `/schedule [days]` — upcoming Ravens games over the next 1-30 days.
+  - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-18 games.
   - `/help` — command help.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
   player, team, and game pages.
@@ -39,6 +40,12 @@ means the wording is unit tested without constructing a client.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
 - **Inactives** are grouped by team with position and reason.
+- **Snap counts** list players by unit — offence, defence, special teams — each
+  in the unit they played most, sorted by snaps. A player is a line inside a
+  unit's field rather than a field of their own, because a full report names
+  forty players and Discord allows twenty five fields. Naming a player switches
+  to their own embed, with their headshot and, over several games, a week by
+  week breakdown.
 
 Embeds are truncated to Discord's limits rather than being rejected at send
 time, and any list longer than 25 fields states how many entries were hidden.
@@ -46,7 +53,9 @@ time, and any list longer than 25 fields states how many entries were hidden.
 ## Caching
 
 `ravens_bot/cache.py` holds a small TTL cache in front of the slower endpoints:
-standings for 5 minutes, the schedule for 3, and the roster for an hour. Each
+standings for 5 minutes, the schedule for 3, the roster for an hour, and a
+season of snap counts for 6 hours, since a finished game's snaps never change
+and the file only grows a week at a time. Each
 key has its own lock, so a burst of commands on a cold key waits on one in-flight
 request instead of issuing several identical ones.
 
@@ -115,3 +124,32 @@ Two ESPN behaviours are worth knowing, since both look like bugs otherwise:
   on two consecutive dates.
 - The `teams` query parameter on the transactions endpoint is ignored — the feed
   comes back league-wide either way — so Ravens moves are filtered client side.
+
+### Snap counts
+
+ESPN does not publish snap counts. They come from the NFL's GSIS game book,
+whose player participation page is posted per game at
+`https://nflgsis.com/{season}/{Reg|Post}/{week:02d}/{gamekey}/Gamebook.pdf`.
+
+`ravens_bot/snapcounts.py` does not read that PDF. Doing so would mean shipping
+a PDF text extractor, mapping ESPN's event id onto the GSIS game key the URL
+needs, and re-deriving each percentage by hand from a page whose layout carries
+no guarantee. The sibling `Gamebook.xml` does not help: it names starters,
+substitutions, and inactives, but carries no snap totals.
+
+nflverse republishes the same participation numbers as a per-season CSV keyed by
+season, week, and team, and that is what the bot reads. It needs no PDF
+dependency and no game key, and it carries the unit percentages the game book
+prints beside the counts.
+
+Three consequences are worth knowing:
+
+- Snap counts trail the final whistle by hours, so a game with no published
+  numbers is reported as pending rather than as an error.
+- The file states each player's share of a unit rather than the unit's total, so
+  the denominator is rebuilt from the counts and shares and the value most of a
+  unit agrees on is used. A count larger than that total is printed on its own
+  rather than as a share above 100%.
+- A Ravens game is matched to the file by season, opponent, and whether the
+  Ravens were at home, with the regular season flag separating a playoff rematch
+  from the regular season meeting it repeats.
