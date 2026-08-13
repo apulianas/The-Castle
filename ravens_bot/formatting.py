@@ -123,6 +123,12 @@ def format_schedule_day(game: Game, time_zone: ZoneInfo) -> str:
     return f"{prefix}{format_matchup(game)}"
 
 
+def format_schedule_line(game: Game, time_zone: ZoneInfo) -> str:
+    """One game on one line, for a schedule too long to give each its own field."""
+    detail = format_score(game) or format_game_time(game, time_zone)
+    return f"{format_schedule_day(game, time_zone)} — {detail}"
+
+
 def format_no_scheduled_games(days: int) -> str:
     return f"No Ravens games scheduled in the next {days} days."
 

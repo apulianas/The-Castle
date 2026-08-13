@@ -52,6 +52,9 @@ ROSTER_TTL_SECONDS = 3600.0
 # A live game moves play by play, so this cache exists only to absorb a burst of
 # commands rather than to spare ESPN the traffic.
 LIVE_STATS_TTL_SECONDS = 45.0
+# The Ravens' first season, and so the point where walking back through earlier
+# schedules stops rather than asking ESPN for seasons the team did not play.
+MIN_SEASON = 1996
 
 # Box score groups worth a leader line when ESPN omits its own leaders block.
 BOXSCORE_CATEGORIES = ("passing", "rushing", "receiving")
@@ -577,6 +580,22 @@ def select_insight_game(
         return (0, abs((moment - game.start_time).total_seconds()))
 
     return min(live, key=started_ago)
+
+
+def _local_game_date(game: Game, time_zone: ZoneInfo) -> date | None:
+    """The calendar day a game is played on where the reader lives."""
+    if game.start_time is None:
+        return None
+    return game.start_time.astimezone(time_zone).date()
+
+
+def _last_game_date(games: list[Game], time_zone: ZoneInfo) -> date | None:
+    dates = [
+        moment
+        for moment in (_local_game_date(game, time_zone) for game in games)
+        if moment is not None
+    ]
+    return max(dates) if dates else None
 
 
 def _date_from_keys(payload: dict[str, Any], keys: tuple[str, ...]) -> date | None:
@@ -1318,6 +1337,45 @@ class EspnClient:
         games = await self._schedule_cache.get_or_fetch(key, load)
         return list(games)
 
+    async def fetch_upcoming(self, window: DateWindow, time_zone: ZoneInfo) -> list[Game]:
+        """Ravens games inside ``window``, however long that window is.
+
+        The scoreboard answers a date range, but a range long enough to hold a
+        whole schedule is more than it will return, which is why a window that
+        size is answered from the team's season schedule instead. A window that
+        reaches past the last game of that season pulls the next one as well.
+        Games ESPN has not given a kickoff time to cannot be placed on a date,
+        so they are kept only when the window covers the whole schedule, where
+        dropping them would hide games that genuinely are still to be played.
+        """
+        try:
+            games = await self.fetch_season_schedule()
+        except EspnApiError:
+            return await self.fetch_schedule(window)
+        last = _last_game_date(games, time_zone)
+        if last is None or last < window.end:
+            season = next(
+                (game.season for game in reversed(games) if game.season), None
+            )
+            if season is not None:
+                try:
+                    games = games + await self.fetch_season_schedule(season + 1)
+                except EspnApiError:
+                    pass
+        dated = [(game, _local_game_date(game, time_zone)) for game in games]
+        kickoffs = [moment for _, moment in dated if moment is not None]
+        whole_schedule = all(
+            window.start <= moment <= window.end for moment in kickoffs
+        )
+        selected: list[Game] = []
+        for game, moment in dated:
+            if moment is None:
+                if whole_schedule and not game.completed:
+                    selected.append(game)
+            elif window.start <= moment <= window.end:
+                selected.append(game)
+        return selected
+
     async def fetch_season_schedule(self, season: int | None = None) -> list[Game]:
         key = "season" if season is None else f"season:{season}"
 
@@ -1337,22 +1395,29 @@ class EspnClient:
         Completion comes from ESPN's status rather than from comparing dates,
         so a game in progress is not reported as played. Early in a season, and
         all through the offseason, the games asked for are in the season before
-        the one the schedule endpoint defaults to.
+        the one the schedule endpoint defaults to. A request larger than one
+        season keeps walking back a season at a time rather than stopping after
+        a single step, so asking for more games than a season holds returns
+        them instead of a short list.
         """
         schedule = await self.fetch_season_schedule()
         games = [game for game in schedule if game.completed]
-        if len(games) < count:
-            season = next(
-                (game.season for game in reversed(schedule) if game.season), None
-            )
-            if season is None:
-                # The NFL season is named for the year it kicks off in.
-                season = today.year if today.month >= 3 else today.year - 1
+        season = next(
+            (game.season for game in reversed(schedule) if game.season), None
+        )
+        if season is None:
+            # The NFL season is named for the year it kicks off in.
+            season = today.year if today.month >= 3 else today.year - 1
+        while len(games) < count and season > MIN_SEASON:
+            season -= 1
             try:
-                earlier = await self.fetch_season_schedule(season - 1)
+                earlier = await self.fetch_season_schedule(season)
             except EspnApiError:
-                earlier = []
-            games = [game for game in earlier if game.completed] + games
+                break
+            played = [game for game in earlier if game.completed]
+            if not played:
+                break
+            games = played + games
         return games[-count:]
 
     async def fetch_inactives(self, target_date: date) -> list[InactiveReport]:

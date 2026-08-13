@@ -11,8 +11,9 @@ day inactives, standings, live in-game stats, and upcoming games.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
   - `/live` — live score, clock, possession, team totals, and leaders for today's game.
-  - `/schedule [days]` — upcoming Ravens games over the next 1-30 days.
-  - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-18 games.
+  - `/schedule [days]` — upcoming Ravens games over the next 1-366 days, so a full
+    schedule is one command.
+  - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-42 games.
   - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt.
   - `/help` — command help.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN

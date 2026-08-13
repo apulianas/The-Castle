@@ -50,6 +50,10 @@ SNAP_COUNTS_TTL_SECONDS = 21600.0
 # Team codes where the snap count file and ESPN disagree.
 TEAM_CODE_ALIASES = {"LAR": "LA", "WSH": "WAS", "LVR": "LV", "JAC": "JAX"}
 REGULAR_SEASON_TYPE = "REG"
+# A season is seventeen games plus up to four in the playoffs, and a request
+# made early in one reaches back into the season before it, so a snap count
+# request can cover two full seasons rather than a single regular season.
+MAX_SNAP_GAMES = 42
 
 
 class SnapCountError(RuntimeError):
