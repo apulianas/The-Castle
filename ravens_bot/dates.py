@@ -5,6 +5,12 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
+# A whole season runs from September into February, and asking in the offseason
+# means reaching further still, so a schedule window covers a full year rather
+# than the month a scoreboard query is comfortable with.
+MAX_SCHEDULE_DAYS = 366
+
+
 @dataclass(frozen=True)
 class DateWindow:
     start: date
@@ -29,8 +35,8 @@ def parse_user_date(raw: str | None, time_zone: ZoneInfo) -> date:
 
 
 def upcoming_window(days: int, time_zone: ZoneInfo) -> DateWindow:
-    if days < 1 or days > 30:
-        raise ValueError("days must be between 1 and 30")
+    if days < 1 or days > MAX_SCHEDULE_DAYS:
+        raise ValueError(f"days must be between 1 and {MAX_SCHEDULE_DAYS}")
     start = today_in_zone(time_zone)
     return DateWindow(start=start, end=start + timedelta(days=days - 1))
 

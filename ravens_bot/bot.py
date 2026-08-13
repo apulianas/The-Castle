@@ -12,7 +12,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from .config import BotConfig, load_config, webhook_id
-from .dates import now_in_zone, parse_user_date, today_in_zone, upcoming_window
+from .dates import (
+    MAX_SCHEDULE_DAYS,
+    now_in_zone,
+    parse_user_date,
+    today_in_zone,
+    upcoming_window,
+)
 from .embeds import (
     error_embed,
     fourth_down_embed,
@@ -48,13 +54,19 @@ from .formatting import (
     format_unknown_team,
 )
 from .models import InactiveReport, PlayerRef, SnapCountReport, Transaction
-from .snapcounts import SnapCountClient, SnapCountError, aggregate, match_players
+from .snapcounts import (
+    MAX_SNAP_GAMES,
+    SnapCountClient,
+    SnapCountError,
+    aggregate,
+    match_players,
+)
 from .state import AnnouncementState, channel_key
 
 
 LOGGER = logging.getLogger(__name__)
-ScheduleDays = app_commands.Range[int, 1, 30]
-SnapWeeks = app_commands.Range[int, 1, 18]
+ScheduleDays = app_commands.Range[int, 1, MAX_SCHEDULE_DAYS]
+SnapWeeks = app_commands.Range[int, 1, MAX_SNAP_GAMES]
 # How many close names a failed player search offers back.
 MAX_PLAYER_SUGGESTIONS = 5
 # How many live teams a failed team search offers back.
@@ -263,7 +275,9 @@ def _next_game_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
 
 def _schedule_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(name="schedule", description="Show upcoming Ravens games.")
-    @app_commands.describe(days="How many days ahead to show (1-30, default 7)")
+    @app_commands.describe(
+        days=f"How many days ahead to show (1-{MAX_SCHEDULE_DAYS}, default 7)"
+    )
     async def schedule(interaction: discord.Interaction, days: ScheduleDays = 7) -> None:
         try:
             window = upcoming_window(days, bot.config.time_zone)
@@ -272,7 +286,7 @@ def _schedule_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            games = await _require_espn(bot).fetch_schedule(window)
+            games = await _require_espn(bot).fetch_upcoming(window, bot.config.time_zone)
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
@@ -285,7 +299,7 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(name="snapcounts", description="Show Ravens snap counts.")
     @app_commands.describe(
         player="Optional player name; omit for the full team report",
-        weeks="How many recent games to cover (1-18, default 1)",
+        weeks=f"How many recent games to cover (1-{MAX_SNAP_GAMES}, default 1)",
     )
     async def snapcounts(
         interaction: discord.Interaction,

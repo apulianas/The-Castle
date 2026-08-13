@@ -42,6 +42,7 @@ from .formatting import (
     format_records,
     format_schedule_day,
     format_schedule_entry,
+    format_schedule_line,
     format_situation,
     format_snap_breakdown,
     format_snap_game_line,
@@ -55,6 +56,7 @@ from .formatting import (
     format_transaction,
     format_venue,
 )
+from .dates import MAX_SCHEDULE_DAYS
 from .fourthdown import FourthDownAdvice
 from .models import (
     AFC_NORTH_GROUP_ID,
@@ -69,6 +71,7 @@ from .models import (
     Standing,
     Transaction,
 )
+from .snapcounts import MAX_SNAP_GAMES
 
 
 RAVENS_PURPLE = 0x24125F
@@ -236,20 +239,41 @@ def schedule_embed(games: list[Game], time_zone: ZoneInfo, days: int = 7) -> dis
         embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
         return embed
 
-    for game in games[:MAX_EMBED_FIELDS]:
-        embed.add_field(
-            name=_limit_field(format_schedule_day(game, time_zone), 256),
-            value=_limit_field(format_schedule_entry(game, time_zone)),
-            inline=False,
-        )
-    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
     if len(games) > MAX_EMBED_FIELDS:
-        embed.set_footer(
-            text=f"Showing {MAX_EMBED_FIELDS} of {len(games)} games • {DATA_SOURCE}"
-        )
+        # Discord allows 25 fields, which is fewer than a season holds, so a
+        # long schedule is written as one line per game instead of losing the
+        # games that would not fit.
+        shown = _describe_schedule(embed, games, time_zone)
+    else:
+        shown = len(games)
+        for game in games:
+            embed.add_field(
+                name=_limit_field(format_schedule_day(game, time_zone), 256),
+                value=_limit_field(format_schedule_entry(game, time_zone)),
+                inline=False,
+            )
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+    if shown < len(games):
+        embed.set_footer(text=f"Showing {shown} of {len(games)} games • {DATA_SOURCE}")
     else:
         embed.set_footer(text=DATA_SOURCE)
     return embed
+
+
+def _describe_schedule(
+    embed: discord.Embed, games: list[Game], time_zone: ZoneInfo
+) -> int:
+    """Write games into the description, and report how many fitted."""
+    lines: list[str] = []
+    length = 0
+    for game in games:
+        line = format_schedule_line(game, time_zone)
+        if length + len(line) + 1 > MAX_DESCRIPTION_CHARS:
+            break
+        lines.append(line)
+        length += len(line) + 1
+    embed.description = "\n".join(lines)
+    return len(lines)
 
 
 def standings_embed(standings: list[Standing]) -> discord.Embed:
@@ -375,14 +399,17 @@ def help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="/schedule [days]",
-        value="Upcoming Ravens games for 1-30 days, with kickoff, broadcast, and venue.",
+        value=(
+            f"Upcoming Ravens games for 1-{MAX_SCHEDULE_DAYS} days, with kickoff, "
+            "broadcast, and venue. Ask for a year to get the whole schedule."
+        ),
         inline=False,
     )
     embed.add_field(
         name="/snapcounts [player] [weeks]",
         value=(
             "Snap counts from the NFL game book for the last game, or the last "
-            "1-18 games. Name a player for their own line and a per-game "
+            f"1-{MAX_SNAP_GAMES} games. Name a player for their own line and a per-game "
             "breakdown; omit one for the full team report by unit."
         ),
         inline=False,

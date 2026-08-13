@@ -255,13 +255,25 @@ def test_schedule_embed_reports_the_window_it_searched() -> None:
     assert embed.description == "No Ravens games scheduled in the next 14 days."
 
 
-def test_schedule_embed_reports_how_many_games_were_hidden() -> None:
+def test_schedule_embed_lists_every_game_past_the_field_limit() -> None:
     games = [build_game(str(index)) for index in range(30)]
 
     embed = schedule_embed(games, EASTERN)
 
-    assert len(embed.fields) == MAX_EMBED_FIELDS
-    assert embed.footer.text.startswith("Showing 25 of 30 games")
+    assert len(embed.fields) == 0
+    assert embed.description is not None
+    assert len(embed.description.splitlines()) == 30
+    assert embed.footer.text == "Data: ESPN"
+
+
+def test_schedule_embed_reports_games_that_did_not_fit() -> None:
+    games = [build_game(str(index)) for index in range(400)]
+
+    embed = schedule_embed(games, EASTERN)
+
+    shown = len(embed.description.splitlines())
+    assert shown < 400
+    assert embed.footer.text.startswith(f"Showing {shown} of 400 games")
 
 
 def test_inactive_embed_groups_players_by_team() -> None:
