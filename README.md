@@ -1,13 +1,14 @@
 # The-Castle
 
 A Dockerized Python Discord bot for Baltimore Ravens roster transactions, game
-day inactives, standings, live in-game stats, and upcoming games.
+day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 ## Features
 
 - Slash commands:
   - `/transactions [date]` — Ravens roster transactions for today or a `YYYY-MM-DD` date.
   - `/inactives [date]` — game day inactive reports when ESPN publishes them.
+  - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
   - `/live` — live score, clock, possession, team totals, and leaders for today's game.
@@ -19,7 +20,8 @@ day inactives, standings, live in-game stats, and upcoming games.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
   player, team, and game pages.
 - Roster-backed player resolution, so names in a transaction become real links.
-- Background polling for today's roster transactions and game day inactives.
+- Background polling for today's roster transactions, game day inactives, and
+  injury report changes.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.
@@ -43,6 +45,11 @@ means the wording is unit tested without constructing a client.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
 - **Inactives** are grouped by team with position and reason.
+- **Injuries** are grouped by status — out first, then doubtful, questionable,
+  and the season-long lists — with the injury, ESPN's practice note, and an
+  expected return when one is published. The art is a thumbnail either way: a
+  single-player update shows that player's headshot, and a full report shows the
+  team logo, since an injury post is a status line rather than a feature.
 - **Live stats** lead with the score, clock, quarter, possession, and down and
   distance, then list both teams' box score totals side by side and a leading
   player per category, Ravens first. A game that has not kicked off points at
@@ -70,16 +77,16 @@ time, and any list longer than 25 fields states how many entries were hidden.
 ## Caching
 
 `ravens_bot/cache.py` holds a small TTL cache in front of the slower endpoints:
-standings for 5 minutes, the schedule for 3, the roster for an hour, a game
-summary for 45 seconds, a season of snap counts for 6 hours, since a finished
-game's snaps never change and the file only grows a week at a time, and the live
-scoreboard for 12 seconds, which is only long enough to collapse a burst of
-commands without ever answering with last play's down. A live game moves play by
-play, so the short summary entry exists to absorb a burst of `/live` calls
-rather than to spare ESPN the traffic; the score shown always comes from the
-summary, which leads the cached scoreboard. Each key has its own lock, so a
-burst of commands on a cold key waits on one in-flight request instead of
-issuing several identical ones.
+standings for 5 minutes, the injury report for 5, the schedule for 3, the roster
+for an hour, a game summary for 45 seconds, a season of snap counts for 6 hours,
+since a finished game's snaps never change and the file only grows a week at a
+time, and the live scoreboard for 12 seconds, which is only long enough to
+collapse a burst of commands without ever answering with last play's down. A
+live game moves play by play, so the short summary entry exists to absorb a
+burst of `/live` calls rather than to spare ESPN the traffic; the score shown
+always comes from the summary, which leads the cached scoreboard. Each key has
+its own lock, so a burst of commands on a cold key waits on one in-flight
+request instead of issuing several identical ones.
 
 ## Setup
 
@@ -180,6 +187,21 @@ Two ESPN behaviours are worth knowing, since both look like bugs otherwise:
   on two consecutive dates.
 - The `teams` query parameter on the transactions endpoint is ignored — the feed
   comes back league-wide either way — so Ravens moves are filtered client side.
+
+### Injuries
+
+The injury report shown at `espn.com/nfl/team/injuries/_/name/bal` is served by
+`{site}/teams/bal/injuries`. The route answers with either a flat `injuries`
+list or one group per team, each holding its own list, and a core-API query
+answers with `$ref` links instead, so the parser accepts all three. Names come
+back without a position or headshot often enough that the team roster is merged
+in for art, the same way transactions are; a roster outage drops the art rather
+than the report.
+
+The feed only moves on practice-report days, so most polls are no-ops. A player
+is re-announced when their status or ESPN's update stamp changes, and a target
+with no injury history is sent one consolidated report rather than a message per
+player already on the list.
 
 ### Snap counts
 

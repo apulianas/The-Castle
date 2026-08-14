@@ -9,6 +9,7 @@ import discord
 from .espn_urls import (
     HEADSHOT_FEATURE_WIDTH,
     game_url,
+    injuries_url,
     schedule_url,
     standings_url,
     team_logo_url,
@@ -18,6 +19,8 @@ from .formatting import (
     format_game_status,
     format_game_title,
     format_inactive_player,
+    format_injury,
+    format_injury_updated,
     format_kickoff,
     format_last_play,
     format_live_score,
@@ -30,6 +33,7 @@ from .formatting import (
     format_no_game_today,
     format_no_live_stats,
     format_no_inactives,
+    format_no_injuries,
     format_no_scheduled_games,
     format_no_standings,
     format_no_snap_counts,
@@ -64,6 +68,8 @@ from .models import (
     SNAP_UNITS,
     Game,
     InactiveReport,
+    InjuryReport,
+    InjuryUpdate,
     LiveGameReport,
     PlayerSnaps,
     PlayerSnapTotals,
@@ -232,6 +238,55 @@ def inactive_embeds(
     return embeds
 
 
+def _set_injury_art(embed: discord.Embed, updates: Sequence[InjuryUpdate]) -> None:
+    """A small thumbnail only: one player's headshot, or the team logo.
+
+    An injury post is a status line rather than a feature, so even a single
+    player keeps the thumbnail-sized photo instead of a full-width image.
+    """
+    if len(updates) == 1:
+        photo = updates[0].player.photo_url()
+        if photo:
+            embed.set_thumbnail(url=photo)
+            return
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+
+
+def injury_embeds(report: InjuryReport, time_zone: ZoneInfo) -> list[discord.Embed]:
+    title = "Ravens injury report"
+    updates = report.updates
+    if not updates:
+        embed = _base_embed(title, format_no_injuries(), url=injuries_url(RAVENS_SLUG))
+        embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+        embed.set_footer(text=DATA_SOURCE)
+        return [embed]
+
+    embed = _base_embed(
+        title,
+        format_injury_updated(report.last_updated, time_zone),
+        url=injuries_url(RAVENS_SLUG),
+    )
+    by_status: dict[str, list[str]] = {}
+    for update in updates:
+        by_status.setdefault(update.status_text, []).append(format_injury(update))
+    shown = 0
+    for status, lines in list(by_status.items())[:MAX_EMBED_FIELDS]:
+        shown += len(lines)
+        embed.add_field(
+            name=_limit_field(f"{status} ({len(lines)})", 256),
+            value=_limit_field("\n".join(lines)),
+            inline=False,
+        )
+    _set_injury_art(embed, updates)
+    if shown < len(updates):
+        embed.set_footer(
+            text=f"Showing {shown} of {len(updates)} players • {DATA_SOURCE}"
+        )
+    else:
+        embed.set_footer(text=DATA_SOURCE)
+    return [embed]
+
+
 def schedule_embed(games: list[Game], time_zone: ZoneInfo, days: int = 7) -> discord.Embed:
     embed = _base_embed("Upcoming Ravens games", url=schedule_url(RAVENS_SLUG))
     if not games:
@@ -360,7 +415,7 @@ def no_fourth_down_embed(message: str, game: Game | None = None) -> discord.Embe
 def help_embed() -> discord.Embed:
     embed = _base_embed(
         "The Castle commands",
-        "Baltimore Ravens roster transactions, inactives, standings, and schedule.",
+        "Baltimore Ravens roster transactions, inactives, injuries, standings, and schedule.",
     )
     embed.add_field(
         name="/transactions [date]",
@@ -373,6 +428,14 @@ def help_embed() -> discord.Embed:
     embed.add_field(
         name="/inactives [date]",
         value="Game day inactives by team, with position and reason, when ESPN publishes them.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/injuries",
+        value=(
+            "The current Ravens injury report, grouped by status, with the "
+            "injury, ESPN's note, and an expected return when one is listed."
+        ),
         inline=False,
     )
     embed.add_field(

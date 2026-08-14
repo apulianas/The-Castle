@@ -276,6 +276,79 @@ class InactiveReport:
     players: tuple[InactivePlayer, ...]
 
 
+# How an injury report reads down the page: the players who will not play lead,
+# then the ones in doubt, then the season-long lists, which change rarely.
+INJURY_STATUS_ORDER = (
+    "Out",
+    "Doubtful",
+    "Questionable",
+    "Injured Reserve",
+    "Physically Unable to Perform",
+    "Non Football Injury",
+    "Suspension",
+    "Day-To-Day",
+    "Probable",
+    "Active",
+)
+_INJURY_STATUS_RANK = {
+    status.lower(): rank for rank, status in enumerate(INJURY_STATUS_ORDER)
+}
+UNKNOWN_INJURY_STATUS = "Unknown"
+
+
+def normalize_key(value: str) -> str:
+    return " ".join((value or "").split()).lower()
+
+
+def injury_status_rank(status: str | None) -> int:
+    """Where a status sorts, with anything unrecognised placed last."""
+    key = (status or "").strip().lower()
+    if key in _INJURY_STATUS_RANK:
+        return _INJURY_STATUS_RANK[key]
+    for known, rank in _INJURY_STATUS_RANK.items():
+        if key.startswith(known):
+            return rank
+    return len(INJURY_STATUS_ORDER)
+
+
+@dataclass(frozen=True)
+class InjuryUpdate:
+    """One player's entry on the team injury report."""
+
+    player: PlayerRef
+    status: str | None = None
+    detail: str | None = None
+    comment: str | None = None
+    return_date: str | None = None
+    updated: datetime | None = None
+
+    @property
+    def status_text(self) -> str:
+        return (self.status or "").strip() or UNKNOWN_INJURY_STATUS
+
+    @property
+    def announcement_id(self) -> str:
+        """Identity of this entry as posted.
+
+        The status and the update stamp are part of the key so a player moving
+        from questionable to out is announced again, while an unchanged report
+        polled every five minutes is not.
+        """
+        who = self.player.athlete_id or normalize_key(self.player.name)
+        when = self.updated.isoformat() if self.updated else ""
+        return f"{who}:{self.status_text}:{when}"
+
+
+@dataclass(frozen=True)
+class InjuryReport:
+    updates: tuple[InjuryUpdate, ...] = ()
+
+    @property
+    def last_updated(self) -> datetime | None:
+        stamps = [update.updated for update in self.updates if update.updated]
+        return max(stamps) if stamps else None
+
+
 @dataclass(frozen=True)
 class Standing:
     team: TeamRef

@@ -52,6 +52,17 @@ class AnnouncementState:
             LOGGER.warning("Could not read announcement state; starting fresh: %s", exc)
             self._announced = set()
 
+    def has_target_keys(self, prefix: str, target: int | str) -> bool:
+        """Whether this target has ever been posted a key of this kind.
+
+        A first run has no history, so the caller can post one consolidated
+        report instead of a message per player already on the list.
+        """
+        suffix = f"{CHANNEL_KEY_SEPARATOR}{target}"
+        return any(
+            key.startswith(prefix) and key.endswith(suffix) for key in self._announced
+        )
+
     def unseen(self, key: str) -> bool:
         return key not in self._announced
 

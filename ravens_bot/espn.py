@@ -23,6 +23,8 @@ from .models import (
     GameTeam,
     InactivePlayer,
     InactiveReport,
+    InjuryReport,
+    InjuryUpdate,
     LiveGameReport,
     LiveSituation,
     PlayerGameStats,
@@ -31,6 +33,7 @@ from .models import (
     TeamGameStats,
     TeamRef,
     Transaction,
+    injury_status_rank,
 )
 
 
@@ -44,6 +47,9 @@ CORE_BASE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl"
 ESPN_TIME_ZONE = ZoneInfo("America/Los_Angeles")
 
 STANDINGS_TTL_SECONDS = 300.0
+# An injury report changes on practice days, not by the minute, so five minutes
+# of cache costs nothing and spares ESPN a request per poll.
+INJURY_TTL_SECONDS = 300.0
 # A live down and distance is stale within a play, so this cache exists only to
 # collapse a burst of commands, not to spare ESPN a request a minute.
 LIVE_TTL_SECONDS = 12.0
@@ -905,6 +911,128 @@ def parse_inactive_report(summary: dict[str, Any], game: Game) -> InactiveReport
     return InactiveReport(game=game, players=tuple(unique))
 
 
+def _injury_detail(item: dict[str, Any]) -> str | None:
+    """What is hurt, e.g. "Knee" or "Ankle - Left", when ESPN says."""
+    details = _as_dict(item.get("details"))
+    parts = [
+        _text(details.get("type")),
+        _text(details.get("location")),
+        _text(details.get("side")),
+    ]
+    seen: list[str] = []
+    for part in parts:
+        if part and part.lower() not in {value.lower() for value in seen}:
+            seen.append(part)
+    if seen:
+        return " - ".join(seen)
+    return _text(item.get("detail"))
+
+
+def _injury_status(item: dict[str, Any]) -> str | None:
+    for key in ("status", "type"):
+        value = item.get(key)
+        text = _text(value) if isinstance(value, str) else _display_name(value)
+        if not text and isinstance(value, dict):
+            text = _text(value.get("description")) or _text(value.get("abbreviation"))
+        if text:
+            return text
+    return None
+
+
+def _injury_player(item: dict[str, Any]) -> PlayerRef | None:
+    athlete = _as_dict(item.get("athlete")) or _as_dict(item.get("player"))
+    name = _display_name(athlete)
+    if not name:
+        return None
+    headshot = _as_dict(athlete.get("headshot")).get("href")
+    athlete_id = _athlete_id(athlete)
+    return PlayerRef(
+        name=name,
+        athlete_id=athlete_id,
+        position=_position_text(athlete.get("position")),
+        headshot=headshot if isinstance(headshot, str) and headshot else None,
+        link=player_url(athlete_id),
+    )
+
+
+def _injury_from_item(item: dict[str, Any]) -> InjuryUpdate | None:
+    player = _injury_player(item)
+    if player is None:
+        return None
+    details = _as_dict(item.get("details"))
+    comment = _text(item.get("longComment")) or _text(item.get("shortComment"))
+    return InjuryUpdate(
+        player=player,
+        status=_injury_status(item),
+        detail=_injury_detail(item),
+        comment=comment,
+        return_date=_text(details.get("returnDate")),
+        updated=parse_datetime(_text(item.get("date"))),
+    )
+
+
+def _collect_injuries(value: Any, items: list[dict[str, Any]]) -> None:
+    """Every injury entry in a payload, flat or grouped by team.
+
+    The team route answers with one group per team, each holding its own
+    ``injuries`` list, while a single-team query answers with the list itself.
+    """
+    for raw in _as_list(value):
+        item = _as_dict(raw)
+        if not item:
+            continue
+        nested = item.get("injuries")
+        if isinstance(nested, list):
+            _collect_injuries(nested, items)
+            continue
+        items.append(item)
+
+
+def parse_injuries(payload: dict[str, Any]) -> InjuryReport:
+    raw: list[dict[str, Any]] = []
+    for key in ("injuries", "items"):
+        _collect_injuries(payload.get(key), raw)
+    updates: list[InjuryUpdate] = []
+    seen: set[str] = set()
+    for item in raw:
+        update = _injury_from_item(item)
+        if update is None:
+            continue
+        key = update.player.athlete_id or normalize_name(update.player.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        updates.append(update)
+    updates.sort(
+        key=lambda update: (
+            injury_status_rank(update.status),
+            update.player.name.lower(),
+        )
+    )
+    return InjuryReport(updates=tuple(updates))
+
+
+def apply_roster_to_injuries(
+    report: InjuryReport, roster: dict[str, PlayerRef]
+) -> InjuryReport:
+    """Fill in position and headshot for players ESPN named without them."""
+    resolved: list[InjuryUpdate] = []
+    for update in report.updates:
+        match = roster.get(normalize_name(update.player.name))
+        if match is None:
+            resolved.append(update)
+            continue
+        player = replace(
+            update.player,
+            athlete_id=update.player.athlete_id or match.athlete_id,
+            position=update.player.position or match.position,
+            headshot=update.player.headshot or match.headshot,
+            link=update.player.link or match.link,
+        )
+        resolved.append(replace(update, player=player))
+    return InjuryReport(updates=tuple(resolved))
+
+
 def _header_competition(summary: dict[str, Any]) -> dict[str, Any]:
     header = _as_dict(summary.get("header"))
     competitions = _as_list(header.get("competitions"))
@@ -1270,6 +1398,9 @@ class EspnClient:
         self._live_cache: AsyncTtlCache[str, list[Game]] = AsyncTtlCache(
             LIVE_TTL_SECONDS, max_entries=4
         )
+        self._injury_cache: AsyncTtlCache[str, InjuryReport] = AsyncTtlCache(
+            INJURY_TTL_SECONDS
+        )
 
     async def _json(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -1419,6 +1550,23 @@ class EspnClient:
                 break
             games = played + games
         return games[-count:]
+
+    async def fetch_injuries(self) -> InjuryReport:
+        async def load() -> InjuryReport:
+            payload = await self._json(f"{SITE_BASE}/teams/{RAVENS_SLUG}/injuries")
+            if any("$ref" in _as_dict(item) for item in _as_list(payload.get("items"))):
+                payload = await self._resolve_refs(payload)
+            report = parse_injuries(payload)
+            if not report.updates:
+                return report
+            try:
+                roster = await self.fetch_roster()
+            except EspnApiError:
+                # Player art is a bonus; a roster outage should not drop the report.
+                return report
+            return apply_roster_to_injuries(report, roster)
+
+        return await self._injury_cache.get_or_fetch("injuries", load)
 
     async def fetch_inactives(self, target_date: date) -> list[InactiveReport]:
         games = await self.fetch_schedule(DateWindow(target_date, target_date))

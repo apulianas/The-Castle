@@ -11,6 +11,7 @@ from .models import (
     Game,
     GameSituation,
     InactivePlayer,
+    InjuryUpdate,
     LiveGameReport,
     LiveSituation,
     PlayerGameStats,
@@ -161,6 +162,46 @@ def format_inactive_player(player: InactivePlayer) -> str:
     if player.position:
         name = f"{player.position} {name}"
     return f"{name} — {player.reason}" if player.reason else name
+
+
+def format_injury(update: InjuryUpdate) -> str:
+    """One injury line: who, what, and when they are expected back."""
+    player = update.player
+    name = link(player.name, player.page_url)
+    if player.position:
+        name = f"{player.position} {name}"
+    parts = [part for part in (update.detail, update.comment) if part]
+    expected = format_return_date(update.return_date)
+    if expected:
+        parts.append(f"expected back {expected}")
+    return f"{name} — {' · '.join(parts)}" if parts else name
+
+
+def format_return_date(value: str | None) -> str | None:
+    """ESPN dates a return as a timestamp; a report only needs the day."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    return format_long_date(parsed.date()) if parsed else text
+
+
+def format_no_injuries() -> str:
+    return "ESPN lists no Ravens players on the injury report right now."
+
+
+def format_injury_updated(updated: datetime | None, time_zone: ZoneInfo) -> str | None:
+    if updated is None:
+        return None
+    local = updated.astimezone(time_zone)
+    return (
+        f"Updated {format_long_date(local.date())} at "
+        f"{format_time_of_day(updated, time_zone)}"
+    )
 
 
 def format_no_inactives() -> str:

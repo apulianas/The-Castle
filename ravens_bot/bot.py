@@ -24,6 +24,7 @@ from .embeds import (
     fourth_down_embed,
     help_embed,
     inactive_embeds,
+    injury_embeds,
     live_game_embed,
     next_game_embed,
     no_fourth_down_embed,
@@ -53,7 +54,14 @@ from .formatting import (
     format_unknown_snap_player,
     format_unknown_team,
 )
-from .models import InactiveReport, PlayerRef, SnapCountReport, Transaction
+from .models import (
+    InactiveReport,
+    InjuryReport,
+    InjuryUpdate,
+    PlayerRef,
+    SnapCountReport,
+    Transaction,
+)
 from .snapcounts import (
     MAX_SNAP_GAMES,
     SnapCountClient,
@@ -71,6 +79,8 @@ SnapWeeks = app_commands.Range[int, 1, MAX_SNAP_GAMES]
 MAX_PLAYER_SUGGESTIONS = 5
 # How many live teams a failed team search offers back.
 MAX_TEAM_SUGGESTIONS = 8
+# Announcement keys for injury posts, shared by the first-run check.
+INJURY_KEY_PREFIX = "injury:"
 
 
 @dataclass(frozen=True)
@@ -100,6 +110,7 @@ class RavensBot(commands.Bot):
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
         self.tree.add_command(_inactives_command(self))
+        self.tree.add_command(_injuries_command(self))
         self.tree.add_command(_standings_command(self))
         self.tree.add_command(_next_game_command(self))
         self.tree.add_command(_live_command(self))
@@ -132,11 +143,13 @@ class RavensBot(commands.Bot):
         try:
             transactions = await client.fetch_transactions(target_date)
             inactive_reports = await client.fetch_inactives(target_date)
+            injuries = await client.fetch_injuries()
         except EspnApiError as exc:
             LOGGER.warning("Polling skipped because ESPN data could not be fetched: %s", exc)
             return
         await self._post_new_transactions(targets, transactions, target_date)
         await self._post_new_inactives(targets, inactive_reports, target_date)
+        await self._post_new_injuries(targets, injuries)
 
     async def _post_new_transactions(
         self,
@@ -166,6 +179,50 @@ class RavensBot(commands.Bot):
             for target in targets:
                 if self.announcement_state.unseen(channel_key(key, target.key_id)):
                     await self._announce(target, key, "Ravens game day inactives", embeds)
+
+    async def _post_new_injuries(
+        self, targets: list[_AnnouncementTarget], report: InjuryReport
+    ) -> None:
+        if not report.updates:
+            return
+        for target in targets:
+            first_run = not self.announcement_state.has_target_keys(
+                INJURY_KEY_PREFIX, target.key_id
+            )
+            if first_run:
+                await self._announce_injury_report(target, report)
+                continue
+            for update in report.updates:
+                key = injury_announcement_key(update)
+                if not self.announcement_state.unseen(channel_key(key, target.key_id)):
+                    continue
+                await self._announce(
+                    target,
+                    key,
+                    f"Ravens injury update: {update.player.display_name}",
+                    injury_embeds(InjuryReport((update,)), self.config.time_zone),
+                )
+
+    async def _announce_injury_report(
+        self, target: _AnnouncementTarget, report: InjuryReport
+    ) -> None:
+        """One consolidated post the first time a target sees an injury report.
+
+        Without this a fresh state file would post a message per player already
+        listed, which is a dozen notifications for news nobody is waiting on.
+        """
+        keys = [injury_announcement_key(update) for update in report.updates]
+        await self._announce(
+            target,
+            keys[0],
+            "Ravens injury report",
+            injury_embeds(report, self.config.time_zone),
+        )
+        if self.announcement_state.unseen(channel_key(keys[0], target.key_id)):
+            # The post failed, so nothing is recorded and the next poll retries.
+            return
+        for key in keys[1:]:
+            self.announcement_state.mark(channel_key(key, target.key_id))
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -243,6 +300,20 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         await interaction.followup.send(embeds=inactive_embeds(reports, target_date, bot.config.time_zone))
 
     return inactives
+
+
+def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(name="injuries", description="Show the Ravens injury report.")
+    async def injuries(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            report = await _require_espn(bot).fetch_injuries()
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.followup.send(embeds=injury_embeds(report, bot.config.time_zone))
+
+    return injuries
 
 
 def _standings_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
@@ -515,6 +586,10 @@ def _require_snap_counts(bot: RavensBot) -> SnapCountClient:
 
 def transaction_announcement_key(transaction: Transaction) -> str:
     return f"transaction:{transaction.transaction_id}"
+
+
+def injury_announcement_key(update: InjuryUpdate) -> str:
+    return f"{INJURY_KEY_PREFIX}{update.announcement_id}"
 
 
 def inactive_announcement_key(report: InactiveReport) -> str:

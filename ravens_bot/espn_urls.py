@@ -62,6 +62,10 @@ def transactions_url(slug: str) -> str:
     return f"{ESPN_WEB}/team/transactions/_/name/{slug.strip().lower()}"
 
 
+def injuries_url(slug: str) -> str:
+    return f"{ESPN_WEB}/team/injuries/_/name/{slug.strip().lower()}"
+
+
 def schedule_url(slug: str) -> str:
     return f"{ESPN_WEB}/team/schedule/_/name/{slug.strip().lower()}"
 

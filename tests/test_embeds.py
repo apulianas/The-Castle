@@ -324,6 +324,7 @@ def test_help_embed_documents_every_command() -> None:
     assert names == {
         "/transactions",
         "/inactives",
+        "/injuries",
         "/standings",
         "/nextgame",
         "/live",
