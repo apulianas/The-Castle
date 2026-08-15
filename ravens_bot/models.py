@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -76,6 +78,44 @@ class PlayerRef:
         return f"{self.position} {self.name}" if self.position else self.name
 
 
+def normalize_name(value: str) -> str:
+    """A comparison key that survives punctuation and accent differences."""
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9 ]", "", stripped.lower()).strip()
+
+
+def same_player(left: PlayerRef, right: PlayerRef) -> bool:
+    """Whether two references name the same person.
+
+    ESPN fills the athlete id in on one feed and leaves it out on another, so an
+    id match settles it when both carry one and the name decides otherwise. Two
+    ids that disagree are two people, whatever their names say.
+    """
+    if left.athlete_id and right.athlete_id:
+        return left.athlete_id == right.athlete_id
+    return normalize_name(left.name) == normalize_name(right.name) != ""
+
+
+# ESPN writes a move as a sentence opening with its verb. These are the verbs for
+# a move that puts a player on the roster, as opposed to one that takes a player
+# off it, which is what decides whose photo a post leads with.
+ROSTER_ADD_ACTIONS = frozenset(
+    {
+        "signed",
+        "resigned",
+        "activated",
+        "claimed",
+        "acquired",
+        "promoted",
+        "elevated",
+        "reinstated",
+        "drafted",
+        "added",
+    }
+)
+
+
 @dataclass(frozen=True)
 class Transaction:
     transaction_id: str
@@ -90,6 +130,38 @@ class Transaction:
     def player(self) -> PlayerRef | None:
         """The single subject of this move, when there is exactly one."""
         return self.players[0] if len(self.players) == 1 else None
+
+    @property
+    def action_words(self) -> tuple[str, ...]:
+        """The verb each of ESPN's spellings of this move opens with.
+
+        A move arrives as a type ("Signed") and as prose ("Signed WR ..."), and
+        either can be the one ESPN filled in, so both are read.
+        """
+        openings = (
+            normalize_name(self.type_text or "").split(),
+            normalize_name(self.description or "").split(),
+        )
+        return tuple(words[0] for words in openings if words)
+
+    @property
+    def adds_to_roster(self) -> bool:
+        """Whether this move brings a player in rather than sending one out.
+
+        A signing or an activation adds; a release or a move to injured reserve
+        does not. A post covering both directions is about the arrival, so this
+        is what decides which player it pictures.
+        """
+        return any(word in ROSTER_ADD_ACTIONS for word in self.action_words)
+
+    @property
+    def joining_player(self) -> PlayerRef | None:
+        """The player this move puts on the roster, when it is that kind of move.
+
+        A description names the arriving player first, so a compound move such
+        as "Signed WR A ... placed WR B on injured reserve" still resolves to A.
+        """
+        return self.players[0] if self.adds_to_roster and self.players else None
 
     @property
     def headline(self) -> str:
@@ -347,6 +419,68 @@ class InjuryReport:
     def last_updated(self) -> datetime | None:
         stamps = [update.updated for update in self.updates if update.updated]
         return max(stamps) if stamps else None
+
+
+@dataclass(frozen=True)
+class RosterNews:
+    """A roster move together with the injury entries about the same players.
+
+    ESPN publishes an activation twice, as a transaction and as a status change
+    on the injury report, so announcing both posts the same news twice. Pairing
+    them lets one post carry the move and the status it produced.
+    """
+
+    transaction: Transaction
+    injuries: tuple[InjuryUpdate, ...] = ()
+
+    @property
+    def last_updated(self) -> datetime | None:
+        """When ESPN last touched the injury entries this post carries."""
+        return InjuryReport(self.injuries).last_updated
+
+    @property
+    def art_players(self) -> tuple[PlayerRef, ...]:
+        """Everyone this post could picture, the player joining the roster first.
+
+        A post covering an arrival and a departure is about the arrival, so that
+        player leads. Each one is followed by the injury report's own reference
+        to them, which sometimes carries a headshot the transaction's does not.
+        """
+        players: list[PlayerRef] = []
+        pending = list(self.injuries)
+        for player in self._move_players():
+            players.append(player)
+            matched = [
+                update for update in pending if same_player(update.player, player)
+            ]
+            for update in matched:
+                pending.remove(update)
+                players.append(update.player)
+        players.extend(update.player for update in pending)
+        return tuple(players)
+
+    @property
+    def is_one_player(self) -> bool:
+        """Whether the move and the injury news are about a single person."""
+        distinct: list[PlayerRef] = []
+        for player in self.art_players:
+            if not any(same_player(player, other) for other in distinct):
+                distinct.append(player)
+        return len(distinct) == 1
+
+    def _move_players(self) -> list[PlayerRef]:
+        """The move's own players, the one joining the roster first."""
+        joining = self.transaction.joining_player
+        if joining is None:
+            return list(self.transaction.players)
+        return [
+            joining,
+            *(
+                player
+                for player in self.transaction.players
+                if not same_player(player, joining)
+            ),
+        ]
 
 
 @dataclass(frozen=True)

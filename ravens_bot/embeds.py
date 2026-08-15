@@ -71,8 +71,10 @@ from .models import (
     InjuryReport,
     InjuryUpdate,
     LiveGameReport,
+    PlayerRef,
     PlayerSnaps,
     PlayerSnapTotals,
+    RosterNews,
     SnapCountReport,
     Standing,
     Transaction,
@@ -141,6 +143,45 @@ def error_embed(message: str) -> discord.Embed:
     )
 
 
+def _set_player_art(
+    embed: discord.Embed, players: Sequence[PlayerRef], feature: bool
+) -> None:
+    """Picture a post: a full-width photo of one player, or a small thumbnail.
+
+    ``players`` is in priority order, so a caller that knows who is joining the
+    roster puts them first and their face leads the post. Anything without a
+    usable photo falls through to the team logo.
+    """
+    if feature and players:
+        photo = players[0].photo_url(HEADSHOT_FEATURE_WIDTH)
+        if photo:
+            embed.set_image(url=photo)
+            return
+    for player in players:
+        photo = player.photo_url()
+        if photo:
+            embed.set_thumbnail(url=photo)
+            return
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+
+
+def _transaction_art_players(
+    transactions: Sequence[Transaction],
+) -> tuple[PlayerRef, ...]:
+    """Players a transaction post could picture, arrivals first.
+
+    A day's moves usually pair an activation with someone going the other way,
+    and the post belongs to the player who joined the roster.
+    """
+    joining = [
+        transaction.joining_player
+        for transaction in transactions
+        if transaction.joining_player is not None
+    ]
+    others = [player for transaction in transactions for player in transaction.players]
+    return tuple([*joining, *others])
+
+
 def _set_transaction_art(
     embed: discord.Embed, transactions: Sequence[Transaction]
 ) -> None:
@@ -148,24 +189,10 @@ def _set_transaction_art(
 
     Automatic announcements post one transaction at a time, so a signing gets a
     full-width photo. A multi-player move or a digest of several transactions
-    falls back to the team logo, where a single face would misrepresent the post.
+    falls back to a thumbnail, where a single face would misrepresent the post.
     """
-    solo = transactions[0] if len(transactions) == 1 else None
-    if solo is not None:
-        player = solo.player
-        if player is not None:
-            photo = player.photo_url(HEADSHOT_FEATURE_WIDTH)
-            if photo:
-                embed.set_image(url=photo)
-                return
-
-    for transaction in transactions:
-        for player in transaction.players:
-            photo = player.photo_url()
-            if photo:
-                embed.set_thumbnail(url=photo)
-                return
-    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+    solo = len(transactions) == 1 and len(transactions[0].players) == 1
+    _set_player_art(embed, _transaction_art_players(transactions), feature=solo)
 
 
 def transaction_embeds(
@@ -192,6 +219,60 @@ def transaction_embeds(
     else:
         embed.set_footer(text=DATA_SOURCE)
     return [embed]
+
+
+def roster_news_post(
+    news: RosterNews, target_date: date, time_zone: ZoneInfo
+) -> tuple[list[discord.Embed], tuple[InjuryUpdate, ...]]:
+    """The post for a roster move, and the injury updates it actually carries.
+
+    A move with nothing on the injury report reads exactly as it always has, so
+    only the paired case gets the combined layout. Discord's limits can cut the
+    injury section short on a move naming a whole cut list, so the caller is
+    told what made it in: what did not stays unannounced, and the next poll
+    posts it on its own rather than recording news nobody was shown.
+    """
+    if not news.injuries:
+        return transaction_embeds([news.transaction], target_date), ()
+
+    transaction = news.transaction
+    embed = _base_embed(
+        f"Ravens roster move — {format_long_date(target_date)}",
+        format_injury_updated(news.last_updated, time_zone),
+        url=transactions_url(RAVENS_SLUG),
+    )
+    embed.add_field(
+        name=_limit_field(transaction.headline, 256),
+        value=_limit_field(format_transaction(transaction)),
+        inline=False,
+    )
+    by_status: dict[str, list[InjuryUpdate]] = {}
+    for update in news.injuries:
+        by_status.setdefault(update.status_text, []).append(update)
+    # _add_field_blocks fills fields in this order and stops at the first one
+    # that does not fit, so the updates it covers are this list's leading run.
+    ordered = [update for group in by_status.values() for update in group]
+    shown = _add_field_blocks(
+        embed,
+        [
+            # ESPN's practice note has no length limit of its own, so each line
+            # is clamped before it is packed into a field, the way a standalone
+            # injury post clamps its own.
+            (
+                f"Injury report — {status}",
+                [_limit_field(format_injury(item)) for item in group],
+            )
+            for status, group in by_status.items()
+        ],
+    )
+    _set_player_art(embed, news.art_players, feature=news.is_one_player)
+    if shown < len(ordered):
+        embed.set_footer(
+            text=f"Showing {shown} of {len(ordered)} updates • {DATA_SOURCE}"
+        )
+    else:
+        embed.set_footer(text=DATA_SOURCE)
+    return [embed], tuple(ordered[:shown])
 
 
 def inactive_embeds(
