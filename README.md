@@ -15,7 +15,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   - `/schedule [days]` — upcoming Ravens games over the next 1-366 days, so a full
     schedule is one command.
   - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-42 games.
-  - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt.
+  - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt, answering the last fourth down seen once the play is over.
+  - `/fieldgoal [yards] [team]` — how often a kick of that length is made, and what attempting it is worth; omit the yardage to use the current ball spot.
   - `/help` — command help.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
   player, team, and game pages.
@@ -120,7 +121,7 @@ container restarts.
 | `DISCORD_WEBHOOK_URL` | No | | One Discord webhook URL, or several separated by commas, for background announcements. |
 | `POLL_INTERVAL_SECONDS` | No | `300` | Poll interval for automatic announcements. Minimum 30 seconds. |
 | `TIME_ZONE` | No | `America/New_York` | Time zone used for "today" and display times. |
-| `SECONDARY_TEAM` | No | | A second team, by name, city, or abbreviation, that `/fourthdown` falls back on when the Ravens are not playing. |
+| `SECONDARY_TEAM` | No | | A second team, by name, city, or abbreviation, that `/fourthdown` and `/fieldgoal` fall back on when the Ravens are not playing. |
 
 ## Discord permissions and intents
 
@@ -150,12 +151,28 @@ python -m compileall ravens_bot tests
 
 Tests use local sample payloads and do not call the network.
 
-## Fourth down recommendations
+## Fourth down and field goal calls
 
 `/fourthdown` answers a live game. ESPN's scoreboard publishes a `situation`
 block for a game in progress — down, distance, the spot, who has the ball — and
 that is read straight, on a twelve second cache, since a down and distance is
 stale within a play.
+
+A fourth down lasts under a minute and the argument about it starts once the
+play is over, so the last fourth down each live game showed is recorded in
+memory and served when the scoreboard has moved on, with the answer stating how
+long ago the down came up. The scoreboard is read every 30 seconds while a game
+is being played — and once every five minutes when none is, since there is
+nothing to record — so the recall works whether or not anyone asked at the time.
+The store is in memory only and a restart clears it: it is conversation, not a
+record.
+
+`/fieldgoal` reads the same kick curve on its own. Give it a distance — the
+number a person says out loud, as in a "fifty two yarder" — or leave it out and
+it takes the distance from where the ball is now, which is the yards to the goal
+line plus the seventeen the snap and the spot cost. A stated distance is
+answered even with no game on; the ball spot needs a live one, chosen by the
+same order of preference as `/fourthdown`.
 
 Which game gets answered is a stated order of preference rather than a guess.
 Discord tells the bot nothing about where a person is sitting and ESPN publishes

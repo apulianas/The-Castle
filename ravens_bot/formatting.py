@@ -5,7 +5,13 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .espn_urls import link
-from .fourthdown import FourthDownAdvice, Option
+from .fourthdown import (
+    FIELD_GOAL_OVERHEAD,
+    MAX_FIELD_GOAL_YARDS,
+    FieldGoalOutlook,
+    FourthDownAdvice,
+    Option,
+)
 from .models import (
     RAVENS_NAME,
     SNAP_UNITS,
@@ -625,6 +631,90 @@ def format_no_live_game() -> str:
 
 def format_not_fourth_down(game: Game, reason: str) -> str:
     return f"{format_fourth_down_matchup(game)}: {reason}"
+
+
+def format_elapsed(seconds: float) -> str:
+    """How long ago something happened, in the words a person would use."""
+    if seconds < 60:
+        return "moments ago"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit} ago"
+    hours = int(minutes // 60)
+    minutes -= hours * 60
+    unit = "hour" if hours == 1 else "hours"
+    if minutes:
+        return f"{hours} {unit} {minutes} min ago"
+    return f"{hours} {unit} ago"
+
+
+def format_recalled_fourth_down(age_seconds: float) -> str:
+    """The line that keeps a remembered answer from reading as a live one."""
+    return (
+        f"The play is over. This is the last fourth down seen, from "
+        f"{format_elapsed(age_seconds)}."
+    )
+
+
+def format_field_goal_call(outlook: FieldGoalOutlook) -> str:
+    """The headline, e.g. "52-yard field goal • 68% good"."""
+    kick = f"{outlook.kick_distance}-yard field goal"
+    if not outlook.in_range:
+        return f"{kick} • out of range"
+    return f"{kick} • {round(outlook.make_rate * 100)}% good"
+
+
+def format_field_goal_detail(outlook: FieldGoalOutlook) -> str:
+    """Why the headline says what it does, and what the attempt is worth."""
+    lines: list[str] = []
+    if outlook.in_range:
+        lines.append(
+            f"League average from {outlook.kick_distance} yards: "
+            f"{round(outlook.make_rate * 100)}% made."
+        )
+    else:
+        lines.append(
+            f"Past {MAX_FIELD_GOAL_YARDS} yards the model has no rate to quote, so a "
+            f"{outlook.kick_distance}-yard try is treated as out of range."
+        )
+    if outlook.situation is not None and outlook.yards_to_goal is not None:
+        spot = outlook.situation.spot or f"{outlook.yards_to_goal} yard line"
+        lines.append(
+            f"Ball at the {spot}, which is {outlook.yards_to_goal} yards out; the "
+            f"snap and the spot add the other {FIELD_GOAL_OVERHEAD}."
+        )
+    if outlook.expected_points is not None:
+        lines.append(
+            f"{format_expected_points(outlook.expected_points)} expected points, "
+            "counting where a miss hands the ball over."
+        )
+    return "\n".join(lines)
+
+
+def format_field_goal(outlook: FieldGoalOutlook, game: Game | None = None) -> str:
+    """The whole answer as plain text, for a log line or a test."""
+    lines = [format_field_goal_call(outlook)]
+    if game is not None:
+        lines.append(format_fourth_down_matchup(game))
+    if outlook.situation is not None:
+        lines.append(outlook.situation.summary)
+    lines.append(format_field_goal_detail(outlook))
+    return "\n".join(lines)
+
+
+def format_no_field_goal_spot() -> str:
+    return (
+        "No live game to read a ball spot from. Give a kick distance, as in "
+        "`/fieldgoal yards:52`."
+    )
+
+
+def format_no_ball_spot(game: Game) -> str:
+    return (
+        f"{format_fourth_down_matchup(game)}: ESPN has not published a ball spot "
+        "for this game yet. Give a kick distance instead."
+    )
 
 
 def format_unknown_team(query: str, suggestions: list[str]) -> str:

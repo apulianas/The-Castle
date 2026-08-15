@@ -22,12 +22,14 @@ from .dates import (
 )
 from .embeds import (
     error_embed,
+    field_goal_embed,
     fourth_down_embed,
     help_embed,
     inactive_embeds,
     injury_embeds,
     live_game_embed,
     next_game_embed,
+    no_field_goal_embed,
     no_fourth_down_embed,
     no_live_game_embed,
     no_snap_counts_embed,
@@ -48,8 +50,15 @@ from .espn import (
     select_insight_game,
     team_names,
 )
-from .fourthdown import advise
+from .fourthdown import (
+    LONGEST_ASKABLE_FIELD_GOAL,
+    MIN_FIELD_GOAL_YARDS,
+    advise,
+    field_goal_outlook,
+)
 from .formatting import (
+    format_no_ball_spot,
+    format_no_field_goal_spot,
     format_no_live_game,
     format_no_snap_counts,
     format_no_snap_games,
@@ -58,6 +67,7 @@ from .formatting import (
     format_unknown_team,
 )
 from .models import (
+    Game,
     InactiveReport,
     InjuryReport,
     InjuryUpdate,
@@ -72,12 +82,20 @@ from .snapcounts import (
     aggregate,
     match_players,
 )
+from .recall import FourthDownMemory, RememberedSituation
 from .state import AnnouncementState, channel_key
 
 
 LOGGER = logging.getLogger(__name__)
 ScheduleDays = app_commands.Range[int, 1, MAX_SCHEDULE_DAYS]
 SnapWeeks = app_commands.Range[int, 1, MAX_SNAP_GAMES]
+KickYards = app_commands.Range[int, MIN_FIELD_GOAL_YARDS, LONGEST_ASKABLE_FIELD_GOAL]
+# How often the scoreboard is read to record fourth downs, so the question can
+# still be answered once the play is over.
+TRACK_INTERVAL_SECONDS = 30
+# When nothing is being played there is nothing to record, so the tracker sits
+# out this many ticks — five minutes — before looking again.
+IDLE_TRACK_TICKS = 9
 # How many close names a failed player search offers back.
 MAX_PLAYER_SUGGESTIONS = 5
 # How many live teams a failed team search offers back.
@@ -105,6 +123,8 @@ class RavensBot(commands.Bot):
         self.espn: EspnClient | None = None
         self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
+        self.fourth_downs = FourthDownMemory()
+        self._idle_track_ticks = 0
 
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession()
@@ -120,15 +140,19 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_schedule_command(self))
         self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_fourthdown_command(self))
+        self.tree.add_command(_fieldgoal_command(self))
         self.tree.add_command(_help_command())
         await self.tree.sync()
         if self.config.has_announcement_targets:
             self.poll_updates.change_interval(seconds=self.config.poll_interval_seconds)
             self.poll_updates.start()
+        self.track_fourth_downs.start()
 
     async def close(self) -> None:
         if self.poll_updates.is_running():
             self.poll_updates.cancel()
+        if self.track_fourth_downs.is_running():
+            self.track_fourth_downs.cancel()
         if self.session is not None:
             await self.session.close()
         await super().close()
@@ -282,6 +306,31 @@ class RavensBot(commands.Bot):
 
     @poll_updates.before_loop
     async def before_poll_updates(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(seconds=TRACK_INTERVAL_SECONDS)
+    async def track_fourth_downs(self) -> None:
+        """Record live fourth downs so one can be recalled after the play.
+
+        A fourth down is over in under a minute, and the person arguing about it
+        types the command afterwards, so waiting for someone to ask would record
+        nothing. Nothing is fetched while no game is on: the scoreboard is one
+        cached request either way, and the tracker sits out most of the week.
+        """
+        if self._idle_track_ticks > 0:
+            self._idle_track_ticks -= 1
+            return
+        try:
+            games = await _require_espn(self).fetch_live_games()
+        except EspnApiError as exc:
+            LOGGER.debug("Fourth down tracking skipped: %s", exc)
+            self._idle_track_ticks = IDLE_TRACK_TICKS
+            return
+        self.fourth_downs.remember(games)
+        self._idle_track_ticks = 0 if games else IDLE_TRACK_TICKS
+
+    @track_fourth_downs.before_loop
+    async def before_track_fourth_downs(self) -> None:
         await self.wait_until_ready()
 
 
@@ -475,64 +524,145 @@ def _fourthdown_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     ) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            games = await _require_espn(bot).fetch_live_games()
+            games = await _live_games(bot)
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
 
-        if not games:
-            await interaction.followup.send(
-                embed=no_fourth_down_embed(format_no_live_game()), ephemeral=True
-            )
-            return
+        game, problem = _select_game(bot, games, team)
+        if game is not None:
+            situation = game.situation
+            advice = advise(situation) if situation is not None else None
+            if advice is not None and advice.can_advise:
+                await interaction.followup.send(embed=fourth_down_embed(game, advice))
+                return
 
-        if team:
-            matches = match_team_games(games, team)
-            if not matches:
+        # The play is over by the time most people type this, so the last fourth
+        # down seen answers rather than "that is not a fourth down".
+        remembered = _remembered_fourth_down(bot, game, team)
+        if remembered is not None:
+            recalled = advise(remembered.situation)
+            if recalled.can_advise:
                 await interaction.followup.send(
-                    embed=no_fourth_down_embed(
-                        format_unknown_team(team, team_names(games)[:MAX_TEAM_SUGGESTIONS])
-                    ),
-                    ephemeral=True,
+                    embed=fourth_down_embed(
+                        remembered.game, recalled, remembered.age_seconds
+                    )
                 )
                 return
-            game = matches[0]
-        else:
-            game = select_insight_game(
-                games, bot.config.secondary_team, now_in_zone(bot.config.time_zone)
-            )
+
         if game is None:
             await interaction.followup.send(
-                embed=no_fourth_down_embed(format_no_live_game()), ephemeral=True
-            )
-            return
-
-        situation = game.situation
-        if situation is None:
-            await interaction.followup.send(
-                embed=no_fourth_down_embed(
-                    format_not_fourth_down(
-                        game, "ESPN has not published a down for this game yet."
-                    ),
-                    game,
-                ),
+                embed=no_fourth_down_embed(problem or format_no_live_game()),
                 ephemeral=True,
             )
             return
-
-        advice = advise(situation)
-        if not advice.can_advise:
-            await interaction.followup.send(
-                embed=no_fourth_down_embed(
-                    format_not_fourth_down(game, advice.reason or "No recommendation."),
-                    game,
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.followup.send(embed=fourth_down_embed(game, advice))
+        reason = "ESPN has not published a down for this game yet."
+        if game.situation is not None:
+            reason = advise(game.situation).reason or reason
+        await interaction.followup.send(
+            embed=no_fourth_down_embed(format_not_fourth_down(game, reason), game),
+            ephemeral=True,
+        )
 
     return fourthdown
+
+
+def _fieldgoal_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(
+        name="fieldgoal",
+        description="How often a field goal of this length is made, and what it is worth.",
+    )
+    @app_commands.describe(
+        yards="Kick distance in yards; omit to use where the ball is now",
+        team="Optional team; omit for the Ravens game, or whatever else is live",
+    )
+    async def fieldgoal(
+        interaction: discord.Interaction,
+        yards: KickYards | None = None,
+        team: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            games = await _live_games(bot)
+        except EspnApiError as exc:
+            if yards is None:
+                await interaction.followup.send(
+                    embed=error_embed(str(exc)), ephemeral=True
+                )
+                return
+            # A stated distance needs no game, so an ESPN outage answers anyway.
+            games = []
+
+        game, problem = _select_game(bot, games, team)
+        if yards is not None:
+            await interaction.followup.send(
+                embed=field_goal_embed(field_goal_outlook(kick_distance=yards), game)
+            )
+            return
+
+        if game is None:
+            await interaction.followup.send(
+                embed=no_field_goal_embed(problem or format_no_field_goal_spot()),
+                ephemeral=True,
+            )
+            return
+        situation = game.situation
+        if situation is None or situation.yards_to_goal is None:
+            await interaction.followup.send(
+                embed=no_field_goal_embed(format_no_ball_spot(game), game),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=field_goal_embed(
+                field_goal_outlook(
+                    yards_to_goal=situation.yards_to_goal, situation=situation
+                ),
+                game,
+            )
+        )
+
+    return fieldgoal
+
+
+async def _live_games(bot: RavensBot) -> list[Game]:
+    """Every game in progress, recording any fourth down on the way past."""
+    games = await _require_espn(bot).fetch_live_games()
+    bot.fourth_downs.remember(games)
+    return games
+
+
+def _select_game(
+    bot: RavensBot, games: list[Game], team: str | None
+) -> tuple[Game | None, str | None]:
+    """The game a live question is about, or why there is not one."""
+    if not games:
+        return None, format_no_live_game()
+    if team:
+        matches = match_team_games(games, team)
+        if not matches:
+            return None, format_unknown_team(
+                team, team_names(games)[:MAX_TEAM_SUGGESTIONS]
+            )
+        return matches[0], None
+    game = select_insight_game(
+        games, bot.config.secondary_team, now_in_zone(bot.config.time_zone)
+    )
+    return game, None if game is not None else format_no_live_game()
+
+
+def _remembered_fourth_down(
+    bot: RavensBot, game: Game | None, team: str | None
+) -> RememberedSituation | None:
+    """The last fourth down recorded for this game, or the freshest one seen."""
+    if game is not None:
+        return bot.fourth_downs.recall(game.event_id)
+    if team:
+        matches = match_team_games(bot.fourth_downs.games(), team)
+        if not matches:
+            return None
+        return bot.fourth_downs.recall(matches[0].event_id)
+    return bot.fourth_downs.latest()
 
 
 async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountReport] | None:
