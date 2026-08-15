@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import re
-import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -29,11 +28,14 @@ from .models import (
     LiveSituation,
     PlayerGameStats,
     PlayerRef,
+    RosterNews,
     Standing,
     TeamGameStats,
     TeamRef,
     Transaction,
     injury_status_rank,
+    normalize_name,
+    same_player,
 )
 
 
@@ -82,7 +84,9 @@ _NAME_PART = r"[A-Z](?:\.[A-Z])*\.|[A-Z][A-Za-z'\u2019\-]+"
 _POSITION_RE = re.compile(rf"\b(?P<position>{_POSITION_ALT})s?(?=\s+[A-Z])")
 _NAME_RE = re.compile(rf"(?:{_NAME_PART})(?:\s+(?:{_NAME_PART}))+")
 _SEPARATOR_RE = re.compile(r"\s*(?:,\s*and\s+|,\s*|\s+and\s+)")
-_ACTION_RE = re.compile(r"^\s*([A-Z][a-z]+)")
+# A move opens with its verb, which ESPN hyphenates in "Re-signed" and nowhere
+# else; reading only the first half would leave the headline saying "Re".
+_ACTION_RE = re.compile(r"^\s*([A-Z][a-z]+(?:-[a-z]+)?)")
 
 
 class EspnApiError(RuntimeError):
@@ -662,13 +666,6 @@ def _transaction_id(payload: dict[str, Any], description: str) -> str:
     return f"{stamp}:{description}"
 
 
-def normalize_name(value: str) -> str:
-    """A comparison key that survives punctuation and accent differences."""
-    decomposed = unicodedata.normalize("NFKD", value)
-    stripped = "".join(char for char in decomposed if not unicodedata.combining(char))
-    return re.sub(r"[^a-z0-9 ]", "", stripped.lower()).strip()
-
-
 def extract_players(description: str) -> tuple[PlayerRef, ...]:
     """Players named in a transaction description.
 
@@ -1031,6 +1028,36 @@ def apply_roster_to_injuries(
         )
         resolved.append(replace(update, player=player))
     return InjuryReport(updates=tuple(resolved))
+
+
+def combine_roster_news(
+    transactions: Sequence[Transaction], updates: Sequence[InjuryUpdate]
+) -> tuple[tuple[RosterNews, ...], tuple[InjuryUpdate, ...]]:
+    """Attach each injury update to the roster move about the same player.
+
+    An activation reaches the bot twice, as a transaction and as a status change
+    on the injury report, so announcing both posts the same news twice minutes
+    apart. Pairing them by player is what turns the two into one post. An update
+    is claimed by at most one move; whatever no move accounts for is returned to
+    be posted on its own.
+    """
+    claimed: set[int] = set()
+    news: list[RosterNews] = []
+    for transaction in transactions:
+        matched: list[InjuryUpdate] = []
+        for index, update in enumerate(updates):
+            if index in claimed:
+                continue
+            if any(
+                same_player(update.player, player) for player in transaction.players
+            ):
+                claimed.add(index)
+                matched.append(update)
+        news.append(RosterNews(transaction=transaction, injuries=tuple(matched)))
+    standalone = tuple(
+        update for index, update in enumerate(updates) if index not in claimed
+    )
+    return tuple(news), standalone
 
 
 def _header_competition(summary: dict[str, Any]) -> dict[str, Any]:

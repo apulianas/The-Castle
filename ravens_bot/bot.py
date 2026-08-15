@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -32,6 +33,7 @@ from .embeds import (
     no_snap_counts_embed,
     player_snap_embed,
     player_snap_totals_embed,
+    roster_news_post,
     schedule_embed,
     snap_count_embed,
     snap_totals_embed,
@@ -41,6 +43,7 @@ from .embeds import (
 from .espn import (
     EspnApiError,
     EspnClient,
+    combine_roster_news,
     match_team_games,
     select_insight_game,
     team_names,
@@ -147,23 +150,63 @@ class RavensBot(commands.Bot):
         except EspnApiError as exc:
             LOGGER.warning("Polling skipped because ESPN data could not be fetched: %s", exc)
             return
-        await self._post_new_transactions(targets, transactions, target_date)
+        await self._post_new_roster_news(targets, transactions, injuries, target_date)
         await self._post_new_inactives(targets, inactive_reports, target_date)
-        await self._post_new_injuries(targets, injuries)
 
-    async def _post_new_transactions(
+    async def _post_new_roster_news(
         self,
         targets: list[_AnnouncementTarget],
         transactions: list[Transaction],
+        report: InjuryReport,
         target_date: date,
     ) -> None:
-        for transaction in transactions:
-            key = transaction_announcement_key(transaction)
-            embeds = transaction_embeds([transaction], target_date)
-            content = transaction.headline
-            for target in targets:
-                if self.announcement_state.unseen(channel_key(key, target.key_id)):
-                    await self._announce(target, key, f"Ravens roster move: {content}", embeds)
+        """Post today's moves and injury changes, merging the ones that overlap.
+
+        A move and the injury report entry it produces are the same news, so a
+        player activated off injured reserve is announced once rather than as a
+        roster move and a status change minutes apart.
+        """
+        for target in targets:
+            first_run = bool(report.updates) and not self.announcement_state.has_target_keys(
+                INJURY_KEY_PREFIX, target.key_id
+            )
+            if first_run:
+                await self._announce_injury_report(target, report)
+            # A first run has just posted the standing report in one message, so
+            # there is no injury news left for today's moves to carry.
+            updates = () if first_run else report.updates
+            moves, standalone = combine_roster_news(
+                [
+                    transaction
+                    for transaction in transactions
+                    if self._unseen(target, transaction_announcement_key(transaction))
+                ],
+                [
+                    update
+                    for update in updates
+                    if self._unseen(target, injury_announcement_key(update))
+                ],
+            )
+            for news in moves:
+                embeds, carried = roster_news_post(
+                    news, target_date, self.config.time_zone
+                )
+                await self._announce(
+                    target,
+                    [
+                        transaction_announcement_key(news.transaction),
+                        *(injury_announcement_key(update) for update in carried),
+                    ],
+                    f"Ravens roster move: {news.transaction.headline}",
+                    embeds,
+                )
+            for update in standalone:
+                await self._announce(
+                    target,
+                    [injury_announcement_key(update)],
+                    f"Ravens injury update: {update.player.display_name}",
+                    injury_embeds(InjuryReport((update,)), self.config.time_zone),
+                )
 
     async def _post_new_inactives(
         self,
@@ -177,31 +220,10 @@ class RavensBot(commands.Bot):
             key = inactive_announcement_key(report)
             embeds = inactive_embeds([report], target_date, self.config.time_zone)
             for target in targets:
-                if self.announcement_state.unseen(channel_key(key, target.key_id)):
-                    await self._announce(target, key, "Ravens game day inactives", embeds)
-
-    async def _post_new_injuries(
-        self, targets: list[_AnnouncementTarget], report: InjuryReport
-    ) -> None:
-        if not report.updates:
-            return
-        for target in targets:
-            first_run = not self.announcement_state.has_target_keys(
-                INJURY_KEY_PREFIX, target.key_id
-            )
-            if first_run:
-                await self._announce_injury_report(target, report)
-                continue
-            for update in report.updates:
-                key = injury_announcement_key(update)
-                if not self.announcement_state.unseen(channel_key(key, target.key_id)):
-                    continue
-                await self._announce(
-                    target,
-                    key,
-                    f"Ravens injury update: {update.player.display_name}",
-                    injury_embeds(InjuryReport((update,)), self.config.time_zone),
-                )
+                if self._unseen(target, key):
+                    await self._announce(
+                        target, [key], "Ravens game day inactives", embeds
+                    )
 
     async def _announce_injury_report(
         self, target: _AnnouncementTarget, report: InjuryReport
@@ -211,18 +233,12 @@ class RavensBot(commands.Bot):
         Without this a fresh state file would post a message per player already
         listed, which is a dozen notifications for news nobody is waiting on.
         """
-        keys = [injury_announcement_key(update) for update in report.updates]
         await self._announce(
             target,
-            keys[0],
+            [injury_announcement_key(update) for update in report.updates],
             "Ravens injury report",
             injury_embeds(report, self.config.time_zone),
         )
-        if self.announcement_state.unseen(channel_key(keys[0], target.key_id)):
-            # The post failed, so nothing is recorded and the next poll retries.
-            return
-        for key in keys[1:]:
-            self.announcement_state.mark(channel_key(key, target.key_id))
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -247,19 +263,27 @@ class RavensBot(commands.Bot):
             targets.append(_AnnouncementTarget(f"webhook:{webhook_id(url)}", webhook_label(url), webhook))
         return targets
 
+    def _unseen(self, target: _AnnouncementTarget, key: str) -> bool:
+        return self.announcement_state.unseen(channel_key(key, target.key_id))
+
     async def _announce(
         self,
         target: _AnnouncementTarget,
-        key: str,
+        keys: Sequence[str],
         content: str,
         embeds: list[discord.Embed],
     ) -> None:
+        """Post to one target and record every piece of news the post covers.
+
+        A failed post records nothing, so the next poll tries it again.
+        """
         try:
             await target.destination.send(content=content, embeds=embeds)
         except discord.DiscordException as exc:
             LOGGER.warning("Could not post to %s: %s", target.label, exc)
             return
-        self.announcement_state.mark(channel_key(key, target.key_id))
+        for key in keys:
+            self.announcement_state.mark(channel_key(key, target.key_id))
 
     @poll_updates.before_loop
     async def before_poll_updates(self) -> None:

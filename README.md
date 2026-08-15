@@ -21,7 +21,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   player, team, and game pages.
 - Roster-backed player resolution, so names in a transaction become real links.
 - Background polling for today's roster transactions, game day inactives, and
-  injury report changes.
+  injury report changes, with a move and the injury update it produced
+  announced as one post rather than two.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.
@@ -37,8 +38,10 @@ means the wording is unit tested without constructing a client.
   of the description and matched against the team roster to recover ESPN ids.
   A move about a single player is posted with their full-size headshot; a move
   covering several players falls back to a thumbnail, since one face would
-  misrepresent the post. A mass roster cut skips link markup entirely, because
-  twenty links would crowd the wording out of the field's character budget.
+  misrepresent the post. The thumbnail is the player joining the roster, because
+  a day that pairs an activation with a move to injured reserve is about the
+  arrival. A mass roster cut skips link markup entirely, because twenty links
+  would crowd the wording out of the field's character budget.
 - **Standings** show record, win percentage, games back, and streak per team,
   with the Ravens bolded, plus division, conference, home, and away splits and a
   footer summarising where the Ravens sit.
@@ -50,6 +53,11 @@ means the wording is unit tested without constructing a client.
   expected return when one is published. The art is a thumbnail either way: a
   single-player update shows that player's headshot, and a full report shows the
   team logo, since an injury post is a status line rather than a feature.
+- **Roster moves that come with injury news** are one post, not two. A player
+  activated off injured reserve shows up as a transaction *and* as a status
+  change on the injury report, so the update rides along in the move's post
+  under an "Injury report" field. The photo is the player joining the roster,
+  and a post about one person keeps the full-size headshot.
 - **Live stats** lead with the score, clock, quarter, possession, and down and
   distance, then list both teams' box score totals side by side and a leading
   player per category, Ravens first. A game that has not kicked off points at
@@ -202,6 +210,13 @@ The feed only moves on practice-report days, so most polls are no-ops. A player
 is re-announced when their status or ESPN's update stamp changes, and a target
 with no injury history is sent one consolidated report rather than a message per
 player already on the list.
+
+An activation reaches the bot on both feeds, minutes apart, so each poll pairs
+an update with the roster move naming that player and posts the two together.
+Players are matched on the athlete id when both feeds carry one and on the name
+otherwise, since a description spells a name the way ESPN wrote it. An update is
+claimed by at most one move, and one that no move accounts for — or that arrives
+after its move was already posted — is announced on its own as before.
 
 ### Snap counts
 
