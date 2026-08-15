@@ -188,24 +188,20 @@ class RavensBot(commands.Bot):
                 ],
             )
             for news in moves:
-                embeds, carried = roster_news_post(
-                    news, target_date, self.config.time_zone
-                )
+                embeds, carried = roster_news_post(news, target_date)
                 await self._announce(
                     target,
                     [
                         transaction_announcement_key(news.transaction),
                         *(injury_announcement_key(update) for update in carried),
                     ],
-                    f"Ravens roster move: {news.transaction.headline}",
                     embeds,
                 )
             for update in standalone:
                 await self._announce(
                     target,
                     [injury_announcement_key(update)],
-                    f"Ravens injury update: {update.player.display_name}",
-                    injury_embeds(InjuryReport((update,)), self.config.time_zone),
+                    injury_embeds(InjuryReport((update,))),
                 )
 
     async def _post_new_inactives(
@@ -221,9 +217,7 @@ class RavensBot(commands.Bot):
             embeds = inactive_embeds([report], target_date, self.config.time_zone)
             for target in targets:
                 if self._unseen(target, key):
-                    await self._announce(
-                        target, [key], "Ravens game day inactives", embeds
-                    )
+                    await self._announce(target, [key], embeds)
 
     async def _announce_injury_report(
         self, target: _AnnouncementTarget, report: InjuryReport
@@ -236,8 +230,7 @@ class RavensBot(commands.Bot):
         await self._announce(
             target,
             [injury_announcement_key(update) for update in report.updates],
-            "Ravens injury report",
-            injury_embeds(report, self.config.time_zone),
+            injury_embeds(report),
         )
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
@@ -270,15 +263,17 @@ class RavensBot(commands.Bot):
         self,
         target: _AnnouncementTarget,
         keys: Sequence[str],
-        content: str,
         embeds: list[discord.Embed],
     ) -> None:
         """Post to one target and record every piece of news the post covers.
 
+        The embed is the whole message: a line of text above it would only
+        restate the title Discord is already showing.
+
         A failed post records nothing, so the next poll tries it again.
         """
         try:
-            await target.destination.send(content=content, embeds=embeds)
+            await target.destination.send(embeds=embeds)
         except discord.DiscordException as exc:
             LOGGER.warning("Could not post to %s: %s", target.label, exc)
             return
@@ -335,7 +330,7 @@ def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(embeds=injury_embeds(report, bot.config.time_zone))
+        await interaction.followup.send(embeds=injury_embeds(report))
 
     return injuries
 

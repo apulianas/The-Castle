@@ -16,11 +16,12 @@ from .espn_urls import (
     transactions_url,
 )
 from .formatting import (
+    format_game_state,
     format_game_status,
     format_game_title,
     format_inactive_player,
     format_injury,
-    format_injury_updated,
+    format_injury_detail,
     format_kickoff,
     format_last_play,
     format_live_score,
@@ -58,7 +59,9 @@ from .formatting import (
     format_time_of_day,
     format_team_stat_lines,
     format_transaction,
+    format_transaction_detail,
     format_venue,
+    short_team_name,
 )
 from .dates import MAX_SCHEDULE_DAYS
 from .fourthdown import FourthDownAdvice
@@ -94,6 +97,9 @@ MAX_EMBED_CHARS = 6000
 SNAP_FOOTER_RESERVE = 120
 # The live footer also carries a timestamp, so it reserves a little more.
 LIVE_FOOTER_RESERVE = 160
+# A roster move's footer carries the report's update stamp as well as a count of
+# anything the embed could not fit.
+ROSTER_FOOTER_RESERVE = 200
 DATA_SOURCE = "Data: ESPN"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
@@ -128,6 +134,11 @@ def _base_embed(
     if url:
         embed.url = url
     return embed
+
+
+def _footer(*parts: str | None) -> str:
+    """A footer of whatever metadata applies, always crediting the source."""
+    return " • ".join([*(part for part in parts if part), DATA_SOURCE])
 
 
 def _set_game_art(embed: discord.Embed, game: Game) -> None:
@@ -195,6 +206,34 @@ def _set_transaction_art(
     _set_player_art(embed, _transaction_art_players(transactions), feature=solo)
 
 
+def _subject_url(transaction: Transaction) -> str:
+    """Where a move's title points: the player it is about, or the move list."""
+    player = transaction.player
+    page = player.page_url if player is not None else None
+    return page or transactions_url(RAVENS_SLUG)
+
+
+def _transaction_field_value(transaction: Transaction) -> str:
+    """A move's prose for a list, which always needs something to show."""
+    return format_transaction_detail(transaction) or format_transaction(transaction)
+
+
+def _move_heading(transaction: Transaction) -> tuple[str, str | None]:
+    """A move's title and body, with the same words never said twice.
+
+    A move about one player is titled with their name, so the prose beneath it
+    drops the opening that repeats it. A compound move already names everyone it
+    touches in its prose, so a title listing them again reads as an echo and a
+    plain label leads instead.
+    """
+    if transaction.player is None:
+        return "Ravens roster move", format_transaction(transaction)
+    return (
+        _limit_field(transaction.headline, 256),
+        format_transaction_detail(transaction) or None,
+    )
+
+
 def transaction_embeds(
     transactions: list[Transaction], target_date: date
 ) -> list[discord.Embed]:
@@ -202,11 +241,16 @@ def transaction_embeds(
     if not transactions:
         return [_base_embed(title, format_no_transactions(target_date))]
 
+    if len(transactions) == 1:
+        # One move is its own headline, so it leads the post rather than sitting
+        # in a field under a title that repeats the date and the verb.
+        return [_single_transaction_embed(transactions[0], target_date)]
+
     embed = _base_embed(title, url=transactions_url(RAVENS_SLUG))
     for transaction in transactions[:MAX_EMBED_FIELDS]:
         embed.add_field(
             name=_limit_field(transaction.headline, 256),
-            value=_limit_field(format_transaction(transaction)),
+            value=_limit_field(_transaction_field_value(transaction)),
             inline=False,
         )
 
@@ -214,15 +258,25 @@ def transaction_embeds(
 
     if len(transactions) > MAX_EMBED_FIELDS:
         embed.set_footer(
-            text=f"Showing {MAX_EMBED_FIELDS} of {len(transactions)} moves • {DATA_SOURCE}"
+            text=_footer(f"Showing {MAX_EMBED_FIELDS} of {len(transactions)} moves")
         )
     else:
-        embed.set_footer(text=DATA_SOURCE)
+        embed.set_footer(text=_footer())
     return [embed]
 
 
+def _single_transaction_embed(
+    transaction: Transaction, target_date: date
+) -> discord.Embed:
+    title, body = _move_heading(transaction)
+    embed = _base_embed(title, body, url=_subject_url(transaction))
+    _set_transaction_art(embed, [transaction])
+    embed.set_footer(text=_footer(format_long_date(target_date)))
+    return embed
+
+
 def roster_news_post(
-    news: RosterNews, target_date: date, time_zone: ZoneInfo
+    news: RosterNews, target_date: date
 ) -> tuple[list[discord.Embed], tuple[InjuryUpdate, ...]]:
     """The post for a roster move, and the injury updates it actually carries.
 
@@ -236,16 +290,11 @@ def roster_news_post(
         return transaction_embeds([news.transaction], target_date), ()
 
     transaction = news.transaction
-    embed = _base_embed(
-        f"Ravens roster move — {format_long_date(target_date)}",
-        format_injury_updated(news.last_updated, time_zone),
-        url=transactions_url(RAVENS_SLUG),
-    )
-    embed.add_field(
-        name=_limit_field(transaction.headline, 256),
-        value=_limit_field(format_transaction(transaction)),
-        inline=False,
-    )
+    title, body = _move_heading(transaction)
+    embed = _base_embed(title, body, url=_subject_url(transaction))
+    # A move about one player is titled with their name, so the injury lines
+    # underneath report the injury alone rather than naming them again.
+    solo = transaction.player is not None
     by_status: dict[str, list[InjuryUpdate]] = {}
     for update in news.injuries:
         by_status.setdefault(update.status_text, []).append(update)
@@ -260,19 +309,23 @@ def roster_news_post(
             # injury post clamps its own.
             (
                 f"Injury report — {status}",
-                [_limit_field(format_injury(item)) for item in group],
+                [_limit_field(_injury_line(item, solo)) for item in group],
             )
             for status, group in by_status.items()
         ],
+        reserve=ROSTER_FOOTER_RESERVE,
     )
     _set_player_art(embed, news.art_players, feature=news.is_one_player)
-    if shown < len(ordered):
-        embed.set_footer(
-            text=f"Showing {shown} of {len(ordered)} updates • {DATA_SOURCE}"
-        )
-    else:
-        embed.set_footer(text=DATA_SOURCE)
+    hidden = f"Showing {shown} of {len(ordered)} updates" if shown < len(ordered) else None
+    embed.set_footer(text=_footer(hidden))
     return [embed], tuple(ordered[:shown])
+
+
+def _injury_line(update: InjuryUpdate, solo: bool) -> str:
+    """An injury line, dropping the name when the title already carries it."""
+    if solo:
+        return format_injury_detail(update) or format_injury(update)
+    return format_injury(update)
 
 
 def inactive_embeds(
@@ -289,7 +342,11 @@ def inactive_embeds(
     embeds: list[discord.Embed] = []
     for report in reports:
         game = report.game
-        description = f"{format_kickoff(game, time_zone)}\n{format_game_status(game)}"
+        description = "\n".join(
+            part
+            for part in (format_kickoff(game, time_zone), format_game_state(game))
+            if part
+        )
         embed = _base_embed(
             f"{format_matchup(game)} — inactives",
             description,
@@ -304,7 +361,7 @@ def inactive_embeds(
         else:
             by_team: dict[str, list[str]] = {}
             for player in report.players:
-                team = player.team or "Team"
+                team = short_team_name(player.team)
                 by_team.setdefault(team, []).append(format_inactive_player(player))
             for team, players in list(by_team.items())[:MAX_EMBED_FIELDS]:
                 embed.add_field(
@@ -313,8 +370,8 @@ def inactive_embeds(
                     inline=False,
                 )
 
-        footer = format_venue(game) or DATA_SOURCE
-        embed.set_footer(text=footer if footer == DATA_SOURCE else f"{footer} • {DATA_SOURCE}")
+        venue = format_venue(game)
+        embed.set_footer(text=_footer(venue))
         embeds.append(embed)
     return embeds
 
@@ -333,20 +390,21 @@ def _set_injury_art(embed: discord.Embed, updates: Sequence[InjuryUpdate]) -> No
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
 
 
-def injury_embeds(report: InjuryReport, time_zone: ZoneInfo) -> list[discord.Embed]:
+def injury_embeds(report: InjuryReport) -> list[discord.Embed]:
     title = "Ravens injury report"
     updates = report.updates
     if not updates:
         embed = _base_embed(title, format_no_injuries(), url=injuries_url(RAVENS_SLUG))
         embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
-        embed.set_footer(text=DATA_SOURCE)
+        embed.set_footer(text=_footer())
         return [embed]
 
-    embed = _base_embed(
-        title,
-        format_injury_updated(report.last_updated, time_zone),
-        url=injuries_url(RAVENS_SLUG),
-    )
+    if len(updates) == 1:
+        # One player is the post, so their name and status are its title rather
+        # than a heading, a count of one, and a line opening with both.
+        return [_single_injury_embed(updates[0])]
+
+    embed = _base_embed(title, url=injuries_url(RAVENS_SLUG))
     by_status: dict[str, list[str]] = {}
     for update in updates:
         by_status.setdefault(update.status_text, []).append(format_injury(update))
@@ -359,13 +417,21 @@ def injury_embeds(report: InjuryReport, time_zone: ZoneInfo) -> list[discord.Emb
             inline=False,
         )
     _set_injury_art(embed, updates)
-    if shown < len(updates):
-        embed.set_footer(
-            text=f"Showing {shown} of {len(updates)} players • {DATA_SOURCE}"
-        )
-    else:
-        embed.set_footer(text=DATA_SOURCE)
+    hidden = f"Showing {shown} of {len(updates)} players" if shown < len(updates) else None
+    embed.set_footer(text=_footer(hidden))
     return [embed]
+
+
+def _single_injury_embed(update: InjuryUpdate) -> discord.Embed:
+    player = update.player
+    embed = _base_embed(
+        _limit_field(f"{player.display_name} — {update.status_text}", 256),
+        format_injury_detail(update) or None,
+        url=player.page_url or injuries_url(RAVENS_SLUG),
+    )
+    _set_injury_art(embed, (update,))
+    embed.set_footer(text=_footer())
+    return embed
 
 
 def schedule_embed(games: list[Game], time_zone: ZoneInfo, days: int = 7) -> discord.Embed:

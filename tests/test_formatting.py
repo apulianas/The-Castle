@@ -13,9 +13,11 @@ from ravens_bot.formatting import (
     format_fourth_down_option,
     format_fourth_down_situation,
     format_full_date,
+    format_game_state,
     format_game_time,
     format_games_back,
     format_inactive_player,
+    format_injury_detail,
     format_long_date,
     format_matchup,
     format_no_snap_counts,
@@ -31,10 +33,12 @@ from ravens_bot.formatting import (
     format_standings_detail,
     format_standings_row,
     format_transaction,
+    format_transaction_detail,
     format_unknown_snap_player,
     format_unknown_team,
     format_win_percent,
     ordinal,
+    short_team_name,
 )
 from ravens_bot.fourthdown import advise
 from ravens_bot.models import (
@@ -42,6 +46,7 @@ from ravens_bot.models import (
     GameSituation,
     GameTeam,
     InactivePlayer,
+    InjuryUpdate,
     PlayerRef,
     PlayerSnaps,
     PlayerSnapTotals,
@@ -197,6 +202,101 @@ def test_format_transaction_skips_links_on_a_mass_roster_cut() -> None:
     )
 
     assert format_transaction(transaction) == description
+
+
+def test_transaction_detail_drops_the_opening_the_headline_already_states() -> None:
+    transaction = Transaction(
+        transaction_id="tx1",
+        date=date(2025, 11, 4),
+        description="Signed WR Devontez Walker to the active roster.",
+        type_text="Signed",
+        players=(PlayerRef(name="Devontez Walker", athlete_id="1", position="WR"),),
+    )
+
+    assert transaction.headline == "Signed — WR Devontez Walker"
+    assert format_transaction_detail(transaction) == "To the active roster."
+
+
+def test_transaction_detail_is_empty_when_the_headline_says_everything() -> None:
+    """"Re-signed WR Tylan Wallace." leaves only the full stop behind."""
+    transaction = Transaction(
+        transaction_id="tx1",
+        date=date(2025, 11, 4),
+        description="Re-signed WR Tylan Wallace.",
+        type_text="Re-signed",
+        players=(PlayerRef(name="Tylan Wallace", athlete_id="1", position="WR"),),
+    )
+
+    assert format_transaction_detail(transaction) == ""
+
+
+def test_transaction_detail_keeps_the_prose_of_a_compound_move() -> None:
+    """Trimming a move naming two players would lose one of them."""
+    players = (
+        PlayerRef(name="Ronnie Stanley", athlete_id="1", position="OT"),
+        PlayerRef(name="Carson Vinson", athlete_id="2", position="OT"),
+    )
+    transaction = Transaction(
+        transaction_id="tx1",
+        date=date(2025, 11, 4),
+        description=(
+            "Placed OT Ronnie Stanley on injured reserve and signed "
+            "OT Carson Vinson to the active roster."
+        ),
+        type_text="Placed",
+        players=players,
+    )
+
+    detail = format_transaction_detail(transaction)
+
+    assert "Ronnie Stanley" in detail
+    assert "Carson Vinson" in detail
+
+
+def test_transaction_detail_keeps_prose_that_does_not_open_with_the_headline() -> None:
+    transaction = Transaction(
+        transaction_id="tx1",
+        date=date(2025, 11, 4),
+        description="The Ravens signed WR Devontez Walker.",
+        type_text="Signed",
+        players=(PlayerRef(name="Devontez Walker", athlete_id="1", position="WR"),),
+    )
+
+    assert format_transaction_detail(transaction).startswith("The Ravens signed")
+
+
+def test_injury_detail_leaves_the_player_out() -> None:
+    update = InjuryUpdate(
+        player=PlayerRef(name="Zay Flowers", athlete_id="1", position="WR"),
+        status="Questionable",
+        detail="Knee",
+        comment="Limited on Thursday.",
+    )
+
+    assert format_injury_detail(update) == "Knee · Limited on Thursday."
+    assert format_injury_detail(InjuryUpdate(player=PlayerRef(name="A B"))) == ""
+
+
+def test_short_team_name_keeps_only_the_nickname() -> None:
+    assert short_team_name("Baltimore Ravens") == "Ravens"
+    assert short_team_name("New York Jets") == "Jets"
+    assert short_team_name(None) == "Team"
+
+
+def test_game_state_drops_a_status_the_kickoff_line_already_implies() -> None:
+    def game(status: str, state: str) -> Game:
+        return Game(
+            event_id="9",
+            name="New York Jets at Baltimore Ravens",
+            short_name="NYJ @ BAL",
+            start_time=None,
+            status=status,
+            state=state,
+            week="Week 12",
+        )
+
+    assert format_game_state(game("Scheduled", "pre")) == "Week 12"
+    assert format_game_state(game("In Progress", "in")) == "In Progress • Week 12"
 
 
 def test_transaction_headline_names_a_solo_move() -> None:

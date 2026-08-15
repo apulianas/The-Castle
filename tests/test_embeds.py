@@ -25,9 +25,11 @@ from ravens_bot.embeds import (
     standings_embed,
     transaction_embeds,
 )
+from ravens_bot.espn_urls import transactions_url
 from ravens_bot.fourthdown import advise
 from ravens_bot.formatting import format_no_live_game
 from ravens_bot.models import (
+    RAVENS_SLUG,
     Game,
     GameSituation,
     GameTeam,
@@ -174,13 +176,55 @@ def test_transaction_embed_reports_how_many_moves_were_hidden() -> None:
     assert embed.footer.text.startswith("Showing 25 of 30 moves")
 
 
-def test_transaction_embed_footer_is_plain_when_nothing_is_hidden() -> None:
+def test_transaction_embed_footer_credits_the_source_and_dates_the_move() -> None:
     embed = transaction_embeds([build_transaction()], date(2025, 11, 4))[0]
 
-    assert embed.footer.text == "Data: ESPN"
+    assert embed.footer.text == "November 4, 2025 • Data: ESPN"
 
 
-def test_transaction_field_names_stay_within_the_title_budget() -> None:
+def test_a_single_move_leads_with_its_own_headline() -> None:
+    """A one-move post says what happened once, in the title."""
+    player = PlayerRef(name="Devontez Walker", athlete_id="4696882", position="WR")
+    transaction = Transaction(
+        transaction_id="tx",
+        date=date(2025, 11, 4),
+        description="Signed WR Devontez Walker to the active roster.",
+        type_text="Signed",
+        players=(player,),
+    )
+
+    embed = transaction_embeds([transaction], date(2025, 11, 4))[0]
+
+    assert embed.title == "Signed — WR Devontez Walker"
+    assert embed.description == "To the active roster."
+    assert embed.url == player.page_url
+    assert embed.fields == []
+
+
+def test_a_compound_move_names_its_players_once_in_the_prose() -> None:
+    """Listing both players in the title and again in the prose is an echo."""
+    stanley = PlayerRef(name="Ronnie Stanley", athlete_id="3115365", position="OT")
+    vinson = PlayerRef(name="Carson Vinson", athlete_id="4685720", position="OT")
+    transaction = Transaction(
+        transaction_id="tx",
+        date=date(2025, 11, 4),
+        description=(
+            "Placed OT Ronnie Stanley on injured reserve and signed OT Carson "
+            "Vinson to the active roster."
+        ),
+        type_text="Placed",
+        players=(stanley, vinson),
+    )
+
+    embed = transaction_embeds([transaction], date(2025, 11, 4))[0]
+
+    assert embed.title == "Ravens roster move"
+    assert "Ronnie Stanley" in embed.description
+    assert "Carson Vinson" in embed.description
+    assert embed.url == transactions_url(RAVENS_SLUG)
+
+
+def test_a_long_single_move_stays_within_the_title_and_description_budgets() -> None:
     transaction = Transaction(
         transaction_id="tx",
         date=date(2025, 11, 4),
@@ -188,6 +232,22 @@ def test_transaction_field_names_stay_within_the_title_budget() -> None:
     )
 
     embed = transaction_embeds([transaction], date(2025, 11, 4))[0]
+
+    assert len(embed.title) <= 256
+    assert len(embed.description) <= MAX_DESCRIPTION_CHARS
+
+
+def test_transaction_field_names_stay_within_the_title_budget() -> None:
+    transactions = [
+        Transaction(
+            transaction_id=f"tx{index}",
+            date=date(2025, 11, 4),
+            description="x" * 5000,
+        )
+        for index in range(2)
+    ]
+
+    embed = transaction_embeds(transactions, date(2025, 11, 4))[0]
 
     assert len(embed.fields[0].name) <= 256
     assert len(embed.fields[0].value) <= MAX_FIELD_CHARS
@@ -293,7 +353,7 @@ def test_inactive_embed_groups_players_by_team() -> None:
 
     embed = inactive_embeds([report], date(2025, 11, 23), EASTERN)[0]
 
-    assert field_names(embed) == ["Baltimore Ravens (2)", "New York Jets (1)"]
+    assert field_names(embed) == ["Ravens (2)", "Jets (1)"]
     assert "WR Raven One — Healthy scratch" in embed.fields[0].value
 
 

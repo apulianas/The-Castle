@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -95,6 +96,28 @@ def format_game_status(game: Game) -> str:
     return " • ".join(part for part in parts if part)
 
 
+def format_game_state(game: Game) -> str:
+    """Status and week, minus a status the kickoff line already implies.
+
+    A post that leads with "Sun, Nov 9 at 1:00 PM EST" does not also need to say
+    "Scheduled". Once a game is under way its status is news, so it stays.
+    """
+    parts = [] if not game.has_started else [game.status]
+    if game.week:
+        parts.append(game.week)
+    return " • ".join(part for part in parts if part)
+
+
+def short_team_name(name: str | None) -> str:
+    """The nickname a team is known by, e.g. "Ravens" for the Baltimore Ravens.
+
+    Every NFL team is a place plus a nickname, and a post that has already named
+    the matchup only needs the nickname to say whose list is whose.
+    """
+    words = (name or "").split()
+    return words[-1] if words else "Team"
+
+
 def format_venue(game: Game) -> str | None:
     if not game.venue:
         return None
@@ -157,11 +180,58 @@ def format_no_transactions(target_date: date) -> str:
     return f"No {RAVENS_NAME} roster transactions found for {format_full_date(target_date)}."
 
 
+# Leftover punctuation once the opening is removed, e.g. the full stop closing
+# "Re-signed WR Tylan Wallace."
+_LEADING_PUNCTUATION_RE = re.compile(r"^[\s.,;:—–-]+")
+
+
+def format_transaction_detail(transaction: Transaction) -> str:
+    """What the move's prose adds once the headline has been read.
+
+    A headline already reads "Signed — WR Devontez Walker", so repeating the
+    verb and the name in the prose underneath it says the same thing twice. Only
+    a move about one player can be trimmed this way, because a compound move
+    names players the headline's opening does not cover. An empty string means
+    the headline said all there was to say.
+    """
+    player = transaction.player
+    action = transaction.type_text
+    if player is None or not action:
+        return format_transaction(transaction)
+    position = rf"(?:{re.escape(player.position)}\s+)?" if player.position else ""
+    opening = re.compile(
+        rf"^\s*{re.escape(action)}\s+{position}{re.escape(player.name)}\b",
+        re.IGNORECASE,
+    )
+    match = opening.match(transaction.description or "")
+    if match is None:
+        return format_transaction(transaction)
+    remainder = _LEADING_PUNCTUATION_RE.sub(
+        "", (transaction.description or "")[match.end() :]
+    ).strip()
+    if not remainder:
+        return ""
+    return remainder[0].upper() + remainder[1:]
+
+
 def format_inactive_player(player: InactivePlayer) -> str:
     name = link(player.name, player.page_url)
     if player.position:
         name = f"{player.position} {name}"
     return f"{name} — {player.reason}" if player.reason else name
+
+
+def format_injury_detail(update: InjuryUpdate) -> str:
+    """What is wrong and when they are due back, without naming the player.
+
+    A post whose title is already the player's name and status has no use for a
+    line that opens by repeating both.
+    """
+    parts = [part for part in (update.detail, update.comment) if part]
+    expected = format_return_date(update.return_date)
+    if expected:
+        parts.append(f"expected back {expected}")
+    return " · ".join(parts)
 
 
 def format_injury(update: InjuryUpdate) -> str:
@@ -170,11 +240,8 @@ def format_injury(update: InjuryUpdate) -> str:
     name = link(player.name, player.page_url)
     if player.position:
         name = f"{player.position} {name}"
-    parts = [part for part in (update.detail, update.comment) if part]
-    expected = format_return_date(update.return_date)
-    if expected:
-        parts.append(f"expected back {expected}")
-    return f"{name} — {' · '.join(parts)}" if parts else name
+    detail = format_injury_detail(update)
+    return f"{name} — {detail}" if detail else name
 
 
 def format_return_date(value: str | None) -> str | None:
@@ -192,16 +259,6 @@ def format_return_date(value: str | None) -> str | None:
 
 def format_no_injuries() -> str:
     return "ESPN lists no Ravens players on the injury report right now."
-
-
-def format_injury_updated(updated: datetime | None, time_zone: ZoneInfo) -> str | None:
-    if updated is None:
-        return None
-    local = updated.astimezone(time_zone)
-    return (
-        f"Updated {format_long_date(local.date())} at "
-        f"{format_time_of_day(updated, time_zone)}"
-    )
 
 
 def format_no_inactives() -> str:
