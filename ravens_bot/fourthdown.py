@@ -59,6 +59,11 @@ PUNT = "punt"
 FIELD_GOAL_OVERHEAD = 17
 # Beyond this the attempt is a coin toss with field position, not a field goal.
 MAX_FIELD_GOAL_YARDS = 66
+# The ball on the one yard line is the shortest kick the rules allow.
+MIN_FIELD_GOAL_YARDS = 1 + FIELD_GOAL_OVERHEAD
+# A kick from a team's own end of the field is longer than anyone has made, but
+# asking about one should still get an answer rather than an error.
+LONGEST_ASKABLE_FIELD_GOAL = 99 + FIELD_GOAL_OVERHEAD
 # A missed kick hands the ball back at the spot of the kick, or the twenty,
 # whichever is further from the kicking team's goal line.
 MISSED_FIELD_GOAL_FLOOR = 20
@@ -332,4 +337,68 @@ def advise(situation: GameSituation) -> FourthDownAdvice:
         situation=situation,
         options=tuple(options),
         caveats=_caveats(situation),
+    )
+
+
+@dataclass(frozen=True)
+class FieldGoalOutlook:
+    """What a single field goal attempt is worth, asked on its own.
+
+    The same curves answer "should they kick" and "would this kick go in", so
+    this is a thin reading of the model rather than a second one. A kick asked
+    about in the abstract has no spot, so the expected points of attempting it —
+    which depend on where a miss hands the ball over — are only filled in when
+    the ball's position is known.
+    """
+
+    kick_distance: int
+    make_rate: float
+    yards_to_goal: int | None = None
+    expected_points: float | None = None
+    # Set when the kick was read off a live ball spot rather than given.
+    situation: GameSituation | None = None
+
+    @property
+    def in_range(self) -> bool:
+        return self.make_rate > 0
+
+
+def yards_to_goal_for_kick(kick_distance: int) -> int | None:
+    """The ball spot a kick of this length is taken from, when one exists."""
+    yards = kick_distance - FIELD_GOAL_OVERHEAD
+    return yards if 1 <= yards <= 99 else None
+
+
+def field_goal_outlook(
+    kick_distance: int | None = None,
+    yards_to_goal: int | None = None,
+    situation: GameSituation | None = None,
+) -> FieldGoalOutlook:
+    """The odds on a kick, given either its length or where the ball is.
+
+    Callers pass the distance a person would say out loud — a "fifty two
+    yarder" — or the yards to the goal line, which the snap and the spot make
+    seventeen yards shorter than the kick.
+    """
+    if kick_distance is None:
+        if yards_to_goal is None:
+            raise ValueError("A field goal needs a kick distance or a ball spot.")
+        kick_distance = field_goal_distance(yards_to_goal)
+    if yards_to_goal is None:
+        yards_to_goal = yards_to_goal_for_kick(kick_distance)
+    rate = field_goal_rate(kick_distance)
+    # A kick out of range has no expected points worth quoting: the model gives
+    # it a value of minus infinity so it never wins a ranking, which is a
+    # sorting device rather than a number about this kick.
+    points = (
+        _field_goal_option(yards_to_goal).expected_points
+        if yards_to_goal is not None and rate > 0
+        else None
+    )
+    return FieldGoalOutlook(
+        kick_distance=kick_distance,
+        make_rate=rate,
+        yards_to_goal=yards_to_goal,
+        expected_points=points,
+        situation=situation,
     )

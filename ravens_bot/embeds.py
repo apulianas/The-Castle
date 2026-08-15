@@ -27,9 +27,13 @@ from .formatting import (
     format_live_score,
     format_long_date,
     format_matchup,
+    format_field_goal_call,
+    format_field_goal_detail,
     format_fourth_down_call,
+    format_fourth_down_matchup,
     format_fourth_down_option,
     format_fourth_down_situation,
+    format_recalled_fourth_down,
     format_no_game,
     format_no_game_today,
     format_no_live_stats,
@@ -64,7 +68,7 @@ from .formatting import (
     short_team_name,
 )
 from .dates import MAX_SCHEDULE_DAYS
-from .fourthdown import FourthDownAdvice
+from .fourthdown import FieldGoalOutlook, FourthDownAdvice
 from .models import (
     AFC_NORTH_GROUP_ID,
     RAVENS_SLUG,
@@ -525,11 +529,20 @@ def next_game_embed(game: Game | None, time_zone: ZoneInfo) -> discord.Embed:
     return embed
 
 
-def fourth_down_embed(game: Game, advice: FourthDownAdvice) -> discord.Embed:
-    """The call, the situation behind it, and what each option is worth."""
+def fourth_down_embed(
+    game: Game, advice: FourthDownAdvice, age_seconds: float | None = None
+) -> discord.Embed:
+    """The call, the situation behind it, and what each option is worth.
+
+    ``age_seconds`` is set when the down has already been played and the answer
+    comes from memory, so the embed says so instead of reading as live.
+    """
+    description = format_fourth_down_situation(game, advice.situation)
+    if age_seconds is not None:
+        description = f"{format_recalled_fourth_down(age_seconds)}\n{description}"
     embed = _base_embed(
         format_fourth_down_call(advice),
-        format_fourth_down_situation(game, advice.situation),
+        description,
         url=game_url(game.event_id),
     )
     for index, option in enumerate(advice.options):
@@ -542,6 +555,40 @@ def fourth_down_embed(game: Game, advice: FourthDownAdvice) -> discord.Embed:
         embed.add_field(name="Worth knowing", value=_limit_field(caveat), inline=False)
     embed.set_thumbnail(url=advice.situation.possession.logo_url or team_logo_url(RAVENS_SLUG))
     embed.set_footer(text=FOURTH_DOWN_FOOTER)
+    return embed
+
+
+def field_goal_embed(
+    outlook: FieldGoalOutlook, game: Game | None = None
+) -> discord.Embed:
+    """The odds on one kick, either a named distance or the current ball spot."""
+    lines = []
+    if game is not None:
+        lines.append(format_fourth_down_matchup(game))
+    if outlook.situation is not None:
+        lines.append(outlook.situation.summary)
+    lines.append(format_field_goal_detail(outlook))
+    embed = _base_embed(
+        format_field_goal_call(outlook),
+        "\n".join(lines),
+        url=game_url(game.event_id) if game else None,
+    )
+    logo = None
+    if outlook.situation is not None:
+        logo = outlook.situation.possession.logo_url
+    if logo is None and game is not None and game.home is not None:
+        logo = game.home.team.logo_url
+    embed.set_thumbnail(url=logo or team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=FOURTH_DOWN_FOOTER)
+    return embed
+
+
+def no_field_goal_embed(message: str, game: Game | None = None) -> discord.Embed:
+    embed = _base_embed(
+        "Field goal", message, url=game_url(game.event_id) if game else None
+    )
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=DATA_SOURCE)
     return embed
 
 
@@ -630,7 +677,17 @@ def help_embed() -> discord.Embed:
             "Whether the team with the ball in a live fourth down should go for "
             "it, kick, or punt, with the expected points behind each option. "
             "Defaults to the Ravens game, then the configured second team, then "
-            "whatever else is being played."
+            "whatever else is being played. Once the play is over it answers the "
+            "last fourth down it saw, saying how long ago that was."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/fieldgoal [yards] [team]",
+        value=(
+            "How often a kick of that length is made, and what attempting it is "
+            "worth. Omit the yardage to read the distance off where the ball is "
+            "in the Ravens game, or whatever else is on."
         ),
         inline=False,
     )
