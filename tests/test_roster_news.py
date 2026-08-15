@@ -21,9 +21,7 @@ from ravens_bot.embeds import (
     transaction_embeds,
 )
 from ravens_bot.espn import combine_roster_news, parse_transactions, transaction_action
-from ravens_bot.espn_urls import transactions_url
 from ravens_bot.models import (
-    RAVENS_SLUG,
     InjuryReport,
     InjuryUpdate,
     PlayerRef,
@@ -67,12 +65,12 @@ class FakeDestination:
 
     def __init__(self, fails: bool = False) -> None:
         self.fails = fails
-        self.posts: list[tuple[str, list[discord.Embed]]] = []
+        self.posts: list[list[discord.Embed]] = []
 
-    async def send(self, content: str, embeds: list[discord.Embed]) -> None:
+    async def send(self, embeds: list[discord.Embed]) -> None:
         if self.fails:
             raise discord.DiscordException("channel is unavailable")
-        self.posts.append((content, embeds))
+        self.posts.append(embeds)
 
 
 def build_target(fails: bool = False) -> _AnnouncementTarget:
@@ -101,9 +99,14 @@ def poll(
     target: _AnnouncementTarget,
     transactions: list[Transaction],
     report: InjuryReport,
-) -> list[tuple[str, list[discord.Embed]]]:
+) -> list[list[discord.Embed]]:
     asyncio.run(bot._post_new_roster_news([target], transactions, report, TARGET_DATE))
     return target.destination.posts
+
+
+def titles(posts: list[list[discord.Embed]]) -> list[str | None]:
+    """What each post announces, which is now its embed title alone."""
+    return [embeds[0].title for embeds in posts]
 
 
 def test_same_player_matches_on_id_across_different_spellings() -> None:
@@ -189,16 +192,14 @@ def test_combined_post_shows_the_move_and_the_injury_status() -> None:
         injuries=(build_update(player),),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
-    assert embed.title == "Ravens roster move — November 4, 2025"
-    assert embed.url == transactions_url(RAVENS_SLUG)
-    assert [field.name for field in embed.fields] == [
-        "Activated — TE Isaiah Likely",
-        "Injury report — Active",
-    ]
-    assert "Knee" in embed.fields[1].value
-    assert "Updated" in (embed.description or "")
+    assert embed.title == "Activated — TE Isaiah Likely"
+    assert embed.url == player.page_url
+    assert embed.description == "From injured reserve."
+    assert [field.name for field in embed.fields] == ["Injury report — Active"]
+    assert embed.fields[0].value == "Knee"
+    assert embed.footer.text == "Data: ESPN"
 
 
 def test_a_move_with_no_injury_news_posts_exactly_as_before() -> None:
@@ -207,7 +208,7 @@ def test_a_move_with_no_injury_news_posts_exactly_as_before() -> None:
         (PlayerRef(name="Keondre Jackson", athlete_id="4878287"),),
     )
 
-    combined = roster_news_post(RosterNews(transaction), TARGET_DATE, EASTERN)[0][0]
+    combined = roster_news_post(RosterNews(transaction), TARGET_DATE)[0][0]
     plain = transaction_embeds([transaction], TARGET_DATE)[0]
 
     assert combined.to_dict() == plain.to_dict()
@@ -222,7 +223,7 @@ def test_a_combined_post_about_one_player_keeps_the_full_size_headshot() -> None
         injuries=(build_update(player),),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
     assert embed.image.url is not None and "w=520" in embed.image.url
     assert embed.thumbnail.url is None
@@ -241,7 +242,7 @@ def test_a_combined_post_pictures_the_player_joining_the_roster() -> None:
         injuries=(build_update(leaving, "Injured Reserve"),),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
     assert embed.image.url is None
     assert embed.thumbnail.url is not None and "full%2F1.png" in embed.thumbnail.url
@@ -256,7 +257,7 @@ def test_a_combined_post_without_an_arrival_still_pictures_the_player() -> None:
         injuries=(build_update(player, "Injured Reserve"),),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
     assert embed.image.url is not None and "full%2F2.png" in embed.image.url
 
@@ -307,7 +308,7 @@ def test_a_combined_post_stays_inside_discords_limits() -> None:
         injuries=tuple(build_update(player, "Out") for player in players),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
     assert len(embed) <= MAX_EMBED_CHARS
     assert len(embed.fields) <= MAX_EMBED_FIELDS
@@ -325,11 +326,11 @@ def test_players_sharing_a_status_share_a_field() -> None:
         injuries=(build_update(first, "Out"), build_update(second, "Out")),
     )
 
-    embed = roster_news_post(news, TARGET_DATE, EASTERN)[0][0]
+    embed = roster_news_post(news, TARGET_DATE)[0][0]
 
-    assert [field.name for field in embed.fields][1:] == ["Injury report — Out"]
-    assert "Zay Flowers" in embed.fields[1].value
-    assert "Nate Wiggins" in embed.fields[1].value
+    assert [field.name for field in embed.fields] == ["Injury report — Out"]
+    assert "Zay Flowers" in embed.fields[0].value
+    assert "Nate Wiggins" in embed.fields[0].value
 
 
 def test_a_move_too_big_for_one_post_leaves_the_rest_to_be_announced(tmp_path) -> None:
@@ -354,7 +355,7 @@ def test_a_move_too_big_for_one_post_leaves_the_rest_to_be_announced(tmp_path) -
     posts = poll(bot, target, [transaction], InjuryReport(updates))
 
     assert len(posts) == 1
-    assert posts[0][1][0].footer.text.startswith("Showing ")
+    assert posts[0][0].footer.text.startswith("Showing ")
     dropped = [
         update
         for update in updates
@@ -364,8 +365,8 @@ def test_a_move_too_big_for_one_post_leaves_the_rest_to_be_announced(tmp_path) -
 
     later = poll(bot, target, [transaction], InjuryReport(updates))
 
-    assert [content for content, _ in later[1:]] == [
-        f"Ravens injury update: {update.player.display_name}" for update in dropped
+    assert titles(later[1:]) == [
+        f"{update.player.display_name} — {update.status_text}" for update in dropped
     ]
 
 
@@ -385,7 +386,7 @@ def test_an_unbounded_espn_comment_still_fits_a_field() -> None:
         ),
     )
 
-    embeds, carried = roster_news_post(news, TARGET_DATE, EASTERN)
+    embeds, carried = roster_news_post(news, TARGET_DATE)
 
     assert len(carried) == 1
     assert all(len(field.value) <= MAX_FIELD_CHARS for field in embeds[0].fields)
@@ -402,12 +403,9 @@ def test_polling_announces_an_activation_as_one_post(tmp_path) -> None:
     posts = poll(bot, target, [transaction], report)
 
     assert len(posts) == 1
-    content, embeds = posts[0]
-    assert content == "Ravens roster move: Activated — TE Isaiah Likely"
-    assert [field.name for field in embeds[0].fields] == [
-        "Activated — TE Isaiah Likely",
-        "Injury report — Active",
-    ]
+    embeds = posts[0]
+    assert embeds[0].title == "Activated — TE Isaiah Likely"
+    assert [field.name for field in embeds[0].fields] == ["Injury report — Active"]
 
 
 def test_polling_again_repeats_neither_half_of_a_combined_post(tmp_path) -> None:
@@ -437,9 +435,7 @@ def test_an_update_after_the_move_was_posted_is_still_announced(tmp_path) -> Non
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert [content for content, _ in posts] == [
-        "Ravens injury update: TE Isaiah Likely"
-    ]
+    assert titles(posts) == ["TE Isaiah Likely — Active"]
 
 
 def test_a_first_run_posts_the_standing_report_and_the_move_separately(
@@ -454,9 +450,9 @@ def test_a_first_run_posts_the_standing_report_and_the_move_separately(
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert [content for content, _ in posts] == [
-        "Ravens injury report",
-        "Ravens roster move: Activated — TE Isaiah Likely",
+    assert titles(posts) == [
+        "TE Isaiah Likely — Active",
+        "Activated — TE Isaiah Likely",
     ]
 
 

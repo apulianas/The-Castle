@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from ravens_bot.bot import injury_announcement_key
 from ravens_bot.embeds import injury_embeds
@@ -16,9 +15,6 @@ from ravens_bot.models import (
     injury_status_rank,
 )
 from ravens_bot.state import AnnouncementState, channel_key
-
-
-TIME_ZONE = ZoneInfo("America/New_York")
 
 
 def _payload() -> dict[str, object]:
@@ -190,14 +186,36 @@ def test_format_injury_without_details_is_just_the_player() -> None:
 def test_injury_embed_groups_by_status_with_a_team_thumbnail() -> None:
     report = parse_injuries(_payload())
 
-    embed = injury_embeds(report, TIME_ZONE)[0]
+    embed = injury_embeds(report)[0]
 
     assert embed.title == "Ravens injury report"
     assert embed.url == injuries_url(RAVENS_SLUG)
     assert [field.name for field in embed.fields] == ["Out (1)", "Questionable (1)"]
     assert embed.thumbnail.url == team_logo_url(RAVENS_SLUG)
     assert embed.image.url is None
-    assert "Updated" in (embed.description or "")
+    assert embed.footer.text == "Data: ESPN"
+
+
+def test_injury_embed_for_one_player_is_titled_with_their_status() -> None:
+    """A post about one player has no use for a heading and a count of one."""
+    report = InjuryReport(
+        (
+            InjuryUpdate(
+                player=PlayerRef(
+                    name="Zay Flowers", athlete_id="4426354", position="WR"
+                ),
+                status="Questionable",
+                detail="Knee",
+                comment="Limited on Thursday.",
+            ),
+        )
+    )
+
+    embed = injury_embeds(report)[0]
+
+    assert embed.title == "WR Zay Flowers — Questionable"
+    assert embed.description == "Knee · Limited on Thursday."
+    assert embed.fields == []
 
 
 def test_injury_embed_for_one_player_uses_a_small_headshot() -> None:
@@ -210,7 +228,7 @@ def test_injury_embed_for_one_player_uses_a_small_headshot() -> None:
         )
     )
 
-    embed = injury_embeds(report, TIME_ZONE)[0]
+    embed = injury_embeds(report)[0]
 
     assert embed.thumbnail.url is not None
     assert "w=200" in embed.thumbnail.url
@@ -218,7 +236,7 @@ def test_injury_embed_for_one_player_uses_a_small_headshot() -> None:
 
 
 def test_injury_embed_without_players_says_so() -> None:
-    embed = injury_embeds(InjuryReport(), TIME_ZONE)[0]
+    embed = injury_embeds(InjuryReport())[0]
 
     assert embed.description == format_no_injuries()
     assert embed.thumbnail.url == team_logo_url(RAVENS_SLUG)
