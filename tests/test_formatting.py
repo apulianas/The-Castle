@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -535,7 +536,13 @@ def test_format_fourth_down_option_bolds_the_recommended_one() -> None:
 
     assert format_fourth_down_option(best, best=True).startswith("**")
     assert not format_fourth_down_option(best).startswith("**")
-    assert "expected points" in format_fourth_down_option(best)
+    assert "win probability" in format_fourth_down_option(best)
+
+
+def test_format_fourth_down_option_prices_a_clockless_down_in_points() -> None:
+    advice = advise(replace(build_situation(), clock=None, clock_seconds=None))
+
+    assert "expected points" in format_fourth_down_option(advice.options[0])
 
 
 def test_format_fourth_down_situation_names_the_teams_and_the_score() -> None:
@@ -548,14 +555,14 @@ def test_format_fourth_down_situation_names_the_teams_and_the_score() -> None:
 
 
 def test_format_fourth_down_call_hedges_a_close_one() -> None:
-    advice = advise(build_situation(distance=5, yards_to_goal=60))
+    advice = advise(build_situation(distance=2, yards_to_goal=10))
 
     assert advice.is_close
     assert format_fourth_down_call(advice).startswith("Too close to call")
 
 
 def test_format_fourth_down_lists_the_call_then_every_option() -> None:
-    advice = advise(build_situation())
+    advice = advise(build_situation(distance=6, yards_to_goal=10))
 
     lines = format_fourth_down(build_game(), advice).splitlines()
 

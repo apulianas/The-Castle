@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,6 +12,7 @@ from ravens_bot.embeds import (
     _limit_description,
     _limit_field,
     FOURTH_DOWN_FOOTER,
+    FOURTH_DOWN_WIN_PROBABILITY_FOOTER,
     error_embed,
     fourth_down_embed,
     help_embed,
@@ -604,9 +606,19 @@ def test_fourth_down_embed_states_the_call_and_prices_every_option() -> None:
     assert embed.title == "Field goal"
     assert "4th & 3" in embed.description
     assert field_names(embed) == ["Field goal", "Go for it", "Punt"]
-    assert all("expected points" in field.value for field in embed.fields)
+    assert all("win probability" in field.value for field in embed.fields)
     assert embed.thumbnail.url == RAVENS_TEAM.logo
     assert embed.url == "https://www.espn.com/nfl/game/_/gameId/9"
+    assert embed.footer.text == FOURTH_DOWN_WIN_PROBABILITY_FOOTER
+
+
+def test_fourth_down_embed_without_a_clock_prices_options_in_points() -> None:
+    situation = replace(build_situation(), clock=None, clock_seconds=None)
+    advice = advise(situation)
+
+    embed = fourth_down_embed(build_game(), advice)
+
+    assert all("expected points" in field.value for field in embed.fields)
     assert embed.footer.text == FOURTH_DOWN_FOOTER
 
 

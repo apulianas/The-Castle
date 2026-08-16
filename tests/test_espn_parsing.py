@@ -652,6 +652,8 @@ def test_parse_situation_reads_a_spot_on_the_defence_side_of_the_field() -> None
     assert situation.score_differential == 4
     assert situation.period == 3
     assert situation.clock == "5:21"
+    assert situation.clock_seconds == 321
+    assert situation.seconds_remaining == 900 + 321
 
 
 def test_parse_situation_reads_a_spot_on_the_offence_own_side() -> None:

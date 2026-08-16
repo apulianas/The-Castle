@@ -68,11 +68,12 @@ means the wording is unit tested without constructing a client.
   to the score and clock rather than failing when a section is missing. The
   footer states when the snapshot was taken, because the numbers move.
 - **Fourth downs** name the call as the title, the live situation as the
-  description, and one field per option carrying its expected points and the
-  reasoning behind them — the conversion rate, the kick distance and its make
-  rate, or where a punt leaves the opponent. A call the model rates as a coin
-  flip says so instead of picking a side, and anything the model cannot see is
-  added as its own field.
+  description, and one field per option carrying what it is worth — the win
+  probability it leaves behind when the clock is known, expected points when it
+  is not — and the reasoning behind it: the conversion rate, the kick distance
+  and its make rate, or where a punt leaves the opponent. A call the model rates
+  as a coin flip says so instead of picking a side, and anything the model
+  cannot see is added as its own field.
 - **Snap counts** list players by unit — offence, defence, special teams — each
   in the unit they played most, sorted by snaps. A player is a line inside a
   unit's field rather than a field of their own, because a full report names
@@ -190,15 +191,33 @@ distance, where a punt leaves the receiving team, and expected points by field
 position — each documented in the module docstring with the shape it comes from.
 It reads no data at runtime, so it is unit tested exactly like the formatters.
 
-Two limits are stated in the embed footer rather than hidden:
+Expected points is the right objective until the clock decides the result: a
+team down eight with a minute left should go for it on fourth-and-goal from
+anywhere, and no arrangement of points curves says so. So `ravens_bot/winprob.py`
+adds a win probability layer on top of the curves rather than inside them. It
+reads ESPN's display clock as a number of seconds, counts the periods still to
+come, and prices a margin against the spread of the points still to be scored,
+which grows with the square root of the time left. Each option's outcomes —
+convert or fail, make or miss, the punt's landing spot — are carried through to
+the game state they leave behind and scored there, and the ranking is on win
+probability. The embed prices each option in win probability instead of points
+and the footer says which model answered.
 
-- The model is score-blind and clock-blind. Maximising expected points is the
-  right objective for most of a game and the wrong one once the clock decides
-  the result, so a fourth quarter or end of half call is flagged instead of
-  being answered confidently. A win probability model is the proper fix and is
-  deliberately not part of this.
+The clock is not always published: between periods, and on a down ESPN has not
+filled in, there is no time and sometimes no score. Those downs fall back to the
+expected points ranking exactly as before, keep the caveats explaining what the
+answer cannot see, and say so in the footer.
+
+Three limits are stated in the embed footer rather than hidden:
+
 - Every number is a league average, so it knows nothing about the two teams
-  actually playing.
+  actually playing. This is the sharpest difference from `nfl4th`, which reads
+  the closing point spread to know who is on the field.
+- Nobody publishes timeouts on the scoreboard route this reads, so two minutes
+  with three timeouts and two minutes with none are the same game here.
+- A score is worth what the points curves say it is worth, which is already net
+  of the kickoff that follows on average. Late in a game that average is
+  generous to a team that scores and must then kick off with seconds left.
 
 ## Data source
 

@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from .espn_urls import headshot_url, player_url, team_logo_url, team_url
+from .winprob import (
+    parse_clock_seconds,
+    seconds_remaining_in_game,
+    seconds_remaining_in_half,
+)
 
 
 RAVENS_TEAM_ID = "33"
@@ -211,6 +216,8 @@ class GameSituation:
     yards_to_goal: int | None = None
     period: int | None = None
     clock: str | None = None
+    # Seconds left in the period, read from the display clock by the parser.
+    clock_seconds: int | None = None
     # Points the team in possession leads by; negative when they are trailing.
     score_differential: int | None = None
     is_red_zone: bool = False
@@ -244,6 +251,28 @@ class GameSituation:
         if self.clock:
             parts.append(self.clock)
         return " ".join(parts) or None
+
+    @property
+    def period_seconds_remaining(self) -> int | None:
+        """Seconds left in the period being played, when the clock is readable.
+
+        The parser fills this in, but a situation built by hand — a test, or a
+        remembered down — need only carry the display clock, so it is read from
+        there when nobody supplied it.
+        """
+        if self.clock_seconds is not None:
+            return self.clock_seconds
+        return parse_clock_seconds(self.clock)
+
+    @property
+    def seconds_remaining(self) -> int | None:
+        """Seconds left in the game, counting the periods still to come."""
+        return seconds_remaining_in_game(self.period, self.period_seconds_remaining)
+
+    @property
+    def half_seconds_remaining(self) -> int | None:
+        """Seconds left before the half ends, which is what a Q2 call turns on."""
+        return seconds_remaining_in_half(self.period, self.period_seconds_remaining)
 
     @property
     def score_text(self) -> str | None:
