@@ -30,17 +30,26 @@ The four curves, and where their shape comes from:
   goal line, around one point at the twenty, two near midfield, and rising to
   the value of a touchdown at the goal line.
 
+Expected points is the right objective for most of a game and the wrong one once
+the clock decides the result: a team down eight with a minute left should go for
+it on fourth-and-goal from anywhere, and no arrangement of points curves says
+so. So when the scoreboard and the clock are both known, each option's outcomes
+are carried through to the game state they leave behind and scored in win
+probability instead, using the model in ``winprob``. The curves above are what
+weigh those outcomes either way; win probability is a layer on top of them
+rather than a replacement for them. A situation with no clock, or no score, is
+still ranked on expected points exactly as before.
+
 Two limits are worth stating plainly, because a recommendation that hides them
 is worse than none:
 
-- The model is score-blind and clock-blind. It maximises expected points, which
-  is the right objective for most of a game and the wrong one when the clock is
-  about to decide the result — a team down eight with a minute left should go
-  for it on fourth-and-goal from anywhere, and this model would not say so. Such
-  situations are flagged as caveats rather than answered confidently. The proper
-  fix is a win probability model, which is a separate piece of work.
 - It knows nothing about the two teams. Every number here is a league average,
-  so a great offence facing a poor defence is understated, and vice versa.
+  so a great offence facing a poor defence is understated, and vice versa. This
+  is where ``nfl4th`` differs most: it reads the closing point spread to know
+  who is playing, and this reads nothing at runtime.
+- Nobody publishes timeouts on the scoreboard route this bot reads, so the win
+  probability layer does not know them. Two minutes with three timeouts and two
+  minutes with none are the same game here.
 """
 
 from __future__ import annotations
@@ -48,6 +57,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .models import GameSituation
+from .winprob import possession_value, win_probability
 
 
 GO = "go"
@@ -71,6 +81,14 @@ TOUCHDOWN_POINTS = 6.95
 FIELD_GOAL_POINTS = 3.0
 # Beneath this gap in expected points the two options are the same call.
 CLOSE_CALL_POINTS = 0.15
+# And beneath this gap in win probability, which is the same idea in the other
+# currency: a percentage point either way is not a recommendation.
+CLOSE_CALL_WIN_PROBABILITY = 0.01
+# What each option takes off the clock, in seconds, snap to whistle.
+GO_SECONDS = 6.0
+FIELD_GOAL_SECONDS = 5.0
+# A punt is a longer play than either, and the return costs more still.
+PUNT_SECONDS = 12.0
 # Inside this many yards a goal line try is harder than the same distance would
 # be in open field, since there is no room behind the defence.
 GOAL_LINE_PENALTY = 0.9
@@ -189,6 +207,58 @@ def _opponent_value(their_yards_to_goal: float) -> float:
 
 
 @dataclass(frozen=True)
+class Scoreboard:
+    """The score and the clock, which is what an option's outcomes land on.
+
+    Held together because neither is any use alone: a two point lead means
+    nothing without the time left to defend it.
+    """
+
+    score_differential: int
+    seconds_remaining: float
+
+    def after(self, seconds: float) -> "Scoreboard":
+        """The same score with a play's worth of clock taken off it."""
+        return Scoreboard(
+            score_differential=self.score_differential,
+            seconds_remaining=max(0.0, self.seconds_remaining - seconds),
+        )
+
+    def keeping_ball(self, yards_to_goal: float) -> float:
+        """Our chance of winning, still holding the ball at this spot."""
+        value = possession_value(expected_points(yards_to_goal), self.seconds_remaining)
+        return win_probability(
+            self.score_differential, self.seconds_remaining, value
+        )
+
+    def handing_over(self, their_yards_to_goal: float) -> float:
+        """Our chance of winning once the other team has the ball.
+
+        Football is zero sum, so this is read as their chance of winning from
+        where they now stand, subtracted from one.
+        """
+        value = possession_value(
+            expected_points(their_yards_to_goal), self.seconds_remaining
+        )
+        return 1.0 - win_probability(
+            -self.score_differential, self.seconds_remaining, value
+        )
+
+    def scoring(self, points: float) -> float:
+        """Our chance of winning having just scored, with the kickoff to come.
+
+        The kickoff is not priced separately, because the points curves already
+        are net of it: a touchdown is worth ``TOUCHDOWN_POINTS`` rather than
+        seven precisely because the other team receives afterwards. Late in a
+        game that average is generous to a team that scores and must then kick
+        off with seconds left, which is the sharpest edge on this model.
+        """
+        return win_probability(
+            self.score_differential + points, self.seconds_remaining
+        )
+
+
+@dataclass(frozen=True)
 class Option:
     """One of the three things a team can do, and what it is worth."""
 
@@ -196,6 +266,9 @@ class Option:
     label: str
     expected_points: float
     detail: str
+    # Set when the clock and the score were both known, and so the option could
+    # be carried through to the game state it leaves behind.
+    win_probability: float | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +278,9 @@ class FourthDownAdvice:
     caveats: tuple[str, ...] = ()
     # Set when the situation cannot be answered at all.
     reason: str | None = None
+    # Whether the ranking is win probability or expected points, which is a
+    # different question with a different answer and so is said out loud.
+    ranked_by_win_probability: bool = False
 
     @property
     def can_advise(self) -> bool:
@@ -222,12 +298,27 @@ class FourthDownAdvice:
         return self.options[0].expected_points - self.options[1].expected_points
 
     @property
+    def win_probability_margin(self) -> float | None:
+        """The gap to the next best option, in win probability."""
+        if not self.ranked_by_win_probability or len(self.options) < 2:
+            return None
+        best, runner_up = self.options[0], self.options[1]
+        if best.win_probability is None or runner_up.win_probability is None:
+            return None
+        return best.win_probability - runner_up.win_probability
+
+    @property
     def is_close(self) -> bool:
+        win_margin = self.win_probability_margin
+        if win_margin is not None:
+            return win_margin < CLOSE_CALL_WIN_PROBABILITY
         margin = self.margin
         return margin is not None and margin < CLOSE_CALL_POINTS
 
 
-def _go_option(yards_to_goal: int, distance: int) -> Option:
+def _go_option(
+    yards_to_goal: int, distance: int, scoreboard: Scoreboard | None = None
+) -> Option:
     goal_to_go = distance >= yards_to_goal
     rate = conversion_rate(distance, goal_to_go)
     if goal_to_go:
@@ -239,15 +330,29 @@ def _go_option(yards_to_goal: int, distance: int) -> Option:
     # A failed attempt leaves the ball where it is, facing the other way.
     failure = _opponent_value(100 - yards_to_goal)
     value = rate * success + (1 - rate) * failure
+    chance = None
+    if scoreboard is not None:
+        after = scoreboard.after(GO_SECONDS)
+        # A touchdown ends the possession; a first down keeps the ball where
+        # the runner stopped.
+        if goal_to_go:
+            won = after.scoring(TOUCHDOWN_POINTS)
+        else:
+            won = after.keeping_ball(yards_to_goal - distance)
+        lost = after.handing_over(100 - yards_to_goal)
+        chance = rate * won + (1 - rate) * lost
     return Option(
         kind=GO,
         label="Go for it",
         expected_points=value,
         detail=f"{round(rate * 100)}% convert → {detail_success}",
+        win_probability=chance,
     )
 
 
-def _field_goal_option(yards_to_goal: int) -> Option:
+def _field_goal_option(
+    yards_to_goal: int, scoreboard: Scoreboard | None = None
+) -> Option:
     kick = field_goal_distance(yards_to_goal)
     rate = field_goal_rate(kick)
     if rate <= 0:
@@ -261,38 +366,63 @@ def _field_goal_option(yards_to_goal: int) -> Option:
     their_start = max(MISSED_FIELD_GOAL_FLOOR, yards_to_goal + 7)
     miss = _opponent_value(100 - their_start)
     value = rate * FIELD_GOAL_POINTS + (1 - rate) * miss
+    chance = None
+    if scoreboard is not None:
+        after = scoreboard.after(FIELD_GOAL_SECONDS)
+        made = after.scoring(FIELD_GOAL_POINTS)
+        missed = after.handing_over(100 - their_start)
+        chance = rate * made + (1 - rate) * missed
     return Option(
         kind=FIELD_GOAL,
         label="Field goal",
         expected_points=value,
         detail=f"{kick}-yard attempt, {round(rate * 100)}% made",
+        win_probability=chance,
     )
 
 
-def _punt_option(yards_to_goal: int) -> Option:
+def _punt_option(yards_to_goal: int, scoreboard: Scoreboard | None = None) -> Option:
     their_start = punt_result(yards_to_goal)
     value = _opponent_value(100 - their_start)
+    chance = None
+    if scoreboard is not None:
+        chance = scoreboard.after(PUNT_SECONDS).handing_over(100 - their_start)
     return Option(
         kind=PUNT,
         label="Punt",
         expected_points=value,
         detail=f"opponent starts around their own {round(their_start)}",
+        win_probability=chance,
     )
 
 
+def _scoreboard(situation: GameSituation) -> Scoreboard | None:
+    """The score and clock behind this down, when ESPN published both."""
+    seconds = situation.seconds_remaining
+    differential = situation.score_differential
+    if seconds is None or differential is None:
+        return None
+    return Scoreboard(score_differential=differential, seconds_remaining=seconds)
+
+
 def _caveats(situation: GameSituation) -> tuple[str, ...]:
-    """Where maximising points stops being the right objective."""
+    """Where maximising points stops being the right objective.
+
+    Only reached when the answer is ranked on expected points, since these are
+    the things the win probability layer exists to stop apologising for.
+    """
     notes: list[str] = []
     period = situation.period or 0
     if period >= 4:
         notes.append(
-            "Fourth quarter: this model maximises points and ignores the clock "
-            "and the scoreboard, which are what decide a late call."
+            "Fourth quarter, and ESPN published no clock or score for this "
+            "down: without them this falls back to maximising points, which is "
+            "not what decides a late call."
         )
     elif period == 2:
         notes.append(
-            "Second quarter: the model does not know how much time is left in "
-            "the half, and a call before the break can turn on it."
+            "Second quarter, with no clock published for this down, so the "
+            "model cannot see the break a call before it can turn on."
         )
     if situation.score_differential is not None and abs(situation.score_differential) > 8 and period >= 3:
         notes.append(
@@ -327,16 +457,31 @@ def advise(situation: GameSituation) -> FourthDownAdvice:
         )
 
     distance = min(distance, yards_to_goal)
+    scoreboard = _scoreboard(situation)
     options = [
-        _go_option(yards_to_goal, distance),
-        _field_goal_option(yards_to_goal),
-        _punt_option(yards_to_goal),
+        _go_option(yards_to_goal, distance, scoreboard),
+        _field_goal_option(yards_to_goal, scoreboard),
+        _punt_option(yards_to_goal, scoreboard),
     ]
-    options.sort(key=lambda option: option.expected_points, reverse=True)
+    # A kick out of range has no win probability either: it keeps the minus
+    # infinity that stops it winning a ranking it should never win.
+    ranked_by_win_probability = scoreboard is not None
+    if ranked_by_win_probability:
+        options.sort(
+            key=lambda option: (
+                option.win_probability
+                if option.win_probability is not None
+                else float("-inf")
+            ),
+            reverse=True,
+        )
+    else:
+        options.sort(key=lambda option: option.expected_points, reverse=True)
     return FourthDownAdvice(
         situation=situation,
         options=tuple(options),
-        caveats=_caveats(situation),
+        caveats=() if ranked_by_win_probability else _caveats(situation),
+        ranked_by_win_probability=ranked_by_win_probability,
     )
 
 

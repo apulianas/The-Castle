@@ -568,9 +568,22 @@ def format_expected_points(value: float) -> str:
     return f"+{rounded:.1f}" if rounded > 0 else f"{rounded:.1f}"
 
 
+def format_win_probability(value: float) -> str:
+    """A win probability as whole percent, e.g. "43% win probability"."""
+    return f"{round(value * 100)}%"
+
+
 def format_fourth_down_option(option: Option, best: bool = False) -> str:
-    """One option's worth and why, e.g. "+0.9 expected points • 68% convert"."""
-    parts = [f"{format_expected_points(option.expected_points)} expected points"]
+    """One option's worth and why, e.g. "+0.9 expected points • 68% convert".
+
+    An option scored on the clock leads with the win probability it leaves
+    behind, since that is what it was ranked on and quoting points beside it
+    would invite the reader to rank it on the other one.
+    """
+    if option.win_probability is not None:
+        parts = [f"{format_win_probability(option.win_probability)} win probability"]
+    else:
+        parts = [f"{format_expected_points(option.expected_points)} expected points"]
     if option.detail:
         parts.append(option.detail)
     line = " • ".join(parts)

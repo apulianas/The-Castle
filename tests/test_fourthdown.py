@@ -26,7 +26,8 @@ def situation(
     yards_to_goal: int | None,
     down: int | None = 4,
     period: int = 1,
-    score_differential: int = 0,
+    score_differential: int | None = 0,
+    clock: str | None = "8:12",
 ) -> GameSituation:
     return GameSituation(
         possession=RAVENS,
@@ -35,7 +36,7 @@ def situation(
         distance=distance,
         yards_to_goal=yards_to_goal,
         period=period,
-        clock="8:12",
+        clock=clock,
         score_differential=score_differential,
     )
 
@@ -127,17 +128,93 @@ def test_punting_inside_the_opponent_forty_is_not_the_call() -> None:
     assert best_kind(2, 35) != PUNT
 
 
-def test_late_game_answer_states_that_the_model_is_score_blind() -> None:
+def test_late_game_answer_reads_the_clock_rather_than_apologising() -> None:
     advice = advise(situation(2, 40, period=4, score_differential=-9))
 
     assert advice.can_advise
+    assert advice.ranked_by_win_probability
+    assert advice.caveats == ()
+    assert all(option.win_probability is not None for option in advice.options[:2])
+
+
+def test_a_down_with_no_clock_falls_back_and_says_so() -> None:
+    advice = advise(situation(2, 40, period=4, score_differential=-9, clock=None))
+
+    assert advice.can_advise
+    assert not advice.ranked_by_win_probability
+    assert all(option.win_probability is None for option in advice.options)
     assert any("clock" in caveat for caveat in advice.caveats)
 
 
+def test_a_down_with_no_score_falls_back_to_expected_points() -> None:
+    advice = advise(situation(5, 60, score_differential=None))
+    points = advise(situation(5, 60, score_differential=None, clock=None))
+
+    assert not advice.ranked_by_win_probability
+    assert [option.kind for option in advice.options] == [
+        option.kind for option in points.options
+    ]
+
+
 def test_first_half_call_carries_no_fourth_quarter_caveat() -> None:
-    advice = advise(situation(2, 40, period=1))
+    advice = advise(situation(2, 40, period=1, clock=None))
 
     assert advice.caveats == ()
+
+
+def test_trailing_late_goes_for_it_since_nothing_else_can_win() -> None:
+    advice = advise(
+        situation(3, 3, period=4, clock="1:00", score_differential=-8)
+    )
+
+    assert advice.best is not None and advice.best.kind == GO
+    assert not advice.is_close
+    # A field goal leaves them two scores short with a minute to find them.
+    kick = next(option for option in advice.options if option.kind == FIELD_GOAL)
+    assert kick.expected_points > 0
+    assert advice.best.win_probability is not None
+    assert kick.win_probability is not None
+    assert kick.win_probability < advice.best.win_probability
+
+
+def test_a_field_goal_that_cannot_tie_ranks_below_going_for_it() -> None:
+    advice = advise(
+        situation(5, 5, period=4, clock="0:15", score_differential=-4)
+    )
+
+    kinds = [option.kind for option in advice.options]
+    assert kinds.index(GO) < kinds.index(FIELD_GOAL)
+
+
+def test_leading_late_punts_rather_than_risking_the_ball() -> None:
+    advice = advise(
+        situation(8, 80, period=4, clock="2:00", score_differential=3)
+    )
+
+    assert advice.best is not None and advice.best.kind == PUNT
+
+
+def test_win_probabilities_answer_from_the_offence_point_of_view() -> None:
+    trailing = advise(situation(1, 50, period=4, clock="5:00", score_differential=-7))
+    leading = advise(situation(1, 50, period=4, clock="5:00", score_differential=7))
+
+    best_trailing = trailing.best
+    best_leading = leading.best
+    assert best_trailing is not None and best_trailing.win_probability is not None
+    assert best_leading is not None and best_leading.win_probability is not None
+    assert best_trailing.win_probability < 0.5 < best_leading.win_probability
+
+
+def test_the_expected_points_fallback_is_unchanged_by_the_clock() -> None:
+    """A situation ESPN published no clock for answers exactly as it always did."""
+    advice = advise(situation(3, 10, clock=None))
+
+    assert not advice.ranked_by_win_probability
+    assert [option.kind for option in advice.options] == [FIELD_GOAL, GO, PUNT]
+    assert advice.margin == pytest.approx(
+        advice.options[0].expected_points - advice.options[1].expected_points
+    )
+    assert advice.is_close is (advice.margin < 0.15)
 
 
 def test_third_down_cannot_be_advised() -> None:

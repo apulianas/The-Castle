@@ -108,10 +108,15 @@ DATA_SOURCE = "Data: ESPN"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
 # Every number behind a fourth down call is a league average, so the footer says
-# so rather than letting the recommendation read as a scouted opinion.
+# so rather than letting the recommendation read as a scouted opinion. Which of
+# the two models answered is stated as well, since they are different questions.
 FOURTH_DOWN_FOOTER = (
     "League-average expected points. Ignores the clock, the score, and how good "
     "either team is. • Live data: ESPN"
+)
+FOURTH_DOWN_WIN_PROBABILITY_FOOTER = (
+    "League-average win probability from the score and the clock. Ignores "
+    "timeouts and how good either team is. • Live data: ESPN"
 )
 
 
@@ -554,7 +559,11 @@ def fourth_down_embed(
     for caveat in advice.caveats:
         embed.add_field(name="Worth knowing", value=_limit_field(caveat), inline=False)
     embed.set_thumbnail(url=advice.situation.possession.logo_url or team_logo_url(RAVENS_SLUG))
-    embed.set_footer(text=FOURTH_DOWN_FOOTER)
+    embed.set_footer(
+        text=FOURTH_DOWN_WIN_PROBABILITY_FOOTER
+        if advice.ranked_by_win_probability
+        else FOURTH_DOWN_FOOTER
+    )
     return embed
 
 

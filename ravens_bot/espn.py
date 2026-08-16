@@ -37,6 +37,7 @@ from .models import (
     normalize_name,
     same_player,
 )
+from .winprob import parse_clock_seconds
 
 
 SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
@@ -423,6 +424,7 @@ def _parse_situation(
         yards_to_goal=yards_to_goal,
         period=_as_int(status.get("period")),
         clock=_text(status.get("displayClock")),
+        clock_seconds=parse_clock_seconds(_text(status.get("displayClock"))),
         score_differential=differential,
         is_red_zone=bool(situation.get("isRedZone")),
         spot=spot,
