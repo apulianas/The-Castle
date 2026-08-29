@@ -1,12 +1,13 @@
 """Reading a trade out of ESPN's transaction prose.
 
 A trade is the only roster move where the verb does not say which way a player
-travelled. ESPN writes the same deal four ways — "Traded <player> to <team> for
-<pick>", "Traded <pick> to <team> for <player>", "Acquired <player> from <team>
-in exchange for <pick>", "Acquired <pick> from <team> for <player>" — so a
-parser that trusted the verb would call half of them arrivals and the other half
-departures. What settles the direction is which side of the sentence an asset
-sits on, which is what this module reads.
+travelled. ESPN writes the same deal several ways — "Traded <player> to <team>
+for <pick>", "Traded <pick> to <team> for <player>", "Acquired <player> from
+<team> in exchange for <pick>", "Acquired <pick> from <team> for <player>",
+"Received <player> from <team> in exchange for <pick>", "Received <pick> in a
+trade with <team>" — so a parser that trusted the verb would call half of them
+arrivals and the other half departures. What settles the direction is which side
+of the sentence an asset sits on, which is what this module reads.
 
 The transaction feed carries a team reference for the Ravens only, never for the
 other club, so the partner is recovered from the words as well.
@@ -245,9 +246,16 @@ def _name_list(players: tuple[PlayerRef, ...]) -> str:
     return ", ".join(player.display_name for player in players)
 
 
-_TRADE_OPENING_RE = re.compile(r"^(?P<verb>Traded|Acquired)\b\s*(?P<body>.+)$", re.S)
+_TRADE_OPENING_RE = re.compile(
+    r"^(?P<verb>Traded?|Acquired|Received)\b\s*(?P<body>.+)$", re.S
+)
 _TO_RE = re.compile(r"\s+to\s+", re.IGNORECASE)
 _FROM_RE = re.compile(r"\s+from\s+", re.IGNORECASE)
+# Some entries name the partner instead of the return side: "Received a 2026
+# sixth-round pick in a trade with Philadelphia." Nothing came back the other
+# way in the sentence, and the words themselves prove a deal was struck, so this
+# is read before the verb's own marker.
+_TRADE_WITH_RE = re.compile(r"\s+(?:in|from)\s+an?\s+trade\s+with\s+", re.IGNORECASE)
 # The return side opens with "in exchange for" or plain "for". No NFL club name
 # contains either, so the partner never runs past this into the compensation.
 # The marker itself is captured because a spelled-out exchange is proof a deal
@@ -281,10 +289,9 @@ def _parse_trade(description: str, players: tuple[PlayerRef, ...]) -> Trade | No
         parsed = _read_trade_sentence(sentence)
         if parsed is None:
             continue
-        near_text, far_text, partner = parsed
-        verb_is_traded = sentence.strip().lower().startswith("traded")
-        incoming_text = far_text if verb_is_traded else near_text
-        outgoing_text = near_text if verb_is_traded else far_text
+        near_text, far_text, partner, outbound = parsed
+        incoming_text = far_text if outbound else near_text
+        outgoing_text = near_text if outbound else far_text
         rest = " ".join(sentences[:index] + sentences[index + 1 :]).strip()
         return Trade(
             incoming=_side(incoming_text, players),
@@ -303,13 +310,16 @@ def _split_exchange(text: str) -> tuple[str, str, bool]:
     return parts[0], parts[2], parts[1].lower().startswith("in ")
 
 
-def _read_trade_sentence(sentence: str) -> tuple[str, str, TeamRef | None] | None:
+def _read_trade_sentence(
+    sentence: str,
+) -> tuple[str, str, TeamRef | None, bool] | None:
     """Split one sentence into the near side, the far side, and the partner.
 
     The near side is whatever the opening verb takes as its object — the asset
-    leaving in "Traded ...", the asset arriving in "Acquired ..." — and the far
-    side is what came back the other way. Deciding which of the two is an
-    arrival is the caller's job, because only the verb knows.
+    leaving in "Traded ...", the asset arriving in "Acquired ..." and
+    "Received ..." — and the far side is what came back the other way. The
+    fourth value says which of the two the Ravens gave up, since only the verb
+    knows and the caller cannot tell the sides apart on their own.
 
     An opening verb alone proves nothing, since "Acquired X from the practice
     squad" is not a deal with anybody, so a sentence has to name a club that
@@ -319,19 +329,26 @@ def _read_trade_sentence(sentence: str) -> tuple[str, str, TeamRef | None] | Non
     if match is None or _WAIVERS_RE.search(sentence):
         return None
     body = match.group("body").strip().rstrip(".").strip()
-    partner_marker = _TO_RE if match.group("verb").lower() == "traded" else _FROM_RE
-    parts = partner_marker.split(body, maxsplit=1)
-    if len(parts) == 2:
-        near, remainder = parts
-        partner_text, far, explicit = _split_exchange(remainder)
+    # "Trade" without the d is one of several spellings ESPN has published, so
+    # the stem is what decides the direction rather than the whole word.
+    outbound = match.group("verb").lower().startswith("trade")
+    named_deal = _TRADE_WITH_RE.split(body, maxsplit=1)
+    if len(named_deal) == 2:
+        near, partner_text = named_deal
+        far, explicit = "", True
     else:
-        near, far, explicit = _split_exchange(body)
-        partner_text = ""
+        parts = (_TO_RE if outbound else _FROM_RE).split(body, maxsplit=1)
+        if len(parts) == 2:
+            near, remainder = parts
+            partner_text, far, explicit = _split_exchange(remainder)
+        else:
+            near, far, explicit = _split_exchange(body)
+            partner_text = ""
     partner = _partner(partner_text)
     known_club = partner is not None and partner.team_id is not None
     if not known_club and not explicit:
         return None
-    return near.strip(), far.strip(), partner
+    return near.strip(), far.strip(), partner, outbound
 
 
 def _partner(text: str) -> TeamRef | None:

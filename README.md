@@ -245,15 +245,16 @@ Two ESPN behaviours are worth knowing, since both look like bugs otherwise:
 
 A trade arrives on the same feed as every other move, but it is the one move
 whose verb does not say which way a player travelled. ESPN writes the same kind
-of deal four ways — "Traded *player* to *club* for *pick*", "Traded *pick* to
+of deal several ways — "Traded *player* to *club* for *pick*", "Traded *pick* to
 *club* for *player*", "Acquired *player* from *club* in exchange for *pick*",
-"Acquired *pick* from *club* for *player*" — so reading the opening verb calls
-half of them arrivals and the other half departures. `ravens_bot/trades.py`
-takes the direction from which side of the sentence each asset sits on instead,
-which is what keeps a departing player from being announced with the arriving
-player's billing.
+"Acquired *pick* from *club* for *player*", "Received *player* from *club* in
+exchange for *pick*", "Received *pick* in a trade with *club*" — so reading the
+opening verb calls half of them arrivals and the other half departures.
+`ravens_bot/trades.py` takes the direction from which side of the sentence each
+asset sits on instead, which is what keeps a departing player from being
+announced with the arriving player's billing.
 
-Two more details make a trade unlike the moves around it:
+Three more details make a trade unlike the moves around it:
 
 - The feed carries a team reference for the Ravens only, never for the other
   club, so the partner is resolved from the words. ESPN names it by city, in
@@ -265,6 +266,11 @@ Two more details make a trade unlike the moves around it:
   a fifth-round pick" cannot be restated without either losing the condition or
   inventing one, and an unfamiliar asset — cash, a swap — survives into the post
   the same way.
+- The feed is copy, not a database, and it is published with typos: "Trade"
+  without the *d* alongside "Singed" and "Re-singed" elsewhere. The opening verb
+  is matched loosely enough to survive that, while a sentence still has to name
+  a real club or spell out an exchange before it counts as a deal, so a practice
+  squad signing or a waiver claim is never mistaken for one.
 
 A description often runs a trade together with unrelated moves in one item, so
 the trade's own sentence is separated out first and the rest is posted under

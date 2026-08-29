@@ -307,16 +307,17 @@ def test_a_trade_is_announced_to_the_channel_once(tmp_path) -> None:
     from ravens_bot.models import InjuryReport
     from tests.test_roster_news import build_bot, build_target, poll
 
-    # The Ravens' own entry for the Roquan Smith deadline deal, as ESPN filed
-    # it: no id, no type, a team reference by URL, and the prose alone. The
-    # stamp is midnight Pacific, which is 08:00 UTC once the clocks go back.
+    # A real Ravens entry, as ESPN filed it: no id, no type, a team reference by
+    # URL, and the prose alone. The stamp is midnight Pacific, which is 08:00
+    # UTC once the clocks go back.
     payload = {
         "items": [
             {
                 "date": "2025-11-04T08:00Z",
                 "description": (
-                    "Traded LB Roquan Smith to Chicago in exchange for LB A.J. "
-                    "Klein and a 2023 second-round and fifth-round draft pick."
+                    "Acquired CB Tre'Davious White from the Los Angeles Rams "
+                    "in exchange for a 2026 seventh-round draft pick. "
+                    "Released RB Chris Collier."
                 ),
                 "team": {
                     "$ref": "http://sports.core.api.espn.com/v2/sports/football"
@@ -333,7 +334,79 @@ def test_a_trade_is_announced_to_the_channel_once(tmp_path) -> None:
 
     assert len(posts) == 1
     assert posts[0][0].title == (
-        "Trade — Ravens acquire LB A.J. Klein from the Chicago Bears"
+        "Trade — Ravens acquire CB Tre'Davious White from the Los Angeles Rams"
     )
 
     assert poll(bot, target, transactions, InjuryReport(())) == posts
+
+
+def test_a_received_player_is_an_arrival() -> None:
+    """ESPN also writes an acquisition as "Received", which reads the same way."""
+    trade = build(
+        "Received WR Diontae Johnson and a sixth-round draft pick from "
+        "Carolina in exchange for a fifth-round pick."
+    ).trade
+
+    assert trade is not None
+    assert names(trade.incoming.players) == ["Diontae Johnson"]
+    assert trade.incoming.assets == "a sixth-round draft pick"
+    assert trade.outgoing.assets == "a fifth-round pick"
+    assert trade.outgoing.is_empty is False
+    assert trade.partner is not None and trade.partner.abbreviation == "CAR"
+
+
+def test_a_received_trade_can_open_a_later_sentence() -> None:
+    transaction = build(
+        "Signed RB Myles Gaskin to a contract. Received T Cam Robinson from "
+        "Jacksonville in exchange for a conditional 2026 fifth and "
+        "seventh-round draft pick."
+    )
+
+    trade = transaction.trade
+    assert trade is not None
+    assert names(trade.incoming.players) == ["Cam Robinson"]
+    assert trade.outgoing.assets == (
+        "a conditional 2026 fifth and seventh-round draft pick"
+    )
+    assert trade.partner is not None and trade.partner.abbreviation == "JAX"
+    assert trade.other_moves == "Signed RB Myles Gaskin to a contract."
+
+
+def test_a_trade_named_without_a_return_side_still_reads_as_one() -> None:
+    """The Ravens' own entry for the Jaire Alexander deal names only the club."""
+    trade = build("Received a 2026 sixth-round pick in a trade with Philadelphia.").trade
+
+    assert trade is not None
+    assert trade.incoming.assets == "a 2026 sixth-round pick"
+    assert trade.outgoing.is_empty
+    assert trade.partner is not None and trade.partner.abbreviation == "PHI"
+
+
+def test_a_received_arrival_is_not_read_as_a_departure() -> None:
+    """The direction regression that "Received" would otherwise reintroduce."""
+    transaction = build(
+        "Received RB Brian Robinson Jr. from Washington in exchange for a "
+        "2026 sixth-round draft pick."
+    )
+
+    assert transaction.adds_to_roster is True
+    trade = transaction.trade
+    assert trade is not None
+    assert trade.outgoing.assets == "a 2026 sixth-round draft pick"
+    assert trade.outgoing.players == ()
+    assert names(trade.incoming.players) == ["Brian Robinson Jr"]
+
+
+def test_espns_misspelt_trade_verb_still_reads_as_a_departure() -> None:
+    """ESPN publishes "Trade" without the d, and the direction must survive it."""
+    transaction = build(
+        "Released LB Chris Board and WR DeVante Paker. Trade QB Mac Jones to "
+        "the Jacksonville Jaguars in exchange for a 2024 draft choice."
+    )
+
+    trade = transaction.trade
+    assert trade is not None
+    assert transaction.adds_to_roster is False
+    assert names(trade.outgoing.players) == ["Mac Jones"]
+    assert trade.incoming.assets == "a 2024 draft choice"
+    assert trade.partner is not None and trade.partner.abbreviation == "JAX"
