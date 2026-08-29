@@ -49,6 +49,7 @@ from .formatting import (
     format_player_snaps,
     format_ravens_standing,
     format_records,
+    format_roster_cut_blocks,
     format_schedule_day,
     format_schedule_entry,
     format_schedule_line,
@@ -214,7 +215,14 @@ def _set_transaction_art(
     Automatic announcements post one transaction at a time, so a signing gets a
     full-width photo. A multi-player move or a digest of several transactions
     falls back to a thumbnail, where a single face would misrepresent the post.
+    A mass cut has no face to fall back to either — the first name ESPN wrote is
+    just one of thirty players heading out — so it shows the club's own mark.
     """
+    if transactions and all(
+        transaction.is_mass_roster_cut for transaction in transactions
+    ):
+        embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+        return
     solo = len(transactions) == 1 and len(transactions[0].players) == 1
     _set_player_art(embed, _transaction_art_players(transactions), feature=solo)
 
@@ -335,6 +343,10 @@ def _move_heading(transaction: Transaction) -> tuple[str, str | None]:
     """
     if transaction.trade is not None:
         return _limit_field(transaction.headline, 256), None
+    if transaction.is_mass_roster_cut:
+        # The grouped list below names everyone and states what happened to
+        # them, so prose above it would say the same thing twice at length.
+        return _limit_field(transaction.headline, 256), None
     if transaction.player is None:
         return "Ravens roster move", format_transaction(transaction)
     return (
@@ -381,6 +393,10 @@ def _single_transaction_embed(
         return _trade_embed(transaction, target_date)
     title, body = _move_heading(transaction)
     embed = _base_embed(title, body, url=_subject_url(transaction))
+    if transaction.is_mass_roster_cut:
+        _add_field_blocks(
+            embed, format_roster_cut_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE
+        )
     _set_transaction_art(embed, [transaction])
     embed.set_footer(text=_footer(format_long_date(target_date)))
     return embed
@@ -410,6 +426,13 @@ def roster_news_post(
         # sides taking room here still shorten what the report can fit.
         _add_field_blocks(
             embed, _trade_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE
+        )
+    elif transaction.is_mass_roster_cut:
+        # The cut list goes in first for the same reason, and because a name
+        # dropped from it is news lost for good: an injury update the embed
+        # cannot fit is left unannounced and posted on its own next time round.
+        _add_field_blocks(
+            embed, format_roster_cut_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE
         )
     # A move about one player is titled with their name, so the injury lines
     # underneath report the injury alone rather than naming them again. A trade

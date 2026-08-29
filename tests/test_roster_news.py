@@ -279,6 +279,120 @@ def test_a_digest_of_moves_pictures_the_arrival_not_the_departure() -> None:
     assert "full%2F1.png" in embed[0].thumbnail.url
 
 
+def build_cut(count: int = 8, description: str | None = None) -> Transaction:
+    """A cut naming more players than any one face could stand for."""
+    players = tuple(
+        PlayerRef(
+            name=f"Player Number{chr(ord('A') + index)}",
+            athlete_id=str(index),
+            position="WR",
+        )
+        for index in range(count)
+    )
+    text = description or (
+        "Waived WRs " + ", ".join(player.name for player in players) + "."
+    )
+    return build_transaction(text, players, "cut")
+
+
+def test_a_mass_cut_pictures_the_club_not_one_of_the_players_cut() -> None:
+    """The first name ESPN wrote is just one of thirty players heading out."""
+    embed = transaction_embeds([build_cut()], TARGET_DATE)[0]
+
+    assert embed.image is None or embed.image.url is None
+    assert embed.thumbnail.url is not None
+    assert "teamlogos" in embed.thumbnail.url
+
+
+def test_a_mass_cut_is_listed_by_unit_rather_than_left_as_prose() -> None:
+    description = (
+        "Waived QB Devin Leary, WRs Jahmal Banks and Malik Cunningham, "
+        "G Darrian Dalcourt, C Nick Samac, LB Kaimon Rucker and CB Marquise "
+        "Robinson. Placed WR Dayton Wade on injured reserve."
+    )
+    transaction = parse_transactions(
+        {"items": [{"description": description}]}, TARGET_DATE
+    )[0]
+
+    embed = transaction_embeds([transaction], TARGET_DATE)[0]
+
+    assert embed.description is None
+    assert [field.name for field in embed.fields] == [
+        "Quarterbacks (1)",
+        "Wide receivers (3)",
+        "Offensive line (2)",
+        "Linebackers (1)",
+        "Defensive backs (1)",
+    ]
+    # The player who was not cut at all is not reported as though he had been.
+    receivers = embed.fields[1].value
+    assert "Dayton Wade — placed on injured reserve" in receivers
+
+
+def test_a_mass_signing_still_leads_with_the_player_arriving() -> None:
+    """A cut has no subject; a signing does, so only the cut loses its face."""
+    players = tuple(
+        PlayerRef(
+            name=f"Player Number{chr(ord('A') + index)}",
+            athlete_id=str(index),
+            position="WR",
+        )
+        for index in range(8)
+    )
+    signing = build_transaction(
+        "Signed WRs " + ", ".join(player.name for player in players) + ".",
+        players,
+        "signed",
+    )
+
+    assert not signing.is_mass_roster_cut
+
+    embed = transaction_embeds([signing], TARGET_DATE)[0]
+
+    assert embed.thumbnail.url is not None and "full%2F0.png" in embed.thumbnail.url
+
+
+def test_a_short_move_keeps_its_prose() -> None:
+    """Grouping two names by unit would be ceremony, not clarity."""
+    transaction = build_transaction(
+        "Waived TE Jordan Murray and WR Sean Ryan.",
+        (
+            PlayerRef(name="Jordan Murray", position="TE"),
+            PlayerRef(name="Sean Ryan", position="WR"),
+        ),
+    )
+
+    assert not transaction.is_mass_roster_cut
+
+    embed = transaction_embeds([transaction], TARGET_DATE)[0]
+
+    assert embed.description == transaction.description
+    assert embed.fields == []
+
+
+def test_a_cut_paired_with_the_injury_report_keeps_the_whole_cut_list() -> None:
+    """An injury update dropped is posted later; a name dropped is lost."""
+    cut = build_cut(count=20)
+    news = RosterNews(
+        transaction=cut,
+        injuries=tuple(build_update(player, "Out") for player in cut.players),
+    )
+
+    embeds, carried = roster_news_post(news, TARGET_DATE)
+    embed = embeds[0]
+
+    listed = "\n".join(
+        field.value
+        for field in embed.fields
+        if field.name.startswith("Wide receivers")
+    )
+    for player in cut.players:
+        assert player.name in listed
+    assert len(embed) <= MAX_EMBED_CHARS
+    assert len(embed.fields) <= MAX_EMBED_FIELDS
+    assert len(carried) <= len(news.injuries)
+
+
 def test_transactions_are_read_as_adding_or_removing_a_player() -> None:
     assert build_transaction("Activated TE A B from injured reserve.").adds_to_roster
     assert build_transaction("Re-signed WR A B to the practice squad.").adds_to_roster

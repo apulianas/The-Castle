@@ -13,7 +13,8 @@ from .winprob import (
     seconds_remaining_in_half,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - trades imports this module in turn
+if TYPE_CHECKING:  # pragma: no cover - these modules import this one in turn
+    from .roster_moves import PlayerMove
     from .trades import Trade
 
 
@@ -127,6 +128,10 @@ ROSTER_ADD_ACTIONS = frozenset(
     }
 )
 
+# Beyond this many names a description is a mass roster move, where linking each
+# one costs more room than it is worth.
+MAX_LINKED_PLAYERS = 6
+
 
 @dataclass(frozen=True)
 class Transaction:
@@ -197,6 +202,37 @@ class Transaction:
             incoming = trade.incoming.players
             return incoming[0] if incoming else None
         return self.players[0] if self.adds_to_roster and self.players else None
+
+    @property
+    def is_mass_roster_cut(self) -> bool:
+        """Whether this move sends out more players than one face could stand for.
+
+        Cut down day waives two dozen players at once with nobody arriving, so
+        there is no subject to picture and no sentence short enough to read. Such
+        a move is laid out as a list grouped by unit rather than as prose, and
+        pictures the club's own mark instead of whichever name ESPN wrote first.
+
+        The list is read back out of the description, so a move whose wording
+        will not yield one stays prose: a title over an empty post would say
+        less than the sentence ESPN sent.
+        """
+        if self.trade is not None:
+            return False
+        if len(self.players) <= MAX_LINKED_PLAYERS or self.joining_player is not None:
+            return False
+        return len(self.player_moves) > MAX_LINKED_PLAYERS
+
+    @property
+    def player_moves(self) -> tuple[PlayerMove, ...]:
+        """Every player this move names, each with what happened to them.
+
+        Imported where it is used because reading a description needs the player
+        record defined here, so the two modules would otherwise import each
+        other, the same way ``trade`` reads a deal.
+        """
+        from .roster_moves import extract_player_moves
+
+        return extract_player_moves(self.description)
 
     @property
     def headline(self) -> str:

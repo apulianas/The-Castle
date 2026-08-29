@@ -14,6 +14,7 @@ from .fourthdown import (
     Option,
 )
 from .models import (
+    MAX_LINKED_PLAYERS,
     RAVENS_NAME,
     SNAP_UNITS,
     Game,
@@ -31,6 +32,7 @@ from .models import (
     TeamGameStats,
     Transaction,
 )
+from .roster_moves import PlayerMove, group_player_moves
 from .trades import Trade, TradeSide
 
 
@@ -38,9 +40,6 @@ NO_STAT = "—"
 # ESPN sends "-" for a leader with no deficit; that should read as even, not as
 # missing data.
 NO_GAMES_BACK = {"-", "–", "—", "+0.0", "0.0", "0"}
-# Beyond this many names a description is a mass roster cut, where linking each
-# one costs more room than it is worth.
-MAX_LINKED_PLAYERS = 6
 
 
 def format_long_date(value: date) -> str:
@@ -176,6 +175,51 @@ def format_transaction(transaction: Transaction) -> str:
     if len(transaction.players) > MAX_LINKED_PLAYERS:
         return transaction.description
     return link_players(transaction.description, transaction.players)
+
+
+def format_roster_cut_blocks(transaction: Transaction) -> list[tuple[str, list[str]]]:
+    """A cut list grouped by unit, offense first, one player to a line.
+
+    ESPN files cut down day as a single run-on sentence naming two dozen players,
+    which reads as a wall and buries the part that is not a cut at all: a move to
+    injured reserve sits in the same description as a waiver. Grouping by unit in
+    depth chart order gives the list a shape, and each line says what happened to
+    that player whenever the description covered more than one kind of move.
+
+    The exact position leads a line only where its group holds more than one
+    code, since a field already headed "Offensive line" does not need every line
+    under it to repeat "OL".
+    """
+    moves = transaction.player_moves
+    if not moves:
+        return []
+    label_action = len({move.action for move in moves}) > 1
+    blocks: list[tuple[str, list[str]]] = []
+    for group, members in group_player_moves(moves):
+        label_position = len({member.player.position for member in members}) > 1
+        blocks.append(
+            (
+                f"{group} ({len(members)})",
+                [_cut_line(member, label_position, label_action) for member in members],
+            )
+        )
+    return blocks
+
+
+def _cut_line(move: PlayerMove, label_position: bool, label_action: bool) -> str:
+    """One player of a cut list, named plainly.
+
+    Links are left off for the same reason the prose drops them: a cut list runs
+    to thirty names, and the markup would cost more of the post's budget than the
+    names themselves.
+    """
+    player = move.player
+    name = (
+        f"{player.position} {player.name}"
+        if label_position and player.position
+        else player.name
+    )
+    return f"{name} — {move.action}" if label_action and move.action else name
 
 
 def link_players(text: str, players: Sequence[PlayerRef]) -> str:

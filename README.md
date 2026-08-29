@@ -45,6 +45,21 @@ means the wording is unit tested without constructing a client.
   a day that pairs an activation with a move to injured reserve is about the
   arrival. A mass roster cut skips link markup entirely, because twenty links
   would crowd the wording out of the field's character budget.
+- **Cut down day** gets its own layout, because ESPN files a club's cuts as one
+  run-on sentence naming thirty players. A move that sends out more players than
+  a post can picture is listed by unit instead — quarterbacks, running backs,
+  receivers, tight ends and the offensive line, then the defensive line,
+  linebackers, defensive backs and specialists — with one player to a line. The
+  exact position leads a line only where its group holds more than one code, so
+  a field headed "Offensive line" says "G" and "T" but a field headed
+  "Quarterbacks" does not repeat "QB". Each line also carries what happened to
+  that player whenever the description covered more than one kind of move, since
+  ESPN files a placement on injured reserve in the same sentence as a waiver and
+  reporting the two alike would say a player was cut who was not. Such a post
+  shows the club's own mark rather than a headshot, because the first name ESPN
+  wrote is just one of thirty players heading out. A move whose wording yields no
+  such list stays prose, and a digest of several moves on one date stays a
+  summary.
 - **Trades** get their own layout, with a "Ravens receive" field and a "Ravens
   send" field listing the players and the picks that went each way, and any move
   ESPN filed in the same item under "Also". The sides are labelled from

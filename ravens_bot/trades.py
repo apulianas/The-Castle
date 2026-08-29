@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from .models import PlayerRef, TeamRef, normalize_name
+from .roster_moves import split_sentences
 
 
 # ESPN names a partner by city ("to Chicago"), in full ("to Kansas City
@@ -137,37 +138,6 @@ def find_team(text: str) -> TeamRef | None:
 
 
 # Words that end a sentence in a transaction description without ending a name.
-_NAME_SUFFIXES = frozenset({"jr", "sr", "st", "no"})
-_SENTENCE_END_RE = re.compile(r"\.(?=\s+[A-Z])")
-_INITIALS_RE = re.compile(r"(?:[A-Z]\.)*[A-Z]$")
-_LAST_TOKEN_RE = re.compile(r"([A-Za-z.]+)$")
-
-
-def split_sentences(text: str) -> list[str]:
-    """Sentences of a transaction description, keeping names intact.
-
-    A description runs several moves together — "Traded LB A ... . Reinstated
-    OLBs B and C ..." — and only the first is the trade, so the rest has to be
-    separated off before the trade's own wording can be read. Splitting on every
-    full stop would cut "A.J. Klein" and "Irv Smith Jr." in half, so a stop that
-    closes an initial or a name suffix is not a sentence end.
-    """
-    sentences: list[str] = []
-    start = 0
-    for match in _SENTENCE_END_RE.finditer(text or ""):
-        head = (text or "")[start : match.start()]
-        token_match = _LAST_TOKEN_RE.search(head)
-        token = token_match.group(1) if token_match else ""
-        if _INITIALS_RE.fullmatch(token):
-            continue
-        if token.replace(".", "").lower() in _NAME_SUFFIXES:
-            continue
-        sentences.append((text or "")[start : match.end()].strip())
-        start = match.end()
-    tail = (text or "")[start:].strip()
-    if tail:
-        sentences.append(tail)
-    return [sentence for sentence in sentences if sentence]
 
 
 @dataclass(frozen=True)
