@@ -24,6 +24,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Background polling for today's roster transactions, game day inactives, and
   injury report changes, with a move and the injury update it produced
   announced as one post rather than two.
+- Trades announced with each side of the deal — who and what the Ravens got,
+  who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.
@@ -43,6 +45,13 @@ means the wording is unit tested without constructing a client.
   a day that pairs an activation with a move to injured reserve is about the
   arrival. A mass roster cut skips link markup entirely, because twenty links
   would crowd the wording out of the field's character budget.
+- **Trades** get their own layout, with a "Ravens receive" field and a "Ravens
+  send" field listing the players and the picks that went each way, and any move
+  ESPN filed in the same item under "Also". The sides are labelled from
+  Baltimore's end rather than by club name, so the wording reads the same
+  whether ESPN called the partner "Chicago" or "Chicago Bears". A deal moving
+  one player leads with their headshot; a deal of picks alone shows the other
+  club's logo, since the opponent is what the post is about.
 - **Standings** show record, win percentage, games back, and streak per team,
   with the Ravens bolded, plus division, conference, home, and away splits and a
   footer summarising where the Ravens sit.
@@ -231,6 +240,41 @@ Two ESPN behaviours are worth knowing, since both look like bugs otherwise:
   on two consecutive dates.
 - The `teams` query parameter on the transactions endpoint is ignored — the feed
   comes back league-wide either way — so Ravens moves are filtered client side.
+
+### Trades
+
+A trade arrives on the same feed as every other move, but it is the one move
+whose verb does not say which way a player travelled. ESPN writes the same kind
+of deal several ways — "Traded *player* to *club* for *pick*", "Traded *pick* to
+*club* for *player*", "Acquired *player* from *club* in exchange for *pick*",
+"Acquired *pick* from *club* for *player*", "Received *player* from *club* in
+exchange for *pick*", "Received *pick* in a trade with *club*" — so reading the
+opening verb calls half of them arrivals and the other half departures.
+`ravens_bot/trades.py` takes the direction from which side of the sentence each
+asset sits on instead, which is what keeps a departing player from being
+announced with the arriving player's billing.
+
+Three more details make a trade unlike the moves around it:
+
+- The feed carries a team reference for the Ravens only, never for the other
+  club, so the partner is resolved from the words. ESPN names it by city, in
+  full, or by nickname, and under whatever name the club traded as at the time,
+  so the directory covers all of those. "New York" and "Los Angeles" are left
+  unresolved, since each names two clubs and ESPN spells those out anyway.
+- Picks are carried through in ESPN's own wording rather than parsed into
+  structured data. "A conditional 2023 sixth-round draft pick which could become
+  a fifth-round pick" cannot be restated without either losing the condition or
+  inventing one, and an unfamiliar asset — cash, a swap — survives into the post
+  the same way.
+- The feed is copy, not a database, and it is published with typos: "Trade"
+  without the *d* alongside "Singed" and "Re-singed" elsewhere. The opening verb
+  is matched loosely enough to survive that, while a sentence still has to name
+  a real club or spell out an exchange before it counts as a deal, so a practice
+  squad signing or a waiver claim is never mistaken for one.
+
+A description often runs a trade together with unrelated moves in one item, so
+the trade's own sentence is separated out first and the rest is posted under
+"Also" rather than being read as part of the deal.
 
 ### Injuries
 

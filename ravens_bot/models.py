@@ -4,6 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from .espn_urls import headshot_url, player_url, team_logo_url, team_url
 from .winprob import (
@@ -11,6 +12,9 @@ from .winprob import (
     seconds_remaining_in_game,
     seconds_remaining_in_half,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - trades imports this module in turn
+    from .trades import Trade
 
 
 RAVENS_TEAM_ID = "33"
@@ -104,7 +108,10 @@ def same_player(left: PlayerRef, right: PlayerRef) -> bool:
 
 # ESPN writes a move as a sentence opening with its verb. These are the verbs for
 # a move that puts a player on the roster, as opposed to one that takes a player
-# off it, which is what decides whose photo a post leads with.
+# off it, which is what decides whose photo a post leads with. A trade is the
+# exception and is not settled here: "Traded" and "Acquired" each describe an
+# arrival and a departure depending on what was on either side of the deal, so
+# ``Transaction.trade`` reads the direction out of the sentence instead.
 ROSTER_ADD_ACTIONS = frozenset(
     {
         "signed",
@@ -137,6 +144,18 @@ class Transaction:
         return self.players[0] if len(self.players) == 1 else None
 
     @property
+    def trade(self) -> Trade | None:
+        """The two sides of this move, when it is a trade.
+
+        Imported where it is used because reading a trade needs the player and
+        team records defined here, so the two modules would otherwise import
+        each other. The parse is memoized, so repeated reads cost nothing.
+        """
+        from .trades import parse_trade
+
+        return parse_trade(self.description, self.players)
+
+    @property
     def action_words(self) -> tuple[str, ...]:
         """The verb each of ESPN's spellings of this move opens with.
 
@@ -155,8 +174,13 @@ class Transaction:
 
         A signing or an activation adds; a release or a move to injured reserve
         does not. A post covering both directions is about the arrival, so this
-        is what decides which player it pictures.
+        is what decides which player it pictures. A trade is read off the deal
+        itself: "Acquired a 2026 fifth-round draft pick from Las Vegas Raiders
+        for QB Kenny Pickett" opens with an adding verb and is a departure.
         """
+        trade = self.trade
+        if trade is not None:
+            return bool(trade.incoming.players)
         return any(word in ROSTER_ADD_ACTIONS for word in self.action_words)
 
     @property
@@ -165,12 +189,21 @@ class Transaction:
 
         A description names the arriving player first, so a compound move such
         as "Signed WR A ... placed WR B on injured reserve" still resolves to A.
+        A trade names them wherever its wording happens to put them, so the
+        deal's own incoming side answers instead of the reading order.
         """
+        trade = self.trade
+        if trade is not None:
+            incoming = trade.incoming.players
+            return incoming[0] if incoming else None
         return self.players[0] if self.adds_to_roster and self.players else None
 
     @property
     def headline(self) -> str:
         """The field title for this move, e.g. "Signed — WR Isaiah Bond"."""
+        trade = self.trade
+        if trade is not None:
+            return trade.headline
         action = self.type_text
         solo = self.player
         if solo is not None:
