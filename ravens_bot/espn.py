@@ -37,6 +37,7 @@ from .models import (
     normalize_name,
     same_player,
 )
+from .roster_moves import POSITION_CODES, extract_players, transaction_action
 from .winprob import parse_clock_seconds
 
 
@@ -68,26 +69,8 @@ MIN_SEASON = 1996
 # Box score groups worth a leader line when ESPN omits its own leaders block.
 BOXSCORE_CATEGORIES = ("passing", "rushing", "receiving")
 
-# Position codes ESPN uses inside transaction prose, e.g. "Waived TE Jordan Murray."
-# Descriptions also pluralize them for a group, as in "Waived CBs A and B".
-POSITION_CODES = (
-    "QB", "RB", "FB", "HB", "WR", "TE", "OL", "OT", "OG", "OC", "C", "G", "T",
-    "DL", "DE", "DT", "NT", "EDGE", "LB", "ILB", "OLB", "MLB", "DB", "CB", "S",
-    "FS", "SS", "K", "PK", "P", "LS", "KR", "PR", "ATH", "SAF",
-)
-_POSITION_ALT = "|".join(sorted(POSITION_CODES, key=len, reverse=True))
-# A name part is either an initial group like "C.J." or a plain word. Trailing
-# sentence periods are deliberately excluded so a name cannot run past the end
-# of its sentence into the next one, as in "... Kaimon Rucker. Placed WR ...".
-_NAME_PART = r"[A-Z](?:\.[A-Z])*\.|[A-Z][A-Za-z'\u2019\-]+"
-# A code only introduces players when a capitalized word follows it, which keeps
-# "C.J. Okoye" from reading as the center position.
-_POSITION_RE = re.compile(rf"\b(?P<position>{_POSITION_ALT})s?(?=\s+[A-Z])")
-_NAME_RE = re.compile(rf"(?:{_NAME_PART})(?:\s+(?:{_NAME_PART}))+")
-_SEPARATOR_RE = re.compile(r"\s*(?:,\s*and\s+|,\s*|\s+and\s+)")
-# A move opens with its verb, which ESPN hyphenates in "Re-signed" and nowhere
-# else; reading only the first half would leave the headline saying "Re".
-_ACTION_RE = re.compile(r"^\s*([A-Z][a-z]+(?:-[a-z]+)?)")
+# Position codes, name parsing, and sentence splitting live in roster_moves so
+# the wording layer can read a description without importing the API client.
 
 
 class EspnApiError(RuntimeError):
@@ -666,51 +649,6 @@ def _transaction_id(payload: dict[str, Any], description: str) -> str:
     stable_date = _stable_transaction_date(payload)
     stamp = stable_date.isoformat() if stable_date else "undated"
     return f"{stamp}:{description}"
-
-
-def extract_players(description: str) -> tuple[PlayerRef, ...]:
-    """Players named in a transaction description.
-
-    ESPN's NFL transaction feed carries no athlete records, only prose such as
-    "Signed DT Phidarian Mathis to the active roster." Pulling positions and
-    names out of the text is what makes player links and photos possible at all.
-    One position code can introduce a whole list, as in "Waived CBs A and B",
-    so each code is followed as far as its comma-separated run of names goes.
-    """
-    text = description or ""
-    players: list[PlayerRef] = []
-    seen: set[str] = set()
-
-    for match in _POSITION_RE.finditer(text):
-        position = match.group("position")
-        cursor = match.end()
-        while True:
-            whitespace = re.match(r"\s+", text[cursor:])
-            if whitespace:
-                cursor += whitespace.end()
-            # A new position code ends the current list rather than reading as a name.
-            if _POSITION_RE.match(text, cursor):
-                break
-            found = _NAME_RE.match(text, cursor)
-            if found is None:
-                break
-            name = found.group(0).strip().rstrip(".").strip()
-            cursor = found.end()
-            key = normalize_name(name)
-            if key and key not in seen and len(name.split()) >= 2:
-                seen.add(key)
-                players.append(PlayerRef(name=name, position=position))
-            separator = _SEPARATOR_RE.match(text, cursor)
-            if separator is None:
-                break
-            cursor = separator.end()
-
-    return tuple(players)
-
-
-def transaction_action(description: str) -> str | None:
-    match = _ACTION_RE.match(description or "")
-    return match.group(1).strip() if match else None
 
 
 def parse_transactions(payload: dict[str, Any], target_date: date) -> list[Transaction]:

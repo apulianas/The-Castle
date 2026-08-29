@@ -1,4 +1,4 @@
-"""Trades, which are the one move whose verb does not give away its direction.
+﻿"""Trades, which are the one move whose verb does not give away its direction.
 
 Every description quoted here is real wording from ESPN's NFL transaction feed.
 """
@@ -394,7 +394,7 @@ def test_a_received_arrival_is_not_read_as_a_departure() -> None:
     assert trade is not None
     assert trade.outgoing.assets == "a 2026 sixth-round draft pick"
     assert trade.outgoing.players == ()
-    assert names(trade.incoming.players) == ["Brian Robinson Jr"]
+    assert names(trade.incoming.players) == ["Brian Robinson Jr."]
 
 
 def test_espns_misspelt_trade_verb_still_reads_as_a_departure() -> None:
