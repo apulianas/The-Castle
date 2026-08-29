@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,7 @@ from .models import (
     LiveGameReport,
     LiveSituation,
     PlayerGameStats,
+    PlayerRef,
     PlayerSnaps,
     PlayerSnapTotals,
     SnapCountReport,
@@ -29,6 +31,7 @@ from .models import (
     TeamGameStats,
     Transaction,
 )
+from .trades import Trade, TradeSide
 
 
 NO_STAT = "—"
@@ -170,16 +173,41 @@ def format_transaction(transaction: Transaction) -> str:
     field's character budget and push the actual wording out of view, so long
     lists are left as plain text.
     """
-    text = transaction.description
     if len(transaction.players) > MAX_LINKED_PLAYERS:
-        return text
-    for player in transaction.players:
+        return transaction.description
+    return link_players(transaction.description, transaction.players)
+
+
+def link_players(text: str, players: Sequence[PlayerRef]) -> str:
+    """Link every player this text names to their ESPN page."""
+    for player in players:
         url = player.page_url
         if not url:
             continue
         # Replace the name as ESPN wrote it, so surrounding prose is untouched.
         text = text.replace(player.name, link(player.name, url), 1)
     return text
+
+
+def format_trade_side(side: TradeSide) -> list[str]:
+    """One line per player a trade sent this way, then whatever else did.
+
+    Players and picks are listed rather than left as a sentence because the
+    whole point of a trade post is showing the two piles side by side.
+    """
+    lines = [link(player.display_name, player.page_url) for player in side.players]
+    if side.assets:
+        lines.append(side.assets[0].upper() + side.assets[1:])
+    return lines
+
+
+def format_trade_other_moves(trade: Trade, players: Sequence[PlayerRef]) -> str:
+    """The moves filed alongside a trade that are not part of the deal."""
+    if not trade.other_moves:
+        return ""
+    if len(players) > MAX_LINKED_PLAYERS:
+        return trade.other_moves
+    return link_players(trade.other_moves, players)
 
 
 def format_no_transactions(target_date: date) -> str:

@@ -62,6 +62,8 @@ from .formatting import (
     format_standings_detail,
     format_time_of_day,
     format_team_stat_lines,
+    format_trade_other_moves,
+    format_trade_side,
     format_transaction,
     format_transaction_detail,
     format_venue,
@@ -85,8 +87,10 @@ from .models import (
     SnapCountReport,
     Standing,
     Transaction,
+    same_player,
 )
 from .snapcounts import MAX_SNAP_GAMES
+from .trades import Trade
 
 
 RAVENS_PURPLE = 0x24125F
@@ -217,13 +221,106 @@ def _set_transaction_art(
 
 def _subject_url(transaction: Transaction) -> str:
     """Where a move's title points: the player it is about, or the move list."""
+    trade = transaction.trade
+    if trade is not None:
+        return _trade_url(trade)
     player = transaction.player
     page = player.page_url if player is not None else None
     return page or transactions_url(RAVENS_SLUG)
 
 
+def _trade_url(trade: Trade) -> str:
+    """Where a trade's title points: the arrival, the departure, or the partner."""
+    for player in (*trade.incoming.players, *trade.outgoing.players):
+        if player.page_url:
+            return player.page_url
+    partner = trade.partner.page_url if trade.partner else None
+    return partner or transactions_url(RAVENS_SLUG)
+
+
+def _trade_players(transaction: Transaction) -> tuple[PlayerRef, ...]:
+    """Everyone a trade post could picture, the Ravens' arrival first.
+
+    A trade is news because of who is joining, so they lead; the player leaving
+    is next, and anyone named only by a move filed alongside the deal is last.
+    """
+    trade = transaction.trade
+    if trade is None:
+        return tuple(transaction.players)
+    ordered: list[PlayerRef] = []
+    for player in (
+        *trade.incoming.players,
+        *trade.outgoing.players,
+        *transaction.players,
+    ):
+        if not any(same_player(player, other) for other in ordered):
+            ordered.append(player)
+    return tuple(ordered)
+
+
+def _set_trade_art(embed: discord.Embed, transaction: Transaction) -> None:
+    """Picture the trade, falling back to the other club rather than the Ravens.
+
+    A deal with nobody to show is still about a specific opponent, so their
+    logo says more than the Ravens' own, which every post could carry.
+    """
+    trade = transaction.trade
+    assert trade is not None
+    players = _trade_players(transaction)
+    # One player changing hands is a portrait; a package of several is not.
+    solo = len(trade.incoming.players) + len(trade.outgoing.players) == 1
+    if solo and players:
+        photo = players[0].photo_url(HEADSHOT_FEATURE_WIDTH)
+        if photo:
+            embed.set_image(url=photo)
+            return
+    for player in players:
+        photo = player.photo_url()
+        if photo:
+            embed.set_thumbnail(url=photo)
+            return
+    logo = trade.partner.logo_url if trade.partner is not None else None
+    embed.set_thumbnail(url=logo or team_logo_url(RAVENS_SLUG))
+
+
+def _trade_blocks(transaction: Transaction) -> list[tuple[str, list[str]]]:
+    """The two piles a trade moved, and any move filed alongside it.
+
+    The sides are labelled from Baltimore's end rather than by club name, since
+    "Ravens send" reads the same whether the partner is a city or a nickname.
+    """
+    trade = transaction.trade
+    assert trade is not None
+    blocks: list[tuple[str, list[str]]] = []
+    if not trade.incoming.is_empty:
+        blocks.append(("Ravens receive", format_trade_side(trade.incoming)))
+    if not trade.outgoing.is_empty:
+        blocks.append(("Ravens send", format_trade_side(trade.outgoing)))
+    other = format_trade_other_moves(trade, transaction.players)
+    if other:
+        blocks.append(("Also", [_limit_field(other)]))
+    return blocks
+
+
+def _trade_embed(transaction: Transaction, target_date: date) -> discord.Embed:
+    embed = _base_embed(
+        _limit_field(transaction.headline, 256), url=_subject_url(transaction)
+    )
+    _add_field_blocks(embed, _trade_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE)
+    _set_trade_art(embed, transaction)
+    embed.set_footer(text=_footer(format_long_date(target_date)))
+    return embed
+
+
 def _transaction_field_value(transaction: Transaction) -> str:
-    """A move's prose for a list, which always needs something to show."""
+    """A move's prose for a list, which always needs something to show.
+
+    A trade keeps its full wording: the trimming below drops the opening a
+    headline already stated, and a trade's headline states the direction rather
+    than the sentence's first few words.
+    """
+    if transaction.trade is not None:
+        return format_transaction(transaction)
     return format_transaction_detail(transaction) or format_transaction(transaction)
 
 
@@ -233,8 +330,11 @@ def _move_heading(transaction: Transaction) -> tuple[str, str | None]:
     A move about one player is titled with their name, so the prose beneath it
     drops the opening that repeats it. A compound move already names everyone it
     touches in its prose, so a title listing them again reads as an echo and a
-    plain label leads instead.
+    plain label leads instead. A trade says everything in its fields, so it
+    leads with its own headline and no body at all.
     """
+    if transaction.trade is not None:
+        return _limit_field(transaction.headline, 256), None
     if transaction.player is None:
         return "Ravens roster move", format_transaction(transaction)
     return (
@@ -277,6 +377,8 @@ def transaction_embeds(
 def _single_transaction_embed(
     transaction: Transaction, target_date: date
 ) -> discord.Embed:
+    if transaction.trade is not None:
+        return _trade_embed(transaction, target_date)
     title, body = _move_heading(transaction)
     embed = _base_embed(title, body, url=_subject_url(transaction))
     _set_transaction_art(embed, [transaction])
@@ -299,11 +401,20 @@ def roster_news_post(
         return transaction_embeds([news.transaction], target_date), ()
 
     transaction = news.transaction
+    trade = transaction.trade
     title, body = _move_heading(transaction)
     embed = _base_embed(title, body, url=_subject_url(transaction))
+    if trade is not None:
+        # Added in their own pass so the injury count below stays a count of
+        # injury lines; the budget is read off the embed as it grows, so the
+        # sides taking room here still shorten what the report can fit.
+        _add_field_blocks(
+            embed, _trade_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE
+        )
     # A move about one player is titled with their name, so the injury lines
-    # underneath report the injury alone rather than naming them again.
-    solo = transaction.player is not None
+    # underneath report the injury alone rather than naming them again. A trade
+    # is titled by direction, so its lines still name who they are about.
+    solo = trade is None and transaction.player is not None
     by_status: dict[str, list[InjuryUpdate]] = {}
     for update in news.injuries:
         by_status.setdefault(update.status_text, []).append(update)
@@ -324,7 +435,10 @@ def roster_news_post(
         ],
         reserve=ROSTER_FOOTER_RESERVE,
     )
-    _set_player_art(embed, news.art_players, feature=news.is_one_player)
+    if trade is not None:
+        _set_trade_art(embed, transaction)
+    else:
+        _set_player_art(embed, news.art_players, feature=news.is_one_player)
     hidden = f"Showing {shown} of {len(ordered)} updates" if shown < len(ordered) else None
     embed.set_footer(text=_footer(hidden))
     return [embed], tuple(ordered[:shown])
