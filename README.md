@@ -23,8 +23,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Roster-backed player resolution, so names in a transaction become real links.
 - Background polling for today's roster transactions, game day inactives, and
   injury report changes. The official weekly Ravens chart is posted as an image
-  whenever any cell changes and automatically advances with the site's selected
-  week.
+  after both clubs publish the same practice day and the chart remains unchanged
+  for five minutes. Individual ESPN injury changes are not posted separately,
+  and the chart automatically advances with the site's selected week.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
@@ -76,7 +77,8 @@ means the wording is unit tested without constructing a client.
 - **Inactives** are grouped by team with position and reason.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
-  image sized for Discord, and its title links back to the live report.
+  image sized for Discord with player headshots, team-colored headings, and a
+  matchup-color title bar. Its title links back to the live report.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post
