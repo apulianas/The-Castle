@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from .embeds import (
     no_fourth_down_embed,
     no_live_game_embed,
     no_snap_counts_embed,
+    official_injury_embed,
     player_snap_embed,
     player_snap_totals_embed,
     roster_news_post,
@@ -65,6 +67,12 @@ from .formatting import (
     format_not_fourth_down,
     format_unknown_snap_player,
     format_unknown_team,
+)
+from .injury_report import (
+    InjuryReportClient,
+    InjuryReportError,
+    OfficialInjuryReport,
+    render_injury_report,
 )
 from .models import (
     Game,
@@ -121,6 +129,7 @@ class RavensBot(commands.Bot):
         self.config = config
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
+        self.injury_reports: InjuryReportClient | None = None
         self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
         self.fourth_downs = FourthDownMemory()
@@ -129,6 +138,7 @@ class RavensBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession()
         self.espn = EspnClient(self.session)
+        self.injury_reports = InjuryReportClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
@@ -162,10 +172,17 @@ class RavensBot(commands.Bot):
 
     @tasks.loop(seconds=300)
     async def poll_updates(self) -> None:
-        client = _require_espn(self)
         targets = await self._announcement_targets()
         if not targets:
             return
+        try:
+            official_report = await _require_injury_reports(self).fetch()
+        except InjuryReportError as exc:
+            LOGGER.warning("Official injury report polling skipped: %s", exc)
+        else:
+            await self._post_official_injury_report(targets, official_report)
+
+        client = _require_espn(self)
         target_date = today_in_zone(self.config.time_zone)
         try:
             transactions = await client.fetch_transactions(target_date)
@@ -176,6 +193,23 @@ class RavensBot(commands.Bot):
             return
         await self._post_new_roster_news(targets, transactions, injuries, target_date)
         await self._post_new_inactives(targets, inactive_reports, target_date)
+
+    async def _post_official_injury_report(
+        self,
+        targets: list[_AnnouncementTarget],
+        report: OfficialInjuryReport,
+    ) -> None:
+        image = render_injury_report(report)
+        for target in targets:
+            slot = channel_key("official-injury", target.key_id)
+            if not self.announcement_state.is_current(slot, report.announcement_key):
+                await self._announce_image(
+                    target,
+                    slot,
+                    report.announcement_key,
+                    official_injury_embed(report),
+                    image,
+                )
 
     async def _post_new_roster_news(
         self,
@@ -304,6 +338,25 @@ class RavensBot(commands.Bot):
         for key in keys:
             self.announcement_state.mark(channel_key(key, target.key_id))
 
+    async def _announce_image(
+        self,
+        target: _AnnouncementTarget,
+        slot: str,
+        version: str,
+        embed: discord.Embed,
+        image: bytes,
+    ) -> None:
+        file = discord.File(
+            io.BytesIO(image),
+            filename="ravens-injury-report.png",
+        )
+        try:
+            await target.destination.send(embed=embed, file=file)
+        except discord.DiscordException as exc:
+            LOGGER.warning("Could not post to %s: %s", target.label, exc)
+            return
+        self.announcement_state.mark_current(slot, version)
+
     @poll_updates.before_loop
     async def before_poll_updates(self) -> None:
         await self.wait_until_ready()
@@ -375,11 +428,18 @@ def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     async def injuries(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            report = await _require_espn(bot).fetch_injuries()
-        except EspnApiError as exc:
+            report = await _require_injury_reports(bot).fetch()
+        except InjuryReportError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(embeds=injury_embeds(report))
+        image = render_injury_report(report)
+        await interaction.followup.send(
+            embed=official_injury_embed(report),
+            file=discord.File(
+                io.BytesIO(image),
+                filename="ravens-injury-report.png",
+            ),
+        )
 
     return injuries
 
@@ -725,6 +785,12 @@ def _require_espn(bot: RavensBot) -> EspnClient:
     if bot.espn is None:
         raise RuntimeError("ESPN client is not initialized")
     return bot.espn
+
+
+def _require_injury_reports(bot: RavensBot) -> InjuryReportClient:
+    if bot.injury_reports is None:
+        raise RuntimeError("Injury report client is not initialized")
+    return bot.injury_reports
 
 
 def _require_snap_counts(bot: RavensBot) -> SnapCountClient:

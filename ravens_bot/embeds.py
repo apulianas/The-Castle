@@ -72,6 +72,7 @@ from .formatting import (
 )
 from .dates import MAX_SCHEDULE_DAYS
 from .fourthdown import FieldGoalOutlook, FourthDownAdvice
+from .injury_report import INJURY_REPORT_URL, OfficialInjuryReport
 from .models import (
     AFC_NORTH_GROUP_ID,
     RAVENS_SLUG,
@@ -110,6 +111,7 @@ LIVE_FOOTER_RESERVE = 160
 # anything the embed could not fit.
 ROSTER_FOOTER_RESERVE = 200
 DATA_SOURCE = "Data: ESPN"
+OFFICIAL_INJURY_DATA_SOURCE = "Data: Baltimore Ravens"
 # Snap counts come from the NFL game book participation page, not ESPN.
 SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
 # Every number behind a fourth down call is a league average, so the footer says
@@ -566,6 +568,16 @@ def injury_embeds(report: InjuryReport) -> list[discord.Embed]:
     hidden = f"Showing {shown} of {len(updates)} players" if shown < len(updates) else None
     embed.set_footer(text=_footer(hidden))
     return [embed]
+
+
+def official_injury_embed(report: OfficialInjuryReport) -> discord.Embed:
+    embed = _base_embed(
+        f"Ravens injury report — {report.week.title()}",
+        url=INJURY_REPORT_URL,
+    )
+    embed.set_image(url="attachment://ravens-injury-report.png")
+    embed.set_footer(text=OFFICIAL_INJURY_DATA_SOURCE)
+    return embed
 
 
 def _single_injury_embed(update: InjuryUpdate) -> discord.Embed:
