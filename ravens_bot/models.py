@@ -36,6 +36,7 @@ class TeamRef:
     slug: str | None = None
     logo: str | None = None
     link: str | None = None
+    color: str | None = None
 
     @property
     def is_ravens(self) -> bool:

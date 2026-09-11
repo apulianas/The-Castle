@@ -447,8 +447,7 @@ def test_players_sharing_a_status_share_a_field() -> None:
     assert "Nate Wiggins" in embed.fields[0].value
 
 
-def test_a_move_too_big_for_one_post_leaves_the_rest_to_be_announced(tmp_path) -> None:
-    """Marking an update the embed had to drop would lose that news for good."""
+def test_a_move_too_big_does_not_emit_standalone_injury_posts(tmp_path) -> None:
     players = tuple(
         PlayerRef(name=f"Player Number{index}", athlete_id=str(index), position="WR")
         for index in range(24)
@@ -470,18 +469,8 @@ def test_a_move_too_big_for_one_post_leaves_the_rest_to_be_announced(tmp_path) -
 
     assert len(posts) == 1
     assert posts[0][0].footer.text.startswith("Showing ")
-    dropped = [
-        update
-        for update in updates
-        if bot._unseen(target, injury_announcement_key(update))
-    ]
-    assert dropped
-
-    later = poll(bot, target, [transaction], InjuryReport(updates))
-
-    assert titles(later[1:]) == [
-        f"{update.player.display_name} — {update.status_text}" for update in dropped
-    ]
+    poll(bot, target, [transaction], InjuryReport(updates))
+    assert len(posts) == 1
 
 
 def test_an_unbounded_espn_comment_still_fits_a_field() -> None:
@@ -536,8 +525,9 @@ def test_polling_again_repeats_neither_half_of_a_combined_post(tmp_path) -> None
     assert len(posts) == 1
 
 
-def test_an_update_after_the_move_was_posted_is_still_announced(tmp_path) -> None:
-    """A move already posted must not swallow injury news that arrives later."""
+def test_an_injury_update_without_a_new_move_waits_for_the_official_chart(
+    tmp_path,
+) -> None:
     target = build_target()
     bot = build_bot(tmp_path, target, seen_injuries=True)
     transaction = build_transaction(
@@ -549,13 +539,12 @@ def test_an_update_after_the_move_was_posted_is_still_announced(tmp_path) -> Non
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert titles(posts) == ["TE Isaiah Likely — Active"]
+    assert posts == []
 
 
-def test_a_first_run_posts_the_standing_report_and_the_move_separately(
+def test_a_first_run_posts_only_the_move_with_its_injury_context(
     tmp_path,
 ) -> None:
-    """The consolidated report covers the whole list, so nothing merges into it."""
     target = build_target()
     bot = build_bot(tmp_path, target, seen_injuries=False)
     transaction = build_transaction(
@@ -564,10 +553,8 @@ def test_a_first_run_posts_the_standing_report_and_the_move_separately(
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert titles(posts) == [
-        "TE Isaiah Likely — Active",
-        "Activated — TE Isaiah Likely",
-    ]
+    assert titles(posts) == ["Activated — TE Isaiah Likely"]
+    assert [field.name for field in posts[0][0].fields] == ["Injury report — Active"]
 
 
 def test_a_combined_post_that_fails_to_send_records_nothing(tmp_path) -> None:

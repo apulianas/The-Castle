@@ -27,7 +27,6 @@ from .embeds import (
     fourth_down_embed,
     help_embed,
     inactive_embeds,
-    injury_embeds,
     live_game_embed,
     next_game_embed,
     no_field_goal_embed,
@@ -71,7 +70,9 @@ from .formatting import (
 from .injury_report import (
     InjuryReportClient,
     InjuryReportError,
+    OfficialReportGate,
     OfficialInjuryReport,
+    add_matchup,
     render_injury_report,
 )
 from .models import (
@@ -130,6 +131,7 @@ class RavensBot(commands.Bot):
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
         self.injury_reports: InjuryReportClient | None = None
+        self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
         self.fourth_downs = FourthDownMemory()
@@ -180,7 +182,13 @@ class RavensBot(commands.Bot):
         except InjuryReportError as exc:
             LOGGER.warning("Official injury report polling skipped: %s", exc)
         else:
-            await self._post_official_injury_report(targets, official_report)
+            if self.official_injury_gate.ready(official_report):
+                official_report, image = await self._prepare_official_injury_report(
+                    official_report
+                )
+                await self._post_official_injury_report(
+                    targets, official_report, image
+                )
 
         client = _require_espn(self)
         target_date = today_in_zone(self.config.time_zone)
@@ -198,8 +206,9 @@ class RavensBot(commands.Bot):
         self,
         targets: list[_AnnouncementTarget],
         report: OfficialInjuryReport,
+        image: bytes | None = None,
     ) -> None:
-        image = render_injury_report(report)
+        image = image or render_injury_report(report)
         for target in targets:
             slot = channel_key("official-injury", target.key_id)
             if not self.announcement_state.is_current(slot, report.announcement_key):
@@ -211,6 +220,18 @@ class RavensBot(commands.Bot):
                     image,
                 )
 
+    async def _prepare_official_injury_report(
+        self, report: OfficialInjuryReport
+    ) -> tuple[OfficialInjuryReport, bytes]:
+        try:
+            games = await _require_espn(self).fetch_season_schedule()
+        except EspnApiError as exc:
+            LOGGER.warning("Injury report matchup could not be resolved: %s", exc)
+        else:
+            report = add_matchup(report, games)
+        artwork = await _require_injury_reports(self).fetch_artwork(report)
+        return report, render_injury_report(report, artwork)
+
     async def _post_new_roster_news(
         self,
         targets: list[_AnnouncementTarget],
@@ -218,32 +239,20 @@ class RavensBot(commands.Bot):
         report: InjuryReport,
         target_date: date,
     ) -> None:
-        """Post today's moves and injury changes, merging the ones that overlap.
+        """Post today's moves, carrying matching injury context in the same post.
 
         A move and the injury report entry it produces are the same news, so a
-        player activated off injured reserve is announced once rather than as a
-        roster move and a status change minutes apart.
+        player activated off injured reserve gets one informative post. Other
+        injury changes are covered only by the official chart after it settles.
         """
         for target in targets:
-            first_run = bool(report.updates) and not self.announcement_state.has_target_keys(
-                INJURY_KEY_PREFIX, target.key_id
-            )
-            if first_run:
-                await self._announce_injury_report(target, report)
-            # A first run has just posted the standing report in one message, so
-            # there is no injury news left for today's moves to carry.
-            updates = () if first_run else report.updates
-            moves, standalone = combine_roster_news(
+            moves, _ = combine_roster_news(
                 [
                     transaction
                     for transaction in transactions
                     if self._unseen(target, transaction_announcement_key(transaction))
                 ],
-                [
-                    update
-                    for update in updates
-                    if self._unseen(target, injury_announcement_key(update))
-                ],
+                report.updates,
             )
             for news in moves:
                 embeds, carried = roster_news_post(news, target_date)
@@ -254,12 +263,6 @@ class RavensBot(commands.Bot):
                         *(injury_announcement_key(update) for update in carried),
                     ],
                     embeds,
-                )
-            for update in standalone:
-                await self._announce(
-                    target,
-                    [injury_announcement_key(update)],
-                    injury_embeds(InjuryReport((update,))),
                 )
 
     async def _post_new_inactives(
@@ -276,20 +279,6 @@ class RavensBot(commands.Bot):
             for target in targets:
                 if self._unseen(target, key):
                     await self._announce(target, [key], embeds)
-
-    async def _announce_injury_report(
-        self, target: _AnnouncementTarget, report: InjuryReport
-    ) -> None:
-        """One consolidated post the first time a target sees an injury report.
-
-        Without this a fresh state file would post a message per player already
-        listed, which is a dozen notifications for news nobody is waiting on.
-        """
-        await self._announce(
-            target,
-            [injury_announcement_key(update) for update in report.updates],
-            injury_embeds(report),
-        )
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -432,7 +421,7 @@ def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except InjuryReportError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        image = render_injury_report(report)
+        report, image = await bot._prepare_official_injury_report(report)
         await interaction.followup.send(
             embed=official_injury_embed(report),
             file=discord.File(

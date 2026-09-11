@@ -572,8 +572,8 @@ def injury_embeds(report: InjuryReport) -> list[discord.Embed]:
 
 def official_injury_embed(report: OfficialInjuryReport) -> discord.Embed:
     embed = _base_embed(
-        f"Ravens injury report — {report.week.title()}",
-        url=INJURY_REPORT_URL,
+        report.title,
+        url=report.url,
     )
     embed.set_image(url="attachment://ravens-injury-report.png")
     embed.set_footer(text=OFFICIAL_INJURY_DATA_SOURCE)

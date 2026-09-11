@@ -10,9 +10,12 @@ from PIL import Image
 from ravens_bot.bot import RavensBot, _AnnouncementTarget
 from ravens_bot.config import BotConfig
 from ravens_bot.injury_report import (
+    OfficialReportGate,
+    add_matchup,
     parse_injury_report,
     render_injury_report,
 )
+from ravens_bot.models import Game, GameTeam, TeamRef
 
 
 PAGE = """
@@ -21,17 +24,21 @@ PAGE = """
   <option value="/team/injury-report/week/REG-1"> WEEK 1 </option>
 </select>
 <div class="nfl-o-injury-report__title">
+  <source data-srcset="https://images.example/ravens-logo.png">
   <span class="nfl-o-injury-report__club-name">Baltimore Ravens</span>
 </div>
 <table>
   <thead><tr><th>Player</th><th>Position</th><th>Injury</th><th>Wed</th>
     <th>Thu</th><th>Fri</th><th>Game Status</th></tr></thead>
   <tbody>
-    <tr><td><a>Zay Flowers</a></td><td>WR</td><td>Knee</td>
-      <td>LP</td><td>FP</td><td></td><td>QUESTIONABLE</td></tr>
+    <tr><td><a><source data-srcset="https://images.example/zay.png 1x,
+      https://images.example/zay-3x.png 3x">
+      Zay Flowers</a></td><td>WR</td><td>Knee</td>
+      <td>LP</td><td>FP</td><td>FP</td><td>QUESTIONABLE</td></tr>
   </tbody>
 </table>
 <div class="nfl-o-injury-report__title">
+  <source data-srcset="https://images.example/browns-logo.png">
   <span class="nfl-o-injury-report__club-name">Cleveland Browns</span>
 </div>
 <table>
@@ -59,9 +66,84 @@ def test_parse_injury_report_reads_week_teams_and_rows() -> None:
         "Knee",
         "LP",
         "FP",
-        "-",
+        "FP",
         "QUESTIONABLE",
     )
+    assert report.tables[0].headshots == ("https://images.example/zay-3x.png",)
+    assert report.tables[0].logo_url == "https://images.example/ravens-logo.png"
+    assert report.teams_are_synchronized
+
+
+def test_report_is_not_synchronized_until_both_teams_publish_the_same_day() -> None:
+    delayed = parse_injury_report(PAGE.replace("<td>FP</td><td>-</td></tr>", "<td></td><td>-</td></tr>"))
+
+    assert not delayed.teams_are_synchronized
+
+
+def test_report_gate_waits_five_quiet_minutes_after_both_teams_update() -> None:
+    now = [1000.0]
+    gate = OfficialReportGate(clock=lambda: now[0])
+    report = parse_injury_report(PAGE)
+
+    assert not gate.ready(report)
+    now[0] += 299
+    assert not gate.ready(report)
+    now[0] += 1
+    assert gate.ready(report)
+
+
+def test_report_gate_restarts_wait_when_the_chart_changes() -> None:
+    now = [1000.0]
+    gate = OfficialReportGate(clock=lambda: now[0])
+    report = parse_injury_report(PAGE)
+    changed = parse_injury_report(PAGE.replace("QUESTIONABLE", "OUT"))
+
+    assert not gate.ready(report)
+    now[0] += 240
+    assert not gate.ready(changed)
+    now[0] += 60
+    assert not gate.ready(changed)
+    now[0] += 240
+    assert gate.ready(changed)
+
+
+def test_add_matchup_uses_schedule_order_and_team_colors() -> None:
+    report = parse_injury_report(PAGE)
+    game = Game(
+        event_id="1",
+        name="Baltimore Ravens at New Orleans Saints",
+        short_name="BAL @ NO",
+        start_time=None,
+        status="Scheduled",
+        away=GameTeam(
+            TeamRef(
+                name="New Orleans Saints",
+                team_id="18",
+                abbreviation="NO",
+                color="#d3bc8d",
+            )
+        ),
+        home=GameTeam(
+            TeamRef(
+                name="Baltimore Ravens",
+                team_id="33",
+                abbreviation="BAL",
+                color="#000000",
+            ),
+            is_home=True,
+        ),
+        season_type=2,
+        week_number=2,
+    )
+
+    resolved = add_matchup(report, [game])
+
+    assert resolved.title == "Saints @ Ravens Injury Report | Week 2"
+    assert resolved.matchup is not None
+    assert resolved.matchup.away_color == "#d3bc8d"
+    assert resolved.matchup.home_color == "#24125f"
+    assert resolved.matchup.away_team == "New Orleans Saints"
+    assert resolved.matchup.home_team == "Baltimore Ravens"
 
 
 def test_report_key_changes_when_any_cell_or_week_changes() -> None:
@@ -115,6 +197,9 @@ def test_automatic_report_posts_once_per_chart_version(tmp_path) -> None:
     # A correction that restores a previously seen chart is still an update.
     assert len(destination.posts) == 3
     embed, file = destination.posts[0]
-    assert embed.title == "Ravens injury report — Week 2"
+    assert embed.title == "Ravens Injury Report | Week 2"
+    assert embed.url == (
+        "https://www.baltimoreravens.com/team/injury-report/week/REG-2"
+    )
     assert embed.image.url == "attachment://ravens-injury-report.png"
     assert file.filename == "ravens-injury-report.png"

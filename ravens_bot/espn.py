@@ -195,6 +195,8 @@ def team_ref(value: Any) -> TeamRef:
         data = _as_dict(data.get("team")) or data
     abbreviation = data.get("abbreviation")
     abbreviation = abbreviation.strip() if isinstance(abbreviation, str) else None
+    color = data.get("color")
+    color = color.strip() if isinstance(color, str) and color.strip() else None
     link = _clubhouse_link(data)
     team_identifier = _team_id(data)
     name = (
@@ -212,6 +214,7 @@ def team_ref(value: Any) -> TeamRef:
         or (RAVENS_SLUG if team_identifier == RAVENS_TEAM_ID else None),
         logo=_logo_href(data),
         link=link,
+        color=f"#{color.lstrip('#')}" if color else None,
     )
 
 
