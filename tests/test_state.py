@@ -62,3 +62,16 @@ def test_unreadable_state_does_not_crash_startup(tmp_path) -> None:
     state.load()
 
     assert state.unseen(channel_key("transaction:tx1", "123"))
+
+
+def test_state_persists_the_current_version_of_a_changing_report(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    state = AnnouncementState(str(path))
+
+    state.mark_current("official-injury@123", "week-1:first")
+
+    restarted = AnnouncementState(str(path))
+    restarted.load()
+
+    assert restarted.is_current("official-injury@123", "week-1:first")
+    assert not restarted.is_current("official-injury@123", "week-1:corrected")

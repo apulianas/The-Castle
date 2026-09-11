@@ -22,8 +22,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   player, team, and game pages.
 - Roster-backed player resolution, so names in a transaction become real links.
 - Background polling for today's roster transactions, game day inactives, and
-  injury report changes, with a move and the injury update it produced
-  announced as one post rather than two.
+  injury report changes. The official weekly Ravens chart is posted as an image
+  whenever any cell changes and automatically advances with the site's selected
+  week.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
@@ -73,11 +74,9 @@ means the wording is unit tested without constructing a client.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
 - **Inactives** are grouped by team with position and reason.
-- **Injuries** are grouped by status — out first, then doubtful, questionable,
-  and the season-long lists — with the injury, ESPN's practice note, and an
-  expected return when one is published. The art is a thumbnail either way: a
-  single-player update shows that player's headshot, and a full report shows the
-  team logo, since an injury post is a status line rather than a feature.
+- **Injuries** use the official Ravens weekly chart, including both clubs,
+  practice participation by day, and game status. The chart is rendered to an
+  image sized for Discord, and its title links back to the live report.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post
@@ -153,7 +152,7 @@ container restarts.
 Use the OAuth2 URL generator in the Discord developer portal:
 
 - Scopes: `bot`, `applications.commands`
-- Bot permissions: `Send Messages`, `Embed Links`, `Use Slash Commands`
+- Bot permissions: `Send Messages`, `Embed Links`, `Attach Files`, `Use Slash Commands`
 - Privileged gateway intents are not required.
 
 Slash commands are synced globally when the bot starts. Discord can take several
@@ -245,7 +244,8 @@ Three limits are stated in the embed footer rather than hidden:
 
 ## Data source
 
-This project uses ESPN's public NFL site/core APIs. It does not require API keys.
+This project uses ESPN's public NFL site/core APIs and the official Ravens
+injury report page. It does not require API keys.
 
 Two ESPN behaviours are worth knowing, since both look like bugs otherwise:
 
