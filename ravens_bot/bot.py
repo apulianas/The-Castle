@@ -84,6 +84,11 @@ from .models import (
     SnapCountReport,
     Transaction,
 )
+from .official_transactions import (
+    OfficialTransactionsClient,
+    OfficialTransactionsError,
+    merge_standard_elevations,
+)
 from .snapcounts import (
     MAX_SNAP_GAMES,
     SnapCountClient,
@@ -131,6 +136,7 @@ class RavensBot(commands.Bot):
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
         self.injury_reports: InjuryReportClient | None = None
+        self.official_transactions: OfficialTransactionsClient | None = None
         self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
@@ -141,6 +147,7 @@ class RavensBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         self.espn = EspnClient(self.session)
         self.injury_reports = InjuryReportClient(self.session)
+        self.official_transactions = OfficialTransactionsClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
@@ -199,6 +206,14 @@ class RavensBot(commands.Bot):
         except EspnApiError as exc:
             LOGGER.warning("Polling skipped because ESPN data could not be fetched: %s", exc)
             return
+        try:
+            elevations = await _require_official_transactions(
+                self
+            ).fetch_standard_elevations(target_date)
+        except OfficialTransactionsError as exc:
+            LOGGER.warning("Practice-squad elevation polling skipped: %s", exc)
+        else:
+            transactions = merge_standard_elevations(transactions, elevations)
         await self._post_new_roster_news(targets, transactions, injuries, target_date)
         await self._post_new_inactives(targets, inactive_reports, target_date)
 
@@ -389,6 +404,14 @@ def _transactions_command(bot: RavensBot) -> app_commands.Command[Any, ..., None
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
+        try:
+            elevations = await _require_official_transactions(
+                bot
+            ).fetch_standard_elevations(target_date)
+        except OfficialTransactionsError as exc:
+            LOGGER.warning("Practice-squad elevations unavailable: %s", exc)
+        else:
+            items = merge_standard_elevations(items, elevations)
         await interaction.followup.send(embeds=transaction_embeds(items, target_date))
 
     return transactions
@@ -780,6 +803,12 @@ def _require_injury_reports(bot: RavensBot) -> InjuryReportClient:
     if bot.injury_reports is None:
         raise RuntimeError("Injury report client is not initialized")
     return bot.injury_reports
+
+
+def _require_official_transactions(bot: RavensBot) -> OfficialTransactionsClient:
+    if bot.official_transactions is None:
+        raise RuntimeError("Official transactions client is not initialized")
+    return bot.official_transactions
 
 
 def _require_snap_counts(bot: RavensBot) -> SnapCountClient:

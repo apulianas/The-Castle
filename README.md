@@ -21,7 +21,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
   player, team, and game pages.
 - Roster-backed player resolution, so names in a transaction become real links.
-- Background polling for today's roster transactions, game day inactives, and
+- Background polling for today's roster transactions, practice-squad standard
+  elevations, game day inactives, and
   injury report changes. The official weekly Ravens chart is posted as an image
   after both clubs publish the same practice day and the chart remains unchanged
   for five minutes. Individual ESPN injury changes are not posted separately,
@@ -62,6 +63,10 @@ means the wording is unit tested without constructing a client.
   wrote is just one of thirty players heading out. A move whose wording yields no
   such list stays prose, and a digest of several moves on one date stays a
   summary.
+- **Practice-squad call-ups** come from the official Ravens transaction log,
+  because ESPN omits Baltimore's game-day standard elevations. They are merged
+  into `/transactions` and posted to configured announcement channels and
+  webhooks like every other roster move.
 - **Trades** get their own layout, with a "Ravens receive" field and a "Ravens
   send" field listing the players and the picks that went each way, and any move
   ESPN filed in the same item under "Also". The sides are labelled from
