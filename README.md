@@ -85,7 +85,11 @@ means the wording is unit tested without constructing a client.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
   image sized for Discord with player headshots, team-colored headings, and a
-  matchup-color title bar. Its title links back to the live report.
+  matchup-color title bar. It is drawn for a phone screen: the type is large and
+  each column is only as wide as the widest entry it holds, so a practice-status
+  column showing "DNP" takes no more room than that, and both clubs' tables
+  share one set of widths so they line up. Its title links back to the live
+  report.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post

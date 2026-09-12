@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import replace
 from html.parser import HTMLParser
+from math import ceil
 from typing import Callable, Mapping
 from urllib.parse import urljoin
 
@@ -19,6 +20,16 @@ from .models import Game, RAVENS_NAME, TeamRef
 
 
 INJURY_REPORT_URL = "https://www.baltimoreravens.com/team/injury-report/"
+# The chart is read on a phone, so the type is large and the page is only as
+# wide as the columns need; the cap keeps a long name from stretching it.
+MAX_IMAGE_WIDTH = 1100
+MIN_IMAGE_WIDTH = 520
+MARGIN = 28
+CELL_PADDING = 14
+MIN_COLUMN_WIDTH = 76
+ROW_HEIGHT = 60
+HEADSHOT_SIZE = 44
+HEADSHOT_GAP = 10
 PAGE_BACKGROUND = "#f4f4f4"
 RAVENS_PURPLE = "#24125f"
 HEADER_BACKGROUND = "#111111"
@@ -439,17 +450,30 @@ def render_injury_report(
     report: OfficialInjuryReport,
     headshots: Mapping[str, bytes] | None = None,
 ) -> bytes:
+    """The report as a chart, sized so a phone can read it without zooming.
+
+    The chart is read on a screen a few inches wide, so the type is set large
+    and every column is only as wide as the longest thing in it. A fixed width
+    stretched the practice-status columns — which never hold more than a dash or
+    a letter — across half the image and left the type small to fit.
+    """
     headshots = headshots or {}
-    title_font = _font(34, bold=True)
-    team_font = _font(25, bold=True)
-    header_font = _font(17, bold=True)
-    cell_font = _font(17)
-    width = 1400
-    margin = 42
-    title_height = 88
-    team_height = 54
-    row_height = 64
-    table_gap = 28
+    title_font = _font(38, bold=True)
+    team_font = _font(30, bold=True)
+    header_font = _font(24, bold=True)
+    cell_font = _font(24)
+    margin = MARGIN
+    title_height = 96
+    team_height = 60
+    row_height = ROW_HEIGHT
+    table_gap = 26
+
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    column_widths = _column_widths(
+        measure, report.tables, header_font, cell_font, headshots
+    )
+    width = margin * 2 + sum(column_widths) if column_widths else MIN_IMAGE_WIDTH
+    width = max(width, MIN_IMAGE_WIDTH)
     height = title_height + margin
     for table in report.tables:
         height += team_height + row_height * (len(table.rows) + 1) + table_gap
@@ -482,14 +506,18 @@ def render_injury_report(
             team_text_x += 54
         draw.text((team_text_x, y + 10), table.team, fill=team_color, font=team_font)
         y += team_height
-        column_widths = _column_widths(table.headers, width - margin * 2)
         x = margin
         for heading, column_width in zip(table.headers, column_widths):
             draw.rectangle(
                 (x, y, x + column_width, y + row_height),
                 fill=HEADER_BACKGROUND,
             )
-            draw.text((x + 10, y + 21), heading, fill="white", font=header_font)
+            draw.text(
+                (x + CELL_PADDING, _text_top(draw, y, row_height, header_font)),
+                _fit_text(draw, heading, header_font, column_width - CELL_PADDING * 2),
+                fill="white",
+                font=header_font,
+            )
             x += column_width
         y += row_height
 
@@ -502,19 +530,22 @@ def render_injury_report(
                     fill=background,
                     outline="#d0d0d0",
                 )
-                text_x = x + 10
-                if column == 0 and index < len(table.headshots):
-                    url = table.headshots[index]
-                    if url and url in headshots:
-                        _draw_headshot(image, headshots[url], x + 8, y + 7)
-                        text_x += 54
+                text_x = x + CELL_PADDING
+                if column == 0 and _row_headshot(table, index, headshots) is not None:
+                    _draw_headshot(
+                        image,
+                        headshots[_row_headshot(table, index, headshots)],
+                        x + CELL_PADDING,
+                        y + (row_height - HEADSHOT_SIZE) // 2,
+                    )
+                    text_x += HEADSHOT_SIZE + HEADSHOT_GAP
                 draw.text(
-                    (text_x, y + 21),
+                    (text_x, _text_top(draw, y, row_height, cell_font)),
                     _fit_text(
                         draw,
                         cell,
                         cell_font,
-                        column_width - (74 if text_x > x + 10 else 20),
+                        x + column_width - CELL_PADDING - text_x,
                     ),
                     fill=TEXT_COLOR,
                     font=cell_font,
@@ -548,14 +579,18 @@ def _draw_headshot(
 ) -> None:
     try:
         with Image.open(io.BytesIO(data)) as source:
-            fitted = ImageOps.fit(source.convert("RGBA"), (46, 46))
+            fitted = ImageOps.fit(
+                source.convert("RGBA"), (HEADSHOT_SIZE, HEADSHOT_SIZE)
+            )
             photo = Image.new("RGB", fitted.size, "white")
             photo.paste(fitted, mask=fitted.getchannel("A"))
     except (OSError, UnidentifiedImageError) as exc:
         LOGGER.warning("Could not render a player headshot: %s", exc)
         return
     mask = Image.new("L", photo.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, 45, 45), radius=7, fill=255)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, HEADSHOT_SIZE - 1, HEADSHOT_SIZE - 1), radius=7, fill=255
+    )
     canvas.paste(photo, (x, y), mask)
 
 
@@ -569,17 +604,78 @@ def _draw_logo(canvas: Image.Image, data: bytes, x: int, y: int) -> None:
     canvas.paste(logo, (x + (42 - logo.width) // 2, y), logo)
 
 
-def _column_widths(headers: tuple[str, ...], available: int) -> list[int]:
-    if not headers:
+def _row_headshot(
+    table: InjuryTable, index: int, headshots: Mapping[str, bytes]
+) -> str | None:
+    """The headshot a row can actually draw, if one was downloaded for it."""
+    if index >= len(table.headshots):
+        return None
+    url = table.headshots[index]
+    return url if url and url in headshots else None
+
+
+def _column_widths(
+    draw: ImageDraw.ImageDraw,
+    tables: tuple[InjuryTable, ...],
+    header_font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    cell_font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    headshots: Mapping[str, bytes],
+) -> list[int]:
+    """A width per column, measured from the widest thing that column holds.
+
+    Both teams' tables share one set of widths so the two charts line up, and a
+    column whose cells only ever say "DNP" takes the room that word needs rather
+    than a share of a fixed page width.
+    """
+    columns = max((len(table.headers) for table in tables), default=0)
+    if not columns:
         return []
-    weights = [2.3, 0.8, 1.8, *([0.8] * max(0, len(headers) - 4)), 1.4]
-    weights = weights[: len(headers)]
-    if len(weights) < len(headers):
-        weights.extend([1.0] * (len(headers) - len(weights)))
-    unit = available / sum(weights)
-    widths = [round(weight * unit) for weight in weights]
-    widths[-1] += available - sum(widths)
+    widths = [0] * columns
+    for table in tables:
+        for column, heading in enumerate(table.headers[:columns]):
+            widths[column] = max(
+                widths[column], ceil(draw.textlength(heading, font=header_font))
+            )
+        for index, row in enumerate(table.rows):
+            for column, cell in enumerate(row[:columns]):
+                text = ceil(draw.textlength(cell, font=cell_font))
+                if column == 0 and _row_headshot(table, index, headshots):
+                    text += HEADSHOT_SIZE + HEADSHOT_GAP
+                widths[column] = max(widths[column], text)
+    widths = [
+        max(width + CELL_PADDING * 2, MIN_COLUMN_WIDTH) for width in widths
+    ]
+    return _fit_columns(widths)
+
+
+def _fit_columns(widths: list[int]) -> list[int]:
+    """Columns trimmed to a width a phone shows without shrinking the type.
+
+    Only the widest column gives room up, since it is the one holding names, and
+    a name that no longer fits is shortened rather than set in smaller type.
+    """
+    available = MAX_IMAGE_WIDTH - MARGIN * 2
+    overflow = sum(widths) - available
+    while overflow > 0:
+        widest = max(range(len(widths)), key=lambda index: widths[index])
+        room = widths[widest] - MIN_COLUMN_WIDTH
+        if room <= 0:
+            break
+        trimmed = min(room, overflow)
+        widths[widest] -= trimmed
+        overflow -= trimmed
     return widths
+
+
+def _text_top(
+    draw: ImageDraw.ImageDraw,
+    y: int,
+    row_height: int,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+) -> int:
+    """The baseline-free top of text centred in a row of the chart."""
+    top, bottom = draw.textbbox((0, 0), "Ag", font=font)[1::2]
+    return y + (row_height - (bottom - top)) // 2 - top
 
 
 def _fit_text(

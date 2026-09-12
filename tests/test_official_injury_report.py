@@ -10,9 +10,13 @@ from PIL import Image
 from ravens_bot.bot import RavensBot, _AnnouncementTarget
 from ravens_bot.config import BotConfig
 from ravens_bot.injury_report import (
+    InjuryTable,
+    OfficialInjuryReport,
     OfficialReportGate,
     add_matchup,
     parse_injury_report,
+    MAX_IMAGE_WIDTH,
+    MIN_IMAGE_WIDTH,
     render_injury_report,
 )
 from ravens_bot.models import Game, GameTeam, TeamRef
@@ -161,8 +165,46 @@ def test_render_injury_report_produces_a_shareable_png() -> None:
     image = Image.open(io.BytesIO(rendered))
 
     assert image.format == "PNG"
-    assert image.width == 1400
+    # The chart is read on a phone, so it is only as wide as its columns need
+    # and never wider than a page a phone can show without shrinking the type.
+    assert MIN_IMAGE_WIDTH <= image.width <= MAX_IMAGE_WIDTH
     assert image.height > 300
+
+
+def test_render_injury_report_fits_columns_to_their_contents() -> None:
+    """A practice-status column holding "LP" should not be as wide as a name."""
+    long_names = InjuryTable(
+        team="Baltimore Ravens",
+        headers=("Player", "Position", "Injury", "Wed", "Thu", "Fri", "Game Status"),
+        rows=tuple(
+            (
+                f"Bartholomew Widereceiverson {index}",
+                "WR",
+                "Hamstring / Shoulder / Knee",
+                "LP",
+                "FP",
+                "FP",
+                "QUESTIONABLE",
+            )
+            for index in range(3)
+        ),
+    )
+    short_names = InjuryTable(
+        team="Baltimore Ravens",
+        headers=long_names.headers,
+        rows=(("Zay Flowers", "WR", "Knee", "LP", "FP", "FP", "QUESTIONABLE"),),
+    )
+
+    wide = Image.open(io.BytesIO(render_injury_report(
+        OfficialInjuryReport(week="Week 2", tables=(long_names,))
+    )))
+    narrow = Image.open(io.BytesIO(render_injury_report(
+        OfficialInjuryReport(week="Week 2", tables=(short_names,))
+    )))
+
+    # Longer entries need more room, but never more than a phone can show.
+    assert narrow.width < wide.width <= MAX_IMAGE_WIDTH
+    assert narrow.width >= MIN_IMAGE_WIDTH
 
 
 class _Destination:
