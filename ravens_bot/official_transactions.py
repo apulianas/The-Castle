@@ -12,6 +12,15 @@ from .roster_moves import extract_players, transaction_action
 
 
 TRANSACTIONS_URL = "https://www.baltimoreravens.com/team/transactions/{year}"
+
+
+def transaction_log_url(year: int) -> str:
+    """The club's own move log for a year, which a roster move post is read from.
+
+    A post about a Ravens move belongs to the page the club publishes rather
+    than to a third party's copy of it, so the title points back at the source.
+    """
+    return TRANSACTIONS_URL.format(year=year)
 _STANDARD_ELEVATION = "standard elevation"
 _ACTION_BOUNDARY_RE = re.compile(
     r"\.\s+(?=(?:Activated|Added|Claimed|Designated|Elevated|Placed|Promoted|"

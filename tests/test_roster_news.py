@@ -29,6 +29,7 @@ from ravens_bot.models import (
     Transaction,
     same_player,
 )
+from ravens_bot.official_transactions import transaction_log_url
 from ravens_bot.state import channel_key
 
 
@@ -195,7 +196,7 @@ def test_combined_post_shows_the_move_and_the_injury_status() -> None:
     embed = roster_news_post(news, TARGET_DATE)[0][0]
 
     assert embed.title == "Activated — TE Isaiah Likely"
-    assert embed.url == player.page_url
+    assert embed.url == transaction_log_url(2025)
     assert embed.description == "From injured reserve."
     assert [field.name for field in embed.fields] == ["Injury report — Active"]
     assert embed.fields[0].value == "Knee"
