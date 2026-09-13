@@ -47,7 +47,9 @@ means the wording is unit tested without constructing a client.
   misrepresent the post. The thumbnail is the player joining the roster, because
   a day that pairs an activation with a move to injured reserve is about the
   arrival. A mass roster cut skips link markup entirely, because twenty links
-  would crowd the wording out of the field's character budget.
+  would crowd the wording out of the field's character budget. A move's title
+  links to the club's own transaction log for that year, the page the news is
+  published on, rather than to another outlet's copy of it.
 - **Cut down day** gets its own layout, because ESPN files a club's cuts as one
   run-on sentence naming thirty players. A move that sends out more players than
   a post can picture is listed by unit instead — quarterbacks, running backs,
@@ -83,7 +85,11 @@ means the wording is unit tested without constructing a client.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
   image sized for Discord with player headshots, team-colored headings, and a
-  matchup-color title bar. Its title links back to the live report.
+  matchup-color title bar. It is drawn for a phone screen: the type is large and
+  each column is only as wide as the widest entry it holds, so a practice-status
+  column showing "DNP" takes no more room than that, and both clubs' tables
+  share one set of widths so they line up. Its title links back to the live
+  report.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post

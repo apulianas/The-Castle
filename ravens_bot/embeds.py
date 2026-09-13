@@ -13,7 +13,6 @@ from .espn_urls import (
     schedule_url,
     standings_url,
     team_logo_url,
-    transactions_url,
 )
 from .formatting import (
     format_game_state,
@@ -92,7 +91,7 @@ from .models import (
     same_player,
 )
 from .snapcounts import MAX_SNAP_GAMES
-from .trades import Trade
+from .official_transactions import transaction_log_url
 
 
 RAVENS_PURPLE = 0x24125F
@@ -230,22 +229,13 @@ def _set_transaction_art(
 
 
 def _subject_url(transaction: Transaction) -> str:
-    """Where a move's title points: the player it is about, or the move list."""
-    trade = transaction.trade
-    if trade is not None:
-        return _trade_url(trade)
-    player = transaction.player
-    page = player.page_url if player is not None else None
-    return page or transactions_url(RAVENS_SLUG)
+    """Where a move's title points: the club's own log of that year's moves.
 
-
-def _trade_url(trade: Trade) -> str:
-    """Where a trade's title points: the arrival, the departure, or the partner."""
-    for player in (*trade.incoming.players, *trade.outgoing.players):
-        if player.page_url:
-            return player.page_url
-    partner = trade.partner.page_url if trade.partner else None
-    return partner or transactions_url(RAVENS_SLUG)
+    The move being posted is the one the Ravens published, so the title opens
+    the page it was read from rather than another outlet's version of it. The
+    players named in the prose still carry their own links.
+    """
+    return transaction_log_url(transaction.date.year)
 
 
 def _trade_players(transaction: Transaction) -> tuple[PlayerRef, ...]:
@@ -369,7 +359,7 @@ def transaction_embeds(
         # in a field under a title that repeats the date and the verb.
         return [_single_transaction_embed(transactions[0], target_date)]
 
-    embed = _base_embed(title, url=transactions_url(RAVENS_SLUG))
+    embed = _base_embed(title, url=transaction_log_url(target_date.year))
     for transaction in transactions[:MAX_EMBED_FIELDS]:
         embed.add_field(
             name=_limit_field(transaction.headline, 256),

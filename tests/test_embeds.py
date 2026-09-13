@@ -27,7 +27,7 @@ from ravens_bot.embeds import (
     standings_embed,
     transaction_embeds,
 )
-from ravens_bot.espn_urls import transactions_url
+from ravens_bot.official_transactions import transaction_log_url
 from ravens_bot.fourthdown import advise
 from ravens_bot.formatting import format_no_live_game
 from ravens_bot.models import (
@@ -199,7 +199,7 @@ def test_a_single_move_leads_with_its_own_headline() -> None:
 
     assert embed.title == "Signed — WR Devontez Walker"
     assert embed.description == "To the active roster."
-    assert embed.url == player.page_url
+    assert embed.url == transaction_log_url(2025)
     assert embed.fields == []
 
 
@@ -223,7 +223,7 @@ def test_a_compound_move_names_its_players_once_in_the_prose() -> None:
     assert embed.title == "Ravens roster move"
     assert "Ronnie Stanley" in embed.description
     assert "Carson Vinson" in embed.description
-    assert embed.url == transactions_url(RAVENS_SLUG)
+    assert embed.url == transaction_log_url(2025)
 
 
 def test_a_long_single_move_stays_within_the_title_and_description_budgets() -> None:
