@@ -15,7 +15,15 @@ from typing import Callable, Mapping
 from urllib.parse import urljoin
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, UnidentifiedImageError
+from PIL import (
+    Image,
+    ImageChops,
+    ImageDraw,
+    ImageFilter,
+    ImageFont,
+    ImageOps,
+    UnidentifiedImageError,
+)
 
 from .models import Game, RAVENS_NAME, TeamRef
 
@@ -79,6 +87,7 @@ DISPLAY_HEADERS = {
 }
 FONT_DIRECTORY = Path(__file__).with_name("fonts")
 GLASS_SUPERSAMPLE = 4
+OUTPUT_SCALE = 2
 
 
 class InjuryReportError(RuntimeError):
@@ -488,20 +497,28 @@ def render_injury_report(
     a letter — across half the image and left the type small to fit.
     """
     headshots = headshots or {}
-    team_font = _font(30, bold=True)
-    header_font = _font(24, bold=True)
-    cell_font = _font(24)
-    margin = MARGIN
-    team_height = 60
-    row_height = ROW_HEIGHT
-    table_gap = 26
+    scale = OUTPUT_SCALE
+    team_font = _font(30 * scale, bold=True)
+    header_font = _font(24 * scale, bold=True)
+    cell_font = _font(24 * scale)
+    margin = MARGIN * scale
+    cell_padding = CELL_PADDING * scale
+    headshot_size = HEADSHOT_SIZE * scale
+    headshot_gap = HEADSHOT_GAP * scale
+    team_height = 60 * scale
+    row_height = ROW_HEIGHT * scale
+    table_gap = 26 * scale
 
     measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
     column_widths = _column_widths(
-        measure, report.tables, header_font, cell_font, headshots
+        measure, report.tables, header_font, cell_font, headshots, scale
     )
-    width = margin * 2 + sum(column_widths) if column_widths else MIN_IMAGE_WIDTH
-    width = max(width, MIN_IMAGE_WIDTH)
+    width = (
+        margin * 2 + sum(column_widths)
+        if column_widths
+        else MIN_IMAGE_WIDTH * scale
+    )
+    width = max(width, MIN_IMAGE_WIDTH * scale)
     height = margin
     for table in report.tables:
         height += team_height + row_height * (len(table.rows) + 1) + table_gap
@@ -525,20 +542,30 @@ def render_injury_report(
         _draw_liquid_glass_panel(
             image,
             (
-                margin - 8,
-                y - 6,
-                margin + table_width + 8,
-                y + team_height + row_height * (len(table.rows) + 1) + 8,
+                margin - 8 * scale,
+                y - 6 * scale,
+                margin + table_width + 8 * scale,
+                y
+                + team_height
+                + row_height * (len(table.rows) + 1)
+                + 8 * scale,
             ),
             team_color,
+            scale,
         )
         team_text_x = margin
         logo_url = _table_logo_url(report, table)
         if logo_url and logo_url in headshots:
-            _draw_logo(image, headshots[logo_url], margin, y + 5)
-            team_text_x += 54
+            _draw_logo(
+                image,
+                headshots[logo_url],
+                margin,
+                y + 5 * scale,
+                42 * scale,
+            )
+            team_text_x += 54 * scale
         draw.text(
-            (team_text_x, y + 10),
+            (team_text_x, y + 10 * scale),
             table.team,
             fill=team_text_color,
             font=team_font,
@@ -549,16 +576,28 @@ def render_injury_report(
             image,
             (margin, y, margin + sum(column_widths), y + row_height),
             team_color,
+            scale,
         )
         for heading, column_width in zip(table.headers, column_widths):
             heading = _display_header(heading)
             draw.line(
-                (x + column_width, y + 1, x + column_width, y + row_height - 1),
+                (
+                    x + column_width,
+                    y + scale,
+                    x + column_width,
+                    y + row_height - scale,
+                ),
                 fill=_blend_color(team_color, "#ffffff", 0.28),
+                width=scale,
             )
             draw.text(
-                (x + CELL_PADDING, _text_top(draw, y, row_height, header_font)),
-                _fit_text(draw, heading, header_font, column_width - CELL_PADDING * 2),
+                (x + cell_padding, _text_top(draw, y, row_height, header_font)),
+                _fit_text(
+                    draw,
+                    heading,
+                    header_font,
+                    column_width - cell_padding * 2,
+                ),
                 fill=header_text_color,
                 font=header_font,
             )
@@ -575,27 +614,30 @@ def render_injury_report(
                     image,
                     (x, y, x + column_width, y + row_height),
                     glass_alpha,
+                    scale,
                 )
                 draw.rectangle(
                     (x, y, x + column_width, y + row_height),
                     outline=GRID_COLOR,
+                    width=scale,
                 )
-                text_x = x + CELL_PADDING
+                text_x = x + cell_padding
                 if column == 0 and _row_headshot(table, index, headshots) is not None:
                     _draw_headshot(
                         image,
                         headshots[_row_headshot(table, index, headshots)],
-                        x + CELL_PADDING,
-                        y + (row_height - HEADSHOT_SIZE) // 2,
+                        x + cell_padding,
+                        y + (row_height - headshot_size) // 2,
+                        headshot_size,
                     )
-                    text_x += HEADSHOT_SIZE + HEADSHOT_GAP
+                    text_x += headshot_size + headshot_gap
                 draw.text(
                     (text_x, _text_top(draw, y, row_height, cell_font)),
                     _fit_text(
                         draw,
                         cell,
                         cell_font,
-                        x + column_width - CELL_PADDING - text_x,
+                        x + column_width - cell_padding - text_x,
                     ),
                     fill=TEXT_COLOR,
                     font=cell_font,
@@ -668,6 +710,7 @@ def _draw_glass_bar(
     canvas: Image.Image,
     box: tuple[int, int, int, int],
     color: str,
+    render_scale: int,
 ) -> None:
     left, top, right, bottom = box
     width = right - left
@@ -679,7 +722,7 @@ def _draw_glass_bar(
         shade = _blend_color(color, "#ffffff", 0.13 * (1 - ratio))
         shade = _blend_color(_rgb_hex(shade), "#000000", 0.18 * ratio)
         glass_draw.line((0, y, width, y), fill=(*shade, 218))
-    _draw_specular_highlights(glass, (0, 0, width, height))
+    _draw_specular_highlights(glass, (0, 0, width, height), render_scale)
     canvas.paste(glass, (left, top), glass)
 
 
@@ -687,21 +730,27 @@ def _draw_liquid_glass_panel(
     canvas: Image.Image,
     box: tuple[int, int, int, int],
     tint: str,
+    render_scale: int,
 ) -> None:
     left, top, right, bottom = box
     width = right - left
     height = bottom - top
-    radius = 18
+    radius = 18 * render_scale
     scale = GLASS_SUPERSAMPLE
 
     shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     shadow_draw = ImageDraw.Draw(shadow)
     shadow_draw.rounded_rectangle(
-        (left + 3, top + 7, right + 3, bottom + 7),
+        (
+            left + 3 * render_scale,
+            top + 7 * render_scale,
+            right + 3 * render_scale,
+            bottom + 7 * render_scale,
+        ),
         radius=radius,
         fill=(0, 0, 0, 115),
     )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(12))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(12 * render_scale))
     canvas.paste(shadow, (0, 0), shadow)
 
     high_resolution_size = (width * scale, height * scale)
@@ -712,9 +761,17 @@ def _draw_liquid_glass_panel(
         fill=255,
     )
     mask = mask.resize((width, height), Image.Resampling.LANCZOS)
-    refracted = canvas.crop((left + 4, top + 4, right - 4, bottom - 4))
+    refraction_inset = 4 * render_scale
+    refracted = canvas.crop(
+        (
+            left + refraction_inset,
+            top + refraction_inset,
+            right - refraction_inset,
+            bottom - refraction_inset,
+        )
+    )
     frosted = refracted.resize((width, height), Image.Resampling.LANCZOS).filter(
-        ImageFilter.GaussianBlur(8)
+        ImageFilter.GaussianBlur(8 * render_scale)
     )
     canvas.paste(frosted, (left, top), mask)
 
@@ -815,17 +872,22 @@ def _draw_glass_cell(
     canvas: Image.Image,
     box: tuple[int, int, int, int],
     alpha: int,
+    render_scale: int,
 ) -> None:
     left, top, right, bottom = box
     width = right - left
     height = bottom - top
     glass = Image.new("RGBA", (width, height), (255, 255, 255, alpha))
     glass_draw = ImageDraw.Draw(glass)
-    glass_draw.line((0, 0, width, 0), fill=(255, 255, 255, 52), width=1)
+    glass_draw.line(
+        (0, 0, width, 0),
+        fill=(255, 255, 255, 52),
+        width=render_scale,
+    )
     glass_draw.line(
         (0, height - 1, width, height - 1),
         fill=(0, 0, 0, 72),
-        width=1,
+        width=render_scale,
     )
     canvas.paste(glass, (left, top), glass)
 
@@ -833,6 +895,7 @@ def _draw_glass_cell(
 def _draw_specular_highlights(
     canvas: Image.Image,
     box: tuple[int, int, int, int],
+    render_scale: int,
 ) -> None:
     left, top, right, bottom = box
     width = right - left
@@ -842,11 +905,15 @@ def _draw_specular_highlights(
     for y in range(max(1, height // 2)):
         alpha = round(24 * (1 - y / max(height // 2, 1)))
         shine_draw.line((0, y, width, y), fill=(255, 255, 255, alpha))
-    shine_draw.line((0, 0, width, 0), fill=(255, 255, 255, 105), width=2)
+    shine_draw.line(
+        (0, 0, width, 0),
+        fill=(255, 255, 255, 105),
+        width=2 * render_scale,
+    )
     shine_draw.line(
         (0, height - 1, width, height - 1),
         fill=(0, 0, 0, 95),
-        width=2,
+        width=2 * render_scale,
     )
     canvas.paste(shine, (left, top), shine)
 
@@ -866,33 +933,46 @@ def _rgb_hex(color: tuple[int, int, int]) -> str:
 
 
 def _draw_headshot(
-    canvas: Image.Image, data: bytes, x: int, y: int
+    canvas: Image.Image,
+    data: bytes,
+    x: int,
+    y: int,
+    size: int,
 ) -> None:
     try:
         with Image.open(io.BytesIO(data)) as source:
-            fitted = ImageOps.fit(
-                source.convert("RGBA"), (HEADSHOT_SIZE, HEADSHOT_SIZE)
+            photo = ImageOps.fit(
+                source.convert("RGBA"),
+                (size, size),
+                method=Image.Resampling.LANCZOS,
             )
-            photo = Image.new("RGB", fitted.size, "white")
-            photo.paste(fitted, mask=fitted.getchannel("A"))
     except (OSError, UnidentifiedImageError) as exc:
         LOGGER.warning("Could not render a player headshot: %s", exc)
         return
-    mask = Image.new("L", photo.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, HEADSHOT_SIZE - 1, HEADSHOT_SIZE - 1), radius=7, fill=255
+    rounded_mask = Image.new("L", photo.size, 0)
+    ImageDraw.Draw(rounded_mask).rounded_rectangle(
+        (0, 0, size - 1, size - 1),
+        radius=round(size * 7 / HEADSHOT_SIZE),
+        fill=255,
     )
+    mask = ImageChops.multiply(photo.getchannel("A"), rounded_mask)
     canvas.paste(photo, (x, y), mask)
 
 
-def _draw_logo(canvas: Image.Image, data: bytes, x: int, y: int) -> None:
+def _draw_logo(
+    canvas: Image.Image,
+    data: bytes,
+    x: int,
+    y: int,
+    size: int,
+) -> None:
     try:
         with Image.open(io.BytesIO(data)) as source:
-            logo = ImageOps.contain(source.convert("RGBA"), (42, 42))
+            logo = ImageOps.contain(source.convert("RGBA"), (size, size))
     except (OSError, UnidentifiedImageError) as exc:
         LOGGER.warning("Could not render a team logo: %s", exc)
         return
-    canvas.paste(logo, (x + (42 - logo.width) // 2, y), logo)
+    canvas.paste(logo, (x + (size - logo.width) // 2, y), logo)
 
 
 def _row_headshot(
@@ -915,6 +995,7 @@ def _column_widths(
     header_font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     cell_font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
     headshots: Mapping[str, bytes],
+    scale: int,
 ) -> list[int]:
     """A width per column, measured from the widest thing that column holds.
 
@@ -936,25 +1017,26 @@ def _column_widths(
             for column, cell in enumerate(row[:columns]):
                 text = ceil(draw.textlength(cell, font=cell_font))
                 if column == 0 and _row_headshot(table, index, headshots):
-                    text += HEADSHOT_SIZE + HEADSHOT_GAP
+                    text += (HEADSHOT_SIZE + HEADSHOT_GAP) * scale
                 widths[column] = max(widths[column], text)
     widths = [
-        max(width + CELL_PADDING * 2, MIN_COLUMN_WIDTH) for width in widths
+        max(width + CELL_PADDING * 2 * scale, MIN_COLUMN_WIDTH * scale)
+        for width in widths
     ]
-    return _fit_columns(widths)
+    return _fit_columns(widths, scale)
 
 
-def _fit_columns(widths: list[int]) -> list[int]:
+def _fit_columns(widths: list[int], scale: int) -> list[int]:
     """Columns trimmed to a width a phone shows without shrinking the type.
 
     Only the widest column gives room up, since it is the one holding names, and
     a name that no longer fits is shortened rather than set in smaller type.
     """
-    available = MAX_IMAGE_WIDTH - MARGIN * 2
+    available = (MAX_IMAGE_WIDTH - MARGIN * 2) * scale
     overflow = sum(widths) - available
     while overflow > 0:
         widest = max(range(len(widths)), key=lambda index: widths[index])
-        room = widths[widest] - MIN_COLUMN_WIDTH
+        room = widths[widest] - MIN_COLUMN_WIDTH * scale
         if room <= 0:
             break
         trimmed = min(room, overflow)
