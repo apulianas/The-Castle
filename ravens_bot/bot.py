@@ -5,7 +5,7 @@ import io
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -13,15 +13,18 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from .chart import ArtworkLoader
 from .config import BotConfig, load_config, webhook_id
 from .dates import (
     MAX_SCHEDULE_DAYS,
+    DateWindow,
     now_in_zone,
     parse_user_date,
     today_in_zone,
     upcoming_window,
 )
 from .embeds import (
+    INACTIVE_CHART_FILENAME,
     error_embed,
     field_goal_embed,
     fourth_down_embed,
@@ -51,6 +54,7 @@ from .espn import (
     select_insight_game,
     team_names,
 )
+from .inactives_report import artwork_urls, render_inactive_report
 from .fourthdown import (
     LONGEST_ASKABLE_FIELD_GOAL,
     MIN_FIELD_GOAL_YARDS,
@@ -110,6 +114,17 @@ TRACK_INTERVAL_SECONDS = 30
 # When nothing is being played there is nothing to record, so the tracker sits
 # out this many ticks — five minutes — before looking again.
 IDLE_TRACK_TICKS = 9
+# ESPN publishes a game's inactive list about 90 minutes before kickoff, so the
+# watcher starts looking then rather than waiting for the next general poll.
+INACTIVE_WATCH_LEAD = timedelta(minutes=90)
+# A list can land late, or kickoff can slip, so the watch runs a little past the
+# scheduled start before giving up on the game.
+INACTIVE_WATCH_GRACE = timedelta(minutes=15)
+# How often the watch looks while a game is inside that window.
+INACTIVE_WATCH_INTERVAL_SECONDS = 60
+# Outside the window there is nothing to publish, so the watcher sits out this
+# many ticks — five minutes — before checking the schedule again.
+INACTIVE_IDLE_TICKS = 4
 # How many close names a failed player search offers back.
 MAX_PLAYER_SUGGESTIONS = 5
 # How many live teams a failed team search offers back.
@@ -136,17 +151,20 @@ class RavensBot(commands.Bot):
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
         self.injury_reports: InjuryReportClient | None = None
+        self.artwork: ArtworkLoader | None = None
         self.official_transactions: OfficialTransactionsClient | None = None
         self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
         self.fourth_downs = FourthDownMemory()
         self._idle_track_ticks = 0
+        self._idle_inactive_ticks = 0
 
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession()
         self.espn = EspnClient(self.session)
         self.injury_reports = InjuryReportClient(self.session)
+        self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.announcement_state.load()
@@ -165,11 +183,14 @@ class RavensBot(commands.Bot):
         if self.config.has_announcement_targets:
             self.poll_updates.change_interval(seconds=self.config.poll_interval_seconds)
             self.poll_updates.start()
+            self.watch_inactives.start()
         self.track_fourth_downs.start()
 
     async def close(self) -> None:
         if self.poll_updates.is_running():
             self.poll_updates.cancel()
+        if self.watch_inactives.is_running():
+            self.watch_inactives.cancel()
         if self.track_fourth_downs.is_running():
             self.track_fourth_downs.cancel()
         if self.session is not None:
@@ -201,7 +222,6 @@ class RavensBot(commands.Bot):
         target_date = today_in_zone(self.config.time_zone)
         try:
             transactions = await client.fetch_transactions(target_date)
-            inactive_reports = await client.fetch_inactives(target_date)
             injuries = await client.fetch_injuries()
         except EspnApiError as exc:
             LOGGER.warning("Polling skipped because ESPN data could not be fetched: %s", exc)
@@ -215,7 +235,6 @@ class RavensBot(commands.Bot):
         else:
             transactions = merge_standard_elevations(transactions, elevations)
         await self._post_new_roster_news(targets, transactions, injuries, target_date)
-        await self._post_new_inactives(targets, inactive_reports, target_date)
 
     async def _post_official_injury_report(
         self,
@@ -290,10 +309,35 @@ class RavensBot(commands.Bot):
             if not report.players:
                 continue
             key = inactive_announcement_key(report)
-            embeds = inactive_embeds([report], target_date, self.config.time_zone)
+            image = await self._inactive_chart(report)
+            embeds = inactive_embeds(
+                [report],
+                target_date,
+                self.config.time_zone,
+                with_players=image is None,
+            )
             for target in targets:
                 if self._unseen(target, key):
-                    await self._announce(target, [key], embeds)
+                    await self._announce(
+                        target, [key], embeds, image, INACTIVE_CHART_FILENAME
+                    )
+
+    async def _inactive_chart(self, report: InactiveReport) -> bytes | None:
+        """The inactive list as a chart, or nothing when it cannot be drawn.
+
+        A chart that fails to render must not cost the post, so the caller
+        falls back to the written list.
+        """
+        try:
+            artwork = (
+                await self.artwork.fetch(artwork_urls(report))
+                if self.artwork is not None
+                else {}
+            )
+            return render_inactive_report(report, artwork)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Inactive chart could not be drawn: %s", exc)
+            return None
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -326,6 +370,8 @@ class RavensBot(commands.Bot):
         target: _AnnouncementTarget,
         keys: Sequence[str],
         embeds: list[discord.Embed],
+        image: bytes | None = None,
+        filename: str = INACTIVE_CHART_FILENAME,
     ) -> None:
         """Post to one target and record every piece of news the post covers.
 
@@ -335,7 +381,13 @@ class RavensBot(commands.Bot):
         A failed post records nothing, so the next poll tries it again.
         """
         try:
-            await target.destination.send(embeds=embeds)
+            if image is None:
+                await target.destination.send(embeds=embeds)
+            else:
+                await target.destination.send(
+                    embeds=embeds,
+                    file=discord.File(io.BytesIO(image), filename=filename),
+                )
         except discord.DiscordException as exc:
             LOGGER.warning("Could not post to %s: %s", target.label, exc)
             return
@@ -363,6 +415,44 @@ class RavensBot(commands.Bot):
 
     @poll_updates.before_loop
     async def before_poll_updates(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(seconds=INACTIVE_WATCH_INTERVAL_SECONDS)
+    async def watch_inactives(self) -> None:
+        """Look for today's inactive lists from 90 minutes before kickoff.
+
+        ESPN publishes the lists about 90 minutes out and they are news for
+        about that long, so the general poll's five minutes is both too slow
+        then and pointless the rest of the week. Outside the window only the
+        schedule is read, and that is a cached request.
+        """
+        if self._idle_inactive_ticks > 0:
+            self._idle_inactive_ticks -= 1
+            return
+        targets = await self._announcement_targets()
+        if not targets:
+            self._idle_inactive_ticks = INACTIVE_IDLE_TICKS
+            return
+        client = _require_espn(self)
+        target_date = today_in_zone(self.config.time_zone)
+        try:
+            games = await client.fetch_schedule(DateWindow(target_date, target_date))
+        except EspnApiError as exc:
+            LOGGER.debug("Inactive watch skipped: %s", exc)
+            self._idle_inactive_ticks = INACTIVE_IDLE_TICKS
+            return
+        if not watching_inactives(games, now_in_zone(self.config.time_zone)):
+            self._idle_inactive_ticks = INACTIVE_IDLE_TICKS
+            return
+        try:
+            reports = await client.fetch_inactives(target_date)
+        except EspnApiError as exc:
+            LOGGER.warning("Inactive lists could not be fetched: %s", exc)
+            return
+        await self._post_new_inactives(targets, reports, target_date)
+
+    @watch_inactives.before_loop
+    async def before_watch_inactives(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(seconds=TRACK_INTERVAL_SECONDS)
@@ -418,7 +508,10 @@ def _transactions_command(bot: RavensBot) -> app_commands.Command[Any, ..., None
 
 
 def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
-    @app_commands.command(name="inactives", description="Show Ravens game day inactives for a date.")
+    @app_commands.command(
+        name="inactives",
+        description="Show Ravens game day inactives for a date, as a chart.",
+    )
     @app_commands.describe(date="Optional date: today or YYYY-MM-DD")
     async def inactives(interaction: discord.Interaction, date: str | None = None) -> None:
         target_date = await _parse_or_respond(interaction, date, bot.config)
@@ -430,7 +523,30 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(embeds=inactive_embeds(reports, target_date, bot.config.time_zone))
+        if not reports:
+            await interaction.followup.send(
+                embeds=inactive_embeds(reports, target_date, bot.config.time_zone)
+            )
+            return
+        for report in reports:
+            image = (
+                await bot._inactive_chart(report) if report.players else None
+            )
+            embeds = inactive_embeds(
+                [report],
+                target_date,
+                bot.config.time_zone,
+                with_players=image is None,
+            )
+            if image is None:
+                await interaction.followup.send(embeds=embeds)
+            else:
+                await interaction.followup.send(
+                    embeds=embeds,
+                    file=discord.File(
+                        io.BytesIO(image), filename=INACTIVE_CHART_FILENAME
+                    ),
+                )
 
     return inactives
 
@@ -823,6 +939,25 @@ def transaction_announcement_key(transaction: Transaction) -> str:
 
 def injury_announcement_key(update: InjuryUpdate) -> str:
     return f"{INJURY_KEY_PREFIX}{update.announcement_id}"
+
+
+def watching_inactives(games: Sequence[Game], moment: datetime) -> bool:
+    """Whether any of the day's games is close enough to kickoff to publish.
+
+    A game ESPN has given no kickoff time to is watched anyway, since the only
+    alternative is to miss its list entirely.
+    """
+    for game in games:
+        if game.completed:
+            continue
+        start = game.start_time
+        if start is None:
+            return True
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=moment.tzinfo)
+        if start - INACTIVE_WATCH_LEAD <= moment <= start + INACTIVE_WATCH_GRACE:
+            return True
+    return False
 
 
 def inactive_announcement_key(report: InactiveReport) -> str:

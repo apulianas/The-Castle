@@ -7,7 +7,7 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 - Slash commands:
   - `/transactions [date]` — Ravens roster transactions for today or a `YYYY-MM-DD` date.
-  - `/inactives [date]` — game day inactive reports when ESPN publishes them.
+  - `/inactives [date]` — game day inactive reports as a chart image when ESPN publishes them.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
@@ -22,11 +22,14 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   player, team, and game pages.
 - Roster-backed player resolution, so names in a transaction become real links.
 - Background polling for today's roster transactions, practice-squad standard
-  elevations, game day inactives, and
-  injury report changes. The official weekly Ravens chart is posted as an image
+  elevations, and injury report changes. The official weekly Ravens chart is posted as an image
   after both clubs publish the same practice day and the chart remains unchanged
   for five minutes. Individual ESPN injury changes are not posted separately,
   and the chart automatically advances with the site's selected week.
+- Game day inactives watched on their own clock: ESPN publishes the lists about
+  90 minutes before kickoff, so the watcher looks every minute from 90 minutes
+  out until a quarter hour past the scheduled start, and otherwise only reads
+  the day's schedule every five minutes.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
@@ -81,7 +84,14 @@ means the wording is unit tested without constructing a client.
   footer summarising where the Ravens sit.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
-- **Inactives** are grouped by team with position and reason.
+- **Inactives** come from ESPN's game summary for each of the day's Ravens
+  games, and are drawn as a chart image in the injury report's style: a
+  panel per club in matchup order, away first, with the club's colors and logo.
+  Each row is a headshot, position, and name in one column, with the reason
+  alongside, and the table carries no headings because a name and a reason need
+  no labelling. A club with nothing published shows a "None listed" row. The
+  post's embed keeps the matchup, kickoff, and venue; when the chart cannot be
+  drawn the written list is posted instead.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
   image sized for Discord with player headshots, team-colored headings, and a
@@ -156,7 +166,7 @@ container restarts.
 | `DISCORD_TOKEN` | Yes | | Discord bot token. Never commit it. |
 | `DISCORD_CHANNEL_ID` | No | | One channel ID, or several separated by commas, for background announcements. |
 | `DISCORD_WEBHOOK_URL` | No | | One Discord webhook URL, or several separated by commas, for background announcements. |
-| `POLL_INTERVAL_SECONDS` | No | `300` | Poll interval for automatic announcements. Minimum 30 seconds. |
+| `POLL_INTERVAL_SECONDS` | No | `300` | Poll interval for automatic announcements. Minimum 30 seconds. Game day inactives keep their own kickoff-based schedule. |
 | `TIME_ZONE` | No | `America/New_York` | Time zone used for "today" and display times. |
 | `SECONDARY_TEAM` | No | | A second team, by name, city, or abbreviation, that `/fourthdown` and `/fieldgoal` fall back on when the Ravens are not playing. |
 
