@@ -402,6 +402,54 @@ def test_parse_inactive_report_finds_nested_inactive_players() -> None:
     assert report.players[0].position == "WR"
 
 
+def test_parse_inactive_report_reads_injury_fantasy_status() -> None:
+    game = Game(
+        "401", "Baltimore Ravens at Indianapolis Colts", "BAL @ IND", None, "Pre-Game"
+    )
+    summary = {
+        "injuries": [
+            {
+                "team": {"displayName": "Baltimore Ravens"},
+                "injuries": [
+                    {
+                        "status": "Out",
+                        "athlete": {
+                            "id": "77",
+                            "displayName": "Inactive Raven",
+                            "position": {"abbreviation": "WR"},
+                        },
+                        "details": {
+                            "fantasyStatus": {
+                                "description": "INACTIVE",
+                                "displayDescription": "Inactive",
+                            },
+                            "type": "Coach's Decision",
+                        },
+                    },
+                    {
+                        "status": "Questionable",
+                        "athlete": {"displayName": "Active Raven"},
+                        "details": {
+                            "fantasyStatus": {
+                                "description": "QUESTIONABLE",
+                                "displayDescription": "Questionable",
+                            }
+                        },
+                    },
+                ],
+            }
+        ]
+    }
+
+    report = parse_inactive_report(summary, game)
+
+    assert [(player.name, player.reason) for player in report.players] == [
+        ("Inactive Raven", "Coach's Decision")
+    ]
+    assert report.players[0].team == "Baltimore Ravens"
+    assert report.players[0].is_ravens
+
+
 def test_parse_standings_reads_records() -> None:
     payload = {
         "standings": [

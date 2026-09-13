@@ -795,7 +795,12 @@ def _player_from_item(
     if not name:
         return None
     team = _team_name(item.get("team")) or fallback_team
-    reason = _display_name(item.get("reason")) or _display_name(item.get("status"))
+    details = _as_dict(item.get("details"))
+    reason = (
+        _display_name(item.get("reason"))
+        or _text(details.get("type"))
+        or _display_name(item.get("status"))
+    )
     position = _position_text(athlete.get("position")) or _position_text(
         item.get("position")
     )
@@ -809,6 +814,22 @@ def _player_from_item(
     )
 
 
+def _is_inactive_item(item: dict[str, Any]) -> bool:
+    status = (_display_name(item.get("status")) or _text(item.get("status")) or "")
+    if "inactive" in status.casefold():
+        return True
+    fantasy_status = _as_dict(_as_dict(item.get("details")).get("fantasyStatus"))
+    marker = next(
+        (
+            value
+            for key in ("description", "displayDescription", "abbreviation", "name")
+            if isinstance((value := fantasy_status.get(key)), str) and value.strip()
+        ),
+        "",
+    )
+    return marker.strip().casefold() == "inactive"
+
+
 def _collect_inactives(
     value: Any, players: list[InactivePlayer], team: str | None = None
 ) -> None:
@@ -820,6 +841,10 @@ def _collect_inactives(
         return
 
     current_team = _team_name(value.get("team")) or team
+    if _is_inactive_item(value):
+        player = _player_from_item(value, current_team)
+        if player:
+            players.append(player)
     for key, nested in value.items():
         lowered = key.lower()
         if lowered in {"inactives", "inactiveplayers", "inactive_players"}:
@@ -828,12 +853,6 @@ def _collect_inactives(
                 if player:
                     players.append(player)
             continue
-        if lowered == "status":
-            status = (_display_name(nested) or str(nested)).lower()
-            if "inactive" in status:
-                player = _player_from_item(value, current_team)
-                if player:
-                    players.append(player)
     for nested in value.values():
         _collect_inactives(nested, players, current_team)
 
