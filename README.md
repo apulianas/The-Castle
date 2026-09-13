@@ -7,7 +7,7 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 - Slash commands:
   - `/transactions [date]` — Ravens roster transactions for today or a `YYYY-MM-DD` date.
-  - `/inactives [date]` — game day inactive reports when ESPN publishes them.
+  - `/inactives [date]` — game day inactive reports as a chart image when ESPN publishes them.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
@@ -81,7 +81,13 @@ means the wording is unit tested without constructing a client.
   footer summarising where the Ravens sit.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
-- **Inactives** are grouped by team with position and reason.
+- **Inactives** are drawn as a chart image in the injury report's style: a
+  panel per club in matchup order, away first, with the club's colors and logo.
+  Each row is a headshot, position, and name in one column, with the reason
+  alongside, and the table carries no headings because a name and a reason need
+  no labelling. A club with nothing published shows a "None listed" row. The
+  post's embed keeps the matchup, kickoff, and venue; when the chart cannot be
+  drawn the written list is posted instead.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
   image sized for Discord with player headshots, team-colored headings, and a

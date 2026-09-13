@@ -466,9 +466,16 @@ def _injury_line(update: InjuryUpdate, solo: bool) -> str:
     return format_injury(update)
 
 
+INACTIVE_CHART_FILENAME = "ravens-inactives.png"
+
+
 def inactive_embeds(
-    reports: list[InactiveReport], target_date: date, time_zone: ZoneInfo
+    reports: list[InactiveReport],
+    target_date: date,
+    time_zone: ZoneInfo,
+    with_players: bool = True,
 ) -> list[discord.Embed]:
+    """The matchup and, unless a chart carries them, the lists themselves."""
     if not reports:
         return [
             _base_embed(
@@ -491,12 +498,14 @@ def inactive_embeds(
             url=game_url(game.event_id),
         )
         _set_game_art(embed, game)
+        if report.players and not with_players:
+            embed.set_image(url=f"attachment://{INACTIVE_CHART_FILENAME}")
 
         if not report.players:
             embed.add_field(
                 name="Inactive list", value=format_no_inactives(), inline=False
             )
-        else:
+        elif with_players:
             by_team: dict[str, list[str]] = {}
             for player in report.players:
                 team = short_team_name(player.team)
@@ -769,7 +778,7 @@ def help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="/inactives [date]",
-        value="Game day inactives by team, with position and reason, when ESPN publishes them.",
+        value="Game day inactives as a chart, by team, with position and reason, when ESPN publishes them.",
         inline=False,
     )
     embed.add_field(

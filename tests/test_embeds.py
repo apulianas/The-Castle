@@ -359,6 +359,20 @@ def test_inactive_embed_groups_players_by_team() -> None:
     assert "WR Raven One — Healthy scratch" in embed.fields[0].value
 
 
+def test_inactive_embed_drops_the_lists_when_a_chart_carries_them() -> None:
+    report = InactiveReport(
+        game=build_game(),
+        players=[InactivePlayer(name="Raven One", team="Baltimore Ravens")],
+    )
+
+    embed = inactive_embeds(
+        [report], date(2025, 11, 23), EASTERN, with_players=False
+    )[0]
+
+    assert field_names(embed) == []
+    assert embed.title.endswith("inactives")
+
+
 def test_inactive_embed_explains_an_unpublished_list() -> None:
     embed = inactive_embeds(
         [InactiveReport(game=build_game(), players=[])], date(2025, 11, 23), EASTERN

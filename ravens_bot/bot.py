@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from .chart import ArtworkLoader
 from .config import BotConfig, load_config, webhook_id
 from .dates import (
     MAX_SCHEDULE_DAYS,
@@ -22,6 +23,7 @@ from .dates import (
     upcoming_window,
 )
 from .embeds import (
+    INACTIVE_CHART_FILENAME,
     error_embed,
     field_goal_embed,
     fourth_down_embed,
@@ -51,6 +53,7 @@ from .espn import (
     select_insight_game,
     team_names,
 )
+from .inactives_report import artwork_urls, render_inactive_report
 from .fourthdown import (
     LONGEST_ASKABLE_FIELD_GOAL,
     MIN_FIELD_GOAL_YARDS,
@@ -136,6 +139,7 @@ class RavensBot(commands.Bot):
         self.session: aiohttp.ClientSession | None = None
         self.espn: EspnClient | None = None
         self.injury_reports: InjuryReportClient | None = None
+        self.artwork: ArtworkLoader | None = None
         self.official_transactions: OfficialTransactionsClient | None = None
         self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
@@ -147,6 +151,7 @@ class RavensBot(commands.Bot):
         self.session = aiohttp.ClientSession()
         self.espn = EspnClient(self.session)
         self.injury_reports = InjuryReportClient(self.session)
+        self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.announcement_state.load()
@@ -290,10 +295,35 @@ class RavensBot(commands.Bot):
             if not report.players:
                 continue
             key = inactive_announcement_key(report)
-            embeds = inactive_embeds([report], target_date, self.config.time_zone)
+            image = await self._inactive_chart(report)
+            embeds = inactive_embeds(
+                [report],
+                target_date,
+                self.config.time_zone,
+                with_players=image is None,
+            )
             for target in targets:
                 if self._unseen(target, key):
-                    await self._announce(target, [key], embeds)
+                    await self._announce(
+                        target, [key], embeds, image, INACTIVE_CHART_FILENAME
+                    )
+
+    async def _inactive_chart(self, report: InactiveReport) -> bytes | None:
+        """The inactive list as a chart, or nothing when it cannot be drawn.
+
+        A chart that fails to render must not cost the post, so the caller
+        falls back to the written list.
+        """
+        try:
+            artwork = (
+                await self.artwork.fetch(artwork_urls(report))
+                if self.artwork is not None
+                else {}
+            )
+            return render_inactive_report(report, artwork)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Inactive chart could not be drawn: %s", exc)
+            return None
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -326,6 +356,8 @@ class RavensBot(commands.Bot):
         target: _AnnouncementTarget,
         keys: Sequence[str],
         embeds: list[discord.Embed],
+        image: bytes | None = None,
+        filename: str = INACTIVE_CHART_FILENAME,
     ) -> None:
         """Post to one target and record every piece of news the post covers.
 
@@ -335,7 +367,13 @@ class RavensBot(commands.Bot):
         A failed post records nothing, so the next poll tries it again.
         """
         try:
-            await target.destination.send(embeds=embeds)
+            if image is None:
+                await target.destination.send(embeds=embeds)
+            else:
+                await target.destination.send(
+                    embeds=embeds,
+                    file=discord.File(io.BytesIO(image), filename=filename),
+                )
         except discord.DiscordException as exc:
             LOGGER.warning("Could not post to %s: %s", target.label, exc)
             return
@@ -418,7 +456,10 @@ def _transactions_command(bot: RavensBot) -> app_commands.Command[Any, ..., None
 
 
 def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
-    @app_commands.command(name="inactives", description="Show Ravens game day inactives for a date.")
+    @app_commands.command(
+        name="inactives",
+        description="Show Ravens game day inactives for a date, as a chart.",
+    )
     @app_commands.describe(date="Optional date: today or YYYY-MM-DD")
     async def inactives(interaction: discord.Interaction, date: str | None = None) -> None:
         target_date = await _parse_or_respond(interaction, date, bot.config)
@@ -430,7 +471,30 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(embeds=inactive_embeds(reports, target_date, bot.config.time_zone))
+        if not reports:
+            await interaction.followup.send(
+                embeds=inactive_embeds(reports, target_date, bot.config.time_zone)
+            )
+            return
+        for report in reports:
+            image = (
+                await bot._inactive_chart(report) if report.players else None
+            )
+            embeds = inactive_embeds(
+                [report],
+                target_date,
+                bot.config.time_zone,
+                with_players=image is None,
+            )
+            if image is None:
+                await interaction.followup.send(embeds=embeds)
+            else:
+                await interaction.followup.send(
+                    embeds=embeds,
+                    file=discord.File(
+                        io.BytesIO(image), filename=INACTIVE_CHART_FILENAME
+                    ),
+                )
 
     return inactives
 

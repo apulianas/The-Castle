@@ -171,7 +171,9 @@ def render_chart(
     width = max(width, MIN_IMAGE_WIDTH * scale)
     height = margin
     for table in sections:
-        height += team_height + row_height * (len(table.rows) + 1) + table_gap
+        height += (
+            team_height + row_height * _drawn_rows(table) + table_gap
+        )
 
     image = Image.new("RGB", (width, height), PAGE_BACKGROUND)
     _draw_page_background(image, left_color, right_color)
@@ -193,10 +195,7 @@ def render_chart(
                 margin - 8 * scale,
                 y - 6 * scale,
                 margin + table_width + 8 * scale,
-                y
-                + team_height
-                + row_height * (len(table.rows) + 1)
-                + 8 * scale,
+                y + team_height + row_height * _drawn_rows(table) + 8 * scale,
             ),
             team_color,
             scale,
@@ -219,38 +218,42 @@ def render_chart(
             font=team_font,
         )
         y += team_height
-        x = margin
-        _draw_glass_bar(
-            image,
-            (margin, y, margin + sum(column_widths), y + row_height),
-            team_color,
-            scale,
-        )
-        for heading, column_width in zip(table.headers, column_widths):
-            heading = _display_header(heading)
-            draw.line(
-                (
-                    x + column_width,
-                    y + scale,
-                    x + column_width,
-                    y + row_height - scale,
-                ),
-                fill=_blend_color(team_color, "#ffffff", 0.28),
-                width=scale,
+        if table.headers:
+            x = margin
+            _draw_glass_bar(
+                image,
+                (margin, y, margin + sum(column_widths), y + row_height),
+                team_color,
+                scale,
             )
-            draw.text(
-                (x + cell_padding, _text_top(draw, y, row_height, header_font)),
-                _fit_text(
-                    draw,
-                    heading,
-                    header_font,
-                    column_width - cell_padding * 2,
-                ),
-                fill=header_text_color,
-                font=header_font,
-            )
-            x += column_width
-        y += row_height
+            for heading, column_width in zip(table.headers, column_widths):
+                heading = _display_header(heading)
+                draw.line(
+                    (
+                        x + column_width,
+                        y + scale,
+                        x + column_width,
+                        y + row_height - scale,
+                    ),
+                    fill=_blend_color(team_color, "#ffffff", 0.28),
+                    width=scale,
+                )
+                draw.text(
+                    (
+                        x + cell_padding,
+                        _text_top(draw, y, row_height, header_font),
+                    ),
+                    _fit_text(
+                        draw,
+                        heading,
+                        header_font,
+                        column_width - cell_padding * 2,
+                    ),
+                    fill=header_text_color,
+                    font=header_font,
+                )
+                x += column_width
+            y += row_height
 
         for index, row in enumerate(table.rows):
             x = margin
@@ -649,6 +652,11 @@ def _row_headshot(
     return url if url and url in headshots else None
 
 
+def _drawn_rows(section: ChartSection) -> int:
+    """Rows the section takes up, counting its headings when it has any."""
+    return len(section.rows) + (1 if section.headers else 0)
+
+
 def _display_header(heading: str) -> str:
     return DISPLAY_HEADERS.get(heading.strip().upper(), heading)
 
@@ -667,7 +675,13 @@ def _column_widths(
     column whose cells only ever say "DNP" takes the room that word needs rather
     than a share of a fixed page width.
     """
-    columns = max((len(table.headers) for table in tables), default=0)
+    columns = max(
+        (
+            max((len(table.headers), *(len(row) for row in table.rows)), default=0)
+            for table in tables
+        ),
+        default=0,
+    )
     if not columns:
         return []
     widths = [0] * columns
