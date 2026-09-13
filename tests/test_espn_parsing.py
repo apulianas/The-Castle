@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 
 from ravens_bot.espn import (
+    CORE_BASE,
+    SITE_BASE,
+    EspnApiError,
+    EspnClient,
     apply_roster,
     extract_players,
     match_team_games,
+    parse_event_inactive_roster,
     parse_inactive_report,
     parse_roster,
     parse_schedule,
@@ -16,7 +22,7 @@ from ravens_bot.espn import (
     team_names,
 )
 from ravens_bot.formatting import format_transaction
-from ravens_bot.models import AFC_NORTH_GROUP_ID, Game
+from ravens_bot.models import AFC_NORTH_GROUP_ID, Game, GameTeam, TeamRef
 
 
 def test_parse_schedule_filters_to_ravens_games() -> None:
@@ -448,6 +454,160 @@ def test_parse_inactive_report_reads_injury_fantasy_status() -> None:
     ]
     assert report.players[0].team == "Baltimore Ravens"
     assert report.players[0].is_ravens
+
+
+def test_parse_event_roster_keeps_every_did_not_play_entry() -> None:
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    roster = {
+        "entries": [
+            {
+                "playerId": 101,
+                "displayName": "Fantasy Player",
+                "didNotPlay": True,
+                "athlete": {"$ref": "http://example.test/athletes/101"},
+            },
+            {
+                "playerId": 102,
+                "displayName": "Lineman",
+                "didNotPlay": True,
+                "athlete": {"$ref": "http://example.test/athletes/102"},
+            },
+            {
+                "playerId": 103,
+                "displayName": "Active Player",
+                "didNotPlay": False,
+                "athlete": {"$ref": "http://example.test/athletes/103"},
+            },
+        ]
+    }
+    athletes = {
+        "101": {
+            "id": "101",
+            "fullName": "Fantasy Player",
+            "position": {"abbreviation": "WR"},
+            "injuries": [
+                {
+                    "details": {
+                        "fantasyStatus": {"description": "INACTIVE"},
+                        "type": "Hamstring",
+                    }
+                }
+            ],
+        },
+        "102": {
+            "id": "102",
+            "fullName": "Complete Name",
+            "position": {"abbreviation": "G"},
+        },
+    }
+
+    players = parse_event_inactive_roster(roster, ravens, athletes)
+
+    assert [(player.name, player.position) for player in players] == [
+        ("Fantasy Player", "WR"),
+        ("Complete Name", "G"),
+    ]
+    assert players[0].reason == "Hamstring"
+    assert all(player.is_ravens for player in players)
+
+
+def test_fetch_inactives_resolves_core_athletes_and_normalizes_refs(monkeypatch) -> None:
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    browns = TeamRef("Cleveland Browns", "5", "CLE", "cle")
+    game = Game(
+        "401",
+        "Baltimore Ravens at Cleveland Browns",
+        "BAL @ CLE",
+        None,
+        "Pre-Game",
+        home=GameTeam(browns, is_home=True),
+        away=GameTeam(ravens),
+    )
+    client = EspnClient(None)  # type: ignore[arg-type]
+    calls: list[tuple[str, dict[str, str] | None]] = []
+
+    async def schedule(window):
+        return [game]
+
+    async def json(url, params=None):
+        calls.append((url, params))
+        if "/competitors/33/roster" in url:
+            return {
+                "entries": [
+                    {
+                        "playerId": 77,
+                        "displayName": "Raven",
+                        "didNotPlay": True,
+                        "athlete": {"$ref": "http://example.test/athletes/77"},
+                    }
+                ]
+            }
+        if "/competitors/5/roster" in url:
+            return {"entries": []}
+        if url == "https://example.test/athletes/77":
+            return {
+                "id": "77",
+                "fullName": "Raven One",
+                "position": {"abbreviation": "DT"},
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+
+    reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
+
+    assert [(player.name, player.position) for player in reports[0].players] == [
+        ("Raven One", "DT")
+    ]
+    assert ("https://example.test/athletes/77", None) in calls
+    assert all(url != f"{SITE_BASE}/summary" for url, _ in calls)
+
+
+def test_fetch_inactives_falls_back_to_summary_when_core_fails(monkeypatch) -> None:
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    browns = TeamRef("Cleveland Browns", "5", "CLE", "cle")
+    game = Game(
+        "401",
+        "Baltimore Ravens at Cleveland Browns",
+        "BAL @ CLE",
+        None,
+        "Pre-Game",
+        home=GameTeam(browns, is_home=True),
+        away=GameTeam(ravens),
+    )
+    client = EspnClient(None)  # type: ignore[arg-type]
+
+    async def schedule(window):
+        return [game]
+
+    async def json(url, params=None):
+        if url.startswith(f"{CORE_BASE}/events/"):
+            raise EspnApiError("core unavailable")
+        assert url == f"{SITE_BASE}/summary"
+        assert params == {"event": "401"}
+        return {
+            "injuries": [
+                {
+                    "team": {"displayName": "Baltimore Ravens"},
+                    "injuries": [
+                        {
+                            "athlete": {"id": "77", "displayName": "Fallback Raven"},
+                            "details": {
+                                "fantasyStatus": {"description": "INACTIVE"}
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+
+    reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
+
+    assert [player.name for player in reports[0].players] == ["Fallback Raven"]
 
 
 def test_parse_standings_reads_records() -> None:
