@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
@@ -770,6 +771,8 @@ def replace_players(
 def _athlete_id(value: Any) -> str | None:
     data = _as_dict(value)
     raw = data.get("id")
+    if raw is None:
+        raw = data.get("playerId")
     if raw is not None and str(raw).strip():
         return str(raw).strip()
     for item in _as_list(data.get("links")):
@@ -868,6 +871,44 @@ def parse_inactive_report(summary: dict[str, Any], game: Game) -> InactiveReport
             seen.add(key)
             unique.append(player)
     return InactiveReport(game=game, players=tuple(unique))
+
+
+def parse_event_inactive_roster(
+    roster: dict[str, Any],
+    team: TeamRef,
+    athletes: dict[str, dict[str, Any]],
+) -> tuple[InactivePlayer, ...]:
+    """Read every official inactive from one event competitor roster."""
+    players: list[InactivePlayer] = []
+    for raw in _as_list(roster.get("entries")):
+        entry = _as_dict(raw)
+        if entry.get("didNotPlay") is not True:
+            continue
+        athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
+        athlete = athletes.get(athlete_id or "", {})
+        name = _display_name(athlete) or _display_name(entry)
+        if not name:
+            continue
+        reason = next(
+            (
+                _text(_as_dict(injury.get("details")).get("type"))
+                or _display_name(injury.get("reason"))
+                for value in _as_list(athlete.get("injuries"))
+                if (injury := _as_dict(value)) and _is_inactive_item(injury)
+            ),
+            None,
+        )
+        players.append(
+            InactivePlayer(
+                name=name,
+                team=team.name,
+                reason=reason,
+                athlete_id=athlete_id,
+                position=_position_text(athlete.get("position")),
+                is_ravens=team.is_ravens,
+            )
+        )
+    return tuple(players)
 
 
 def _injury_detail(item: dict[str, Any]) -> str | None:
@@ -1390,6 +1431,7 @@ class EspnClient:
         self._injury_cache: AsyncTtlCache[str, InjuryReport] = AsyncTtlCache(
             INJURY_TTL_SECONDS
         )
+        self._inactive_athletes: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def _json(self, url: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -1561,9 +1603,66 @@ class EspnClient:
         games = await self.fetch_schedule(DateWindow(target_date, target_date))
         reports: list[InactiveReport] = []
         for game in games:
-            summary = await self._json(f"{SITE_BASE}/summary", {"event": game.event_id})
-            reports.append(parse_inactive_report(summary, game))
+            try:
+                reports.append(await self._fetch_event_inactives(game))
+            except EspnApiError:
+                summary = await self._json(
+                    f"{SITE_BASE}/summary", {"event": game.event_id}
+                )
+                reports.append(parse_inactive_report(summary, game))
         return reports
+
+    async def _fetch_event_inactives(self, game: Game) -> InactiveReport:
+        sides = tuple(side for side in game.teams if side.team.team_id)
+        if len(sides) != 2:
+            raise EspnApiError("ESPN event is missing a competitor")
+
+        async def fetch_roster(side: GameTeam) -> dict[str, Any]:
+            event_id = game.event_id
+            team_id = side.team.team_id
+            return await self._json(
+                f"{CORE_BASE}/events/{event_id}/competitions/{event_id}"
+                f"/competitors/{team_id}/roster",
+                {"lang": "en", "region": "us"},
+            )
+
+        rosters = await asyncio.gather(*(fetch_roster(side) for side in sides))
+        athlete_refs: dict[str, str] = {}
+        for roster in rosters:
+            for raw in _as_list(roster.get("entries")):
+                entry = _as_dict(raw)
+                if entry.get("didNotPlay") is not True:
+                    continue
+                athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
+                athlete_ref = _text(_as_dict(entry.get("athlete")).get("$ref"))
+                if athlete_id and athlete_ref:
+                    athlete_refs[athlete_id] = athlete_ref.replace("http://", "https://", 1)
+
+        async def fetch_athlete(athlete_id: str, ref: str) -> None:
+            key = (game.event_id, athlete_id)
+            if key in self._inactive_athletes:
+                return
+            try:
+                self._inactive_athletes[key] = await self._json(ref)
+            except EspnApiError:
+                # The event roster still proves the player was inactive. Keep the
+                # surname ESPN embeds there rather than dropping the player.
+                pass
+
+        await asyncio.gather(
+            *(fetch_athlete(athlete_id, ref) for athlete_id, ref in athlete_refs.items())
+        )
+        athletes = {
+            athlete_id: self._inactive_athletes[(game.event_id, athlete_id)]
+            for athlete_id in athlete_refs
+            if (game.event_id, athlete_id) in self._inactive_athletes
+        }
+        players = tuple(
+            player
+            for side, roster in zip(sides, rosters, strict=True)
+            for player in parse_event_inactive_roster(roster, side.team, athletes)
+        )
+        return InactiveReport(game=game, players=players)
 
     async def fetch_game_summary(self, event_id: str) -> dict[str, Any]:
         async def load() -> dict[str, Any]:
