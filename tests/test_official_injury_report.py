@@ -15,11 +15,13 @@ from ravens_bot.injury_report import (
     OfficialReportGate,
     _contrasting_text_color,
     _display_header,
+    _draw_headshot,
     _font,
     add_matchup,
     parse_injury_report,
     MAX_IMAGE_WIDTH,
     MIN_IMAGE_WIDTH,
+    OUTPUT_SCALE,
     render_injury_report,
 )
 from ravens_bot.models import Game, GameTeam, TeamRef
@@ -170,13 +172,26 @@ def test_render_injury_report_produces_a_shareable_png() -> None:
     assert image.format == "PNG"
     # The chart is read on a phone, so it is only as wide as its columns need
     # and never wider than a page a phone can show without shrinking the type.
-    assert MIN_IMAGE_WIDTH <= image.width <= MAX_IMAGE_WIDTH
-    assert image.height > 300
+    assert MIN_IMAGE_WIDTH * OUTPUT_SCALE <= image.width <= MAX_IMAGE_WIDTH * OUTPUT_SCALE
+    assert image.height > 300 * OUTPUT_SCALE
 
 
 def test_report_uses_bundled_d_din_fonts() -> None:
     assert _font(24).path.name == "D-DIN.ttf"
     assert _font(24, bold=True).path.name == "D-DIN-Bold.ttf"
+
+
+def test_headshot_preserves_transparent_background() -> None:
+    source = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    source.putpixel((10, 10), (0, 0, 255, 255))
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+    canvas = Image.new("RGB", (20, 20), (255, 0, 0))
+
+    _draw_headshot(canvas, encoded.getvalue(), 0, 0, 20)
+
+    assert canvas.getpixel((0, 0)) == (255, 0, 0)
+    assert canvas.getpixel((10, 10))[2] > canvas.getpixel((10, 10))[0]
 
 
 def test_report_display_abbreviates_position_without_changing_data() -> None:
@@ -225,8 +240,8 @@ def test_render_injury_report_fits_columns_to_their_contents() -> None:
     )))
 
     # Longer entries need more room, but never more than a phone can show.
-    assert narrow.width < wide.width <= MAX_IMAGE_WIDTH
-    assert narrow.width >= MIN_IMAGE_WIDTH
+    assert narrow.width < wide.width <= MAX_IMAGE_WIDTH * OUTPUT_SCALE
+    assert narrow.width >= MIN_IMAGE_WIDTH * OUTPUT_SCALE
 
 
 class _Destination:
