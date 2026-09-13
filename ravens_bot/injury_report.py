@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from dataclasses import replace
 from html.parser import HTMLParser
 from math import ceil
+from pathlib import Path
 from typing import Callable, Mapping
 from urllib.parse import urljoin
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, UnidentifiedImageError
 
 from .models import Game, RAVENS_NAME, TeamRef
 
@@ -30,12 +31,13 @@ MIN_COLUMN_WIDTH = 76
 ROW_HEIGHT = 60
 HEADSHOT_SIZE = 44
 HEADSHOT_GAP = 10
-PAGE_BACKGROUND = "#f4f4f4"
+PAGE_BACKGROUND = "#08050f"
 RAVENS_PURPLE = "#24125f"
 HEADER_BACKGROUND = "#111111"
-ROW_BACKGROUND = "#ffffff"
-ALT_ROW_BACKGROUND = "#ececec"
-TEXT_COLOR = "#111111"
+ROW_GLASS_ALPHA = 38
+ALT_ROW_GLASS_ALPHA = 54
+TEXT_COLOR = "#f8f6ff"
+GRID_COLOR = "#756d85"
 REPORT_SETTLE_SECONDS = 300
 LOGGER = logging.getLogger(__name__)
 NFL_PRIMARY_COLORS = {
@@ -72,6 +74,11 @@ NFL_PRIMARY_COLORS = {
     "TEN": "#0c2340",
     "WSH": "#5a1414",
 }
+DISPLAY_HEADERS = {
+    "POSITION": "Pos",
+}
+FONT_DIRECTORY = Path(__file__).with_name("fonts")
+GLASS_SUPERSAMPLE = 4
 
 
 class InjuryReportError(RuntimeError):
@@ -438,12 +445,35 @@ def _table_logo_url(
     return table.logo_url
 
 
+def _table_color(report: OfficialInjuryReport, table: InjuryTable) -> str:
+    if table.team == RAVENS_NAME:
+        return RAVENS_PURPLE
+    matchup = report.matchup
+    if matchup is None:
+        return HEADER_BACKGROUND
+    if table.team == matchup.away_team:
+        return matchup.away_color
+    if table.team == matchup.home_team:
+        return matchup.home_color
+    return HEADER_BACKGROUND
+
+
+def _contrasting_text_color(background: str) -> str:
+    red, green, blue = bytes.fromhex(background.lstrip("#"))
+
+    def linear(channel: int) -> float:
+        value = channel / 255
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    luminance = (
+        0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+    )
+    return "#111111" if luminance > 0.179 else "#ffffff"
+
+
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-    try:
-        return ImageFont.truetype(name, size)
-    except OSError:
-        return ImageFont.load_default(size=size)
+    name = "D-DIN-Bold.ttf" if bold else "D-DIN.ttf"
+    return ImageFont.truetype(FONT_DIRECTORY / name, size)
 
 
 def render_injury_report(
@@ -458,12 +488,10 @@ def render_injury_report(
     a letter — across half the image and left the type small to fit.
     """
     headshots = headshots or {}
-    title_font = _font(38, bold=True)
     team_font = _font(30, bold=True)
     header_font = _font(24, bold=True)
     cell_font = _font(24)
     margin = MARGIN
-    title_height = 96
     team_height = 60
     row_height = ROW_HEIGHT
     table_gap = 26
@@ -474,48 +502,64 @@ def render_injury_report(
     )
     width = margin * 2 + sum(column_widths) if column_widths else MIN_IMAGE_WIDTH
     width = max(width, MIN_IMAGE_WIDTH)
-    height = title_height + margin
+    height = margin
     for table in report.tables:
         height += team_height + row_height * (len(table.rows) + 1) + table_gap
 
-    image = Image.new("RGB", (width, height), PAGE_BACKGROUND)
-    draw = ImageDraw.Draw(image)
     left_color = report.matchup.away_color if report.matchup else RAVENS_PURPLE
     right_color = report.matchup.home_color if report.matchup else RAVENS_PURPLE
-    _draw_gradient(draw, width, title_height, left_color, right_color)
-    draw.text(
-        (margin, 23),
-        report.title,
-        fill="white",
-        font=title_font,
-    )
+    image = Image.new("RGB", (width, height), PAGE_BACKGROUND)
+    _draw_page_background(image, left_color, right_color)
+    draw = ImageDraw.Draw(image)
 
-    y = title_height + 24
+    y = margin
     for table in report.tables:
-        team_color = (
-            RAVENS_PURPLE
-            if table.team == RAVENS_NAME
-            else report.matchup.opponent_color
-            if report.matchup and table.team == report.matchup.opponent
-            else HEADER_BACKGROUND
+        team_color = _table_color(report, table)
+        header_text_color = _contrasting_text_color(team_color)
+        team_text_color = (
+            team_color
+            if header_text_color == "#111111"
+            else _rgb_hex(_blend_color(team_color, "#ffffff", 0.48))
+        )
+        table_width = sum(column_widths)
+        _draw_liquid_glass_panel(
+            image,
+            (
+                margin - 8,
+                y - 6,
+                margin + table_width + 8,
+                y + team_height + row_height * (len(table.rows) + 1) + 8,
+            ),
+            team_color,
         )
         team_text_x = margin
         logo_url = _table_logo_url(report, table)
         if logo_url and logo_url in headshots:
             _draw_logo(image, headshots[logo_url], margin, y + 5)
             team_text_x += 54
-        draw.text((team_text_x, y + 10), table.team, fill=team_color, font=team_font)
+        draw.text(
+            (team_text_x, y + 10),
+            table.team,
+            fill=team_text_color,
+            font=team_font,
+        )
         y += team_height
         x = margin
+        _draw_glass_bar(
+            image,
+            (margin, y, margin + sum(column_widths), y + row_height),
+            team_color,
+        )
         for heading, column_width in zip(table.headers, column_widths):
-            draw.rectangle(
-                (x, y, x + column_width, y + row_height),
-                fill=HEADER_BACKGROUND,
+            heading = _display_header(heading)
+            draw.line(
+                (x + column_width, y + 1, x + column_width, y + row_height - 1),
+                fill=_blend_color(team_color, "#ffffff", 0.28),
             )
             draw.text(
                 (x + CELL_PADDING, _text_top(draw, y, row_height, header_font)),
                 _fit_text(draw, heading, header_font, column_width - CELL_PADDING * 2),
-                fill="white",
+                fill=header_text_color,
                 font=header_font,
             )
             x += column_width
@@ -523,12 +567,18 @@ def render_injury_report(
 
         for index, row in enumerate(table.rows):
             x = margin
-            background = ROW_BACKGROUND if index % 2 == 0 else ALT_ROW_BACKGROUND
+            glass_alpha = (
+                ROW_GLASS_ALPHA if index % 2 == 0 else ALT_ROW_GLASS_ALPHA
+            )
             for column, (cell, column_width) in enumerate(zip(row, column_widths)):
+                _draw_glass_cell(
+                    image,
+                    (x, y, x + column_width, y + row_height),
+                    glass_alpha,
+                )
                 draw.rectangle(
                     (x, y, x + column_width, y + row_height),
-                    fill=background,
-                    outline="#d0d0d0",
+                    outline=GRID_COLOR,
                 )
                 text_x = x + CELL_PADDING
                 if column == 0 and _row_headshot(table, index, headshots) is not None:
@@ -574,6 +624,247 @@ def _draw_gradient(
         draw.line((x, 0, x, height), fill=color)
 
 
+def _draw_page_background(
+    canvas: Image.Image,
+    left_color: str,
+    right_color: str,
+) -> None:
+    width, height = canvas.size
+    dark_left = _rgb_hex(_blend_color(left_color, "#000000", 0.76))
+    dark_right = _rgb_hex(_blend_color(right_color, "#000000", 0.58))
+    _draw_gradient(ImageDraw.Draw(canvas), width, height, dark_left, dark_right)
+
+    glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    left_rgb = tuple(bytes.fromhex(left_color.lstrip("#")))
+    right_rgb = tuple(bytes.fromhex(right_color.lstrip("#")))
+    glow_draw.ellipse(
+        (-round(width * 0.35), round(height * 0.08), round(width * 0.55), height),
+        fill=(*left_rgb, 68),
+    )
+    glow_draw.ellipse(
+        (round(width * 0.52), -round(height * 0.05), round(width * 1.25), height),
+        fill=(*right_rgb, 86),
+    )
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=max(36, width // 12)))
+    canvas.paste(glow, (0, 0), glow)
+
+    light = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    light_draw = ImageDraw.Draw(light)
+    light_draw.ellipse(
+        (
+            -round(width * 0.45),
+            -round(height * 0.55),
+            round(width * 0.70),
+            round(height * 0.62),
+        ),
+        fill=(255, 255, 255, 54),
+    )
+    light = light.filter(ImageFilter.GaussianBlur(radius=max(42, width // 10)))
+    canvas.paste(light, (0, 0), light)
+
+
+def _draw_glass_bar(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+    color: str,
+) -> None:
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    glass = Image.new("RGBA", (width, height))
+    glass_draw = ImageDraw.Draw(glass)
+    for y in range(height):
+        ratio = y / max(height - 1, 1)
+        shade = _blend_color(color, "#ffffff", 0.13 * (1 - ratio))
+        shade = _blend_color(_rgb_hex(shade), "#000000", 0.18 * ratio)
+        glass_draw.line((0, y, width, y), fill=(*shade, 218))
+    _draw_specular_highlights(glass, (0, 0, width, height))
+    canvas.paste(glass, (left, top), glass)
+
+
+def _draw_liquid_glass_panel(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+    tint: str,
+) -> None:
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    radius = 18
+    scale = GLASS_SUPERSAMPLE
+
+    shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle(
+        (left + 3, top + 7, right + 3, bottom + 7),
+        radius=radius,
+        fill=(0, 0, 0, 115),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(12))
+    canvas.paste(shadow, (0, 0), shadow)
+
+    high_resolution_size = (width * scale, height * scale)
+    mask = Image.new("L", high_resolution_size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, width * scale - 1, height * scale - 1),
+        radius=radius * scale,
+        fill=255,
+    )
+    mask = mask.resize((width, height), Image.Resampling.LANCZOS)
+    refracted = canvas.crop((left + 4, top + 4, right - 4, bottom - 4))
+    frosted = refracted.resize((width, height), Image.Resampling.LANCZOS).filter(
+        ImageFilter.GaussianBlur(8)
+    )
+    canvas.paste(frosted, (left, top), mask)
+
+    surface = Image.new("RGBA", high_resolution_size, (0, 0, 0, 0))
+    surface_draw = ImageDraw.Draw(surface)
+    tint_rgb = tuple(bytes.fromhex(tint.lstrip("#")))
+    surface_draw.rounded_rectangle(
+        (0, 0, width * scale - 1, height * scale - 1),
+        radius=radius * scale,
+        fill=(*tint_rgb, 26),
+        outline=(255, 255, 255, 88),
+        width=2 * scale,
+    )
+    surface_draw.rounded_rectangle(
+        (3 * scale, 3 * scale, (width - 4) * scale, (height - 4) * scale),
+        radius=(radius - 3) * scale,
+        outline=(255, 255, 255, 28),
+        width=scale,
+    )
+
+    bloom = Image.new("RGBA", high_resolution_size, (0, 0, 0, 0))
+    bloom_draw = ImageDraw.Draw(bloom)
+    bloom_draw.line(
+        (radius * scale, scale, (width - radius) * scale, scale),
+        fill=(255, 255, 255, 105),
+        width=4 * scale,
+    )
+    bloom_draw.arc(
+        (scale, scale, radius * 2 * scale, radius * 2 * scale),
+        180,
+        270,
+        fill=(255, 255, 255, 105),
+        width=4 * scale,
+    )
+    bloom_draw.line(
+        (scale, radius * scale, scale, (height - radius) * scale),
+        fill=(255, 255, 255, 70),
+        width=3 * scale,
+    )
+    bloom = bloom.filter(ImageFilter.GaussianBlur(2.5 * scale))
+    surface = Image.alpha_composite(surface, bloom)
+    surface_draw = ImageDraw.Draw(surface)
+
+    surface_draw.line(
+        (radius * scale, scale, (width - radius) * scale, scale),
+        fill=(255, 255, 255, 180),
+        width=scale,
+    )
+    surface_draw.arc(
+        (scale, scale, radius * 2 * scale, radius * 2 * scale),
+        180,
+        270,
+        fill=(255, 255, 255, 180),
+        width=scale,
+    )
+    surface_draw.line(
+        (scale, radius * scale, scale, (height - radius) * scale),
+        fill=(255, 255, 255, 112),
+        width=scale,
+    )
+    surface_draw.line(
+        (
+            radius * scale,
+            (height - 2) * scale,
+            (width - radius) * scale,
+            (height - 2) * scale,
+        ),
+        fill=(0, 0, 0, 110),
+        width=2 * scale,
+    )
+    surface_draw.arc(
+        (
+            (width - radius * 2) * scale,
+            (height - radius * 2) * scale,
+            (width - 2) * scale,
+            (height - 2) * scale,
+        ),
+        0,
+        90,
+        fill=(0, 0, 0, 110),
+        width=2 * scale,
+    )
+    surface_draw.line(
+        (
+            (width - 2) * scale,
+            radius * scale,
+            (width - 2) * scale,
+            (height - radius) * scale,
+        ),
+        fill=(0, 0, 0, 82),
+        width=2 * scale,
+    )
+    surface = surface.resize((width, height), Image.Resampling.LANCZOS)
+    canvas.paste(surface, (left, top), surface)
+
+
+def _draw_glass_cell(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+    alpha: int,
+) -> None:
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    glass = Image.new("RGBA", (width, height), (255, 255, 255, alpha))
+    glass_draw = ImageDraw.Draw(glass)
+    glass_draw.line((0, 0, width, 0), fill=(255, 255, 255, 52), width=1)
+    glass_draw.line(
+        (0, height - 1, width, height - 1),
+        fill=(0, 0, 0, 72),
+        width=1,
+    )
+    canvas.paste(glass, (left, top), glass)
+
+
+def _draw_specular_highlights(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+) -> None:
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    shine = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shine_draw = ImageDraw.Draw(shine)
+    for y in range(max(1, height // 2)):
+        alpha = round(24 * (1 - y / max(height // 2, 1)))
+        shine_draw.line((0, y, width, y), fill=(255, 255, 255, alpha))
+    shine_draw.line((0, 0, width, 0), fill=(255, 255, 255, 105), width=2)
+    shine_draw.line(
+        (0, height - 1, width, height - 1),
+        fill=(0, 0, 0, 95),
+        width=2,
+    )
+    canvas.paste(shine, (left, top), shine)
+
+
+def _blend_color(
+    color: str,
+    target: str,
+    ratio: float,
+) -> tuple[int, int, int]:
+    start = tuple(bytes.fromhex(color.lstrip("#")))
+    end = tuple(bytes.fromhex(target.lstrip("#")))
+    return tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
+
+
+def _rgb_hex(color: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*color)
+
+
 def _draw_headshot(
     canvas: Image.Image, data: bytes, x: int, y: int
 ) -> None:
@@ -614,6 +905,10 @@ def _row_headshot(
     return url if url and url in headshots else None
 
 
+def _display_header(heading: str) -> str:
+    return DISPLAY_HEADERS.get(heading.strip().upper(), heading)
+
+
 def _column_widths(
     draw: ImageDraw.ImageDraw,
     tables: tuple[InjuryTable, ...],
@@ -633,6 +928,7 @@ def _column_widths(
     widths = [0] * columns
     for table in tables:
         for column, heading in enumerate(table.headers[:columns]):
+            heading = _display_header(heading)
             widths[column] = max(
                 widths[column], ceil(draw.textlength(heading, font=header_font))
             )

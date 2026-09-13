@@ -13,6 +13,9 @@ from ravens_bot.injury_report import (
     InjuryTable,
     OfficialInjuryReport,
     OfficialReportGate,
+    _contrasting_text_color,
+    _display_header,
+    _font,
     add_matchup,
     parse_injury_report,
     MAX_IMAGE_WIDTH,
@@ -169,6 +172,25 @@ def test_render_injury_report_produces_a_shareable_png() -> None:
     # and never wider than a page a phone can show without shrinking the type.
     assert MIN_IMAGE_WIDTH <= image.width <= MAX_IMAGE_WIDTH
     assert image.height > 300
+
+
+def test_report_uses_bundled_d_din_fonts() -> None:
+    assert _font(24).path.name == "D-DIN.ttf"
+    assert _font(24, bold=True).path.name == "D-DIN-Bold.ttf"
+
+
+def test_report_display_abbreviates_position_without_changing_data() -> None:
+    report = parse_injury_report(PAGE)
+    table = report.tables[0]
+
+    assert _display_header("Position") == "Pos"
+    assert table.headers[1] == "Position"
+    assert table.rows[0][-1] == "QUESTIONABLE"
+
+
+def test_report_header_text_contrasts_with_team_color() -> None:
+    assert _contrasting_text_color("#24125f") == "#ffffff"
+    assert _contrasting_text_color("#d3bc8d") == "#111111"
 
 
 def test_render_injury_report_fits_columns_to_their_contents() -> None:
