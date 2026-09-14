@@ -30,6 +30,7 @@ from .embeds import (
     fourth_down_embed,
     help_embed,
     inactive_embeds,
+    injury_embeds,
     live_game_embed,
     next_game_embed,
     no_field_goal_embed,
@@ -77,6 +78,7 @@ from .injury_report import (
     OfficialReportGate,
     OfficialInjuryReport,
     add_matchup,
+    is_scheduled_report_date,
     render_injury_report,
 )
 from .models import (
@@ -205,21 +207,27 @@ class RavensBot(commands.Bot):
         targets = await self._announcement_targets()
         if not targets:
             return
+        target_date = today_in_zone(self.config.time_zone)
+        scheduled_report_date = False
         try:
             official_report = await _require_injury_reports(self).fetch()
         except InjuryReportError as exc:
             LOGGER.warning("Official injury report polling skipped: %s", exc)
         else:
-            if self.official_injury_gate.ready(official_report):
-                official_report, image = await self._prepare_official_injury_report(
-                    official_report
-                )
+            official_report = await self._add_official_injury_matchup(official_report)
+            scheduled_report_date = is_scheduled_report_date(
+                official_report, target_date, self.config.time_zone
+            )
+            if (
+                scheduled_report_date
+                and self.official_injury_gate.ready(official_report)
+            ):
+                image = await self._render_official_injury_report(official_report)
                 await self._post_official_injury_report(
-                    targets, official_report, image
+                    targets, official_report, target_date, image
                 )
 
         client = _require_espn(self)
-        target_date = today_in_zone(self.config.time_zone)
         try:
             transactions = await client.fetch_transactions(target_date)
             injuries = await client.fetch_injuries()
@@ -234,37 +242,54 @@ class RavensBot(commands.Bot):
             LOGGER.warning("Practice-squad elevation polling skipped: %s", exc)
         else:
             transactions = merge_standard_elevations(transactions, elevations)
-        await self._post_new_roster_news(targets, transactions, injuries, target_date)
+        await self._post_new_roster_news(
+            targets,
+            transactions,
+            injuries,
+            target_date,
+            scheduled_report_date=scheduled_report_date,
+        )
 
     async def _post_official_injury_report(
         self,
         targets: list[_AnnouncementTarget],
         report: OfficialInjuryReport,
+        report_date: date,
         image: bytes | None = None,
     ) -> None:
         image = image or render_injury_report(report)
         for target in targets:
-            slot = channel_key("official-injury", target.key_id)
-            if not self.announcement_state.is_current(slot, report.announcement_key):
+            slot = _official_injury_slot(report_date, target.key_id)
+            if not self.announcement_state.is_current(slot, "posted"):
                 await self._announce_image(
                     target,
                     slot,
-                    report.announcement_key,
+                    "posted",
                     official_injury_embed(report),
                     image,
                 )
 
-    async def _prepare_official_injury_report(
+    async def _add_official_injury_matchup(
         self, report: OfficialInjuryReport
-    ) -> tuple[OfficialInjuryReport, bytes]:
+    ) -> OfficialInjuryReport:
         try:
             games = await _require_espn(self).fetch_season_schedule()
         except EspnApiError as exc:
             LOGGER.warning("Injury report matchup could not be resolved: %s", exc)
-        else:
-            report = add_matchup(report, games)
+            return report
+        return add_matchup(report, games)
+
+    async def _render_official_injury_report(
+        self, report: OfficialInjuryReport
+    ) -> bytes:
         artwork = await _require_injury_reports(self).fetch_artwork(report)
-        return report, render_injury_report(report, artwork)
+        return render_injury_report(report, artwork)
+
+    async def _prepare_official_injury_report(
+        self, report: OfficialInjuryReport
+    ) -> tuple[OfficialInjuryReport, bytes]:
+        report = await self._add_official_injury_matchup(report)
+        return report, await self._render_official_injury_report(report)
 
     async def _post_new_roster_news(
         self,
@@ -272,31 +297,83 @@ class RavensBot(commands.Bot):
         transactions: list[Transaction],
         report: InjuryReport,
         target_date: date,
+        scheduled_report_date: bool = False,
     ) -> None:
-        """Post today's moves, carrying matching injury context in the same post.
+        """Post roster moves and individual injury news without chart repeats.
 
         A move and the injury report entry it produces are the same news, so a
-        player activated off injured reserve gets one informative post. Other
-        injury changes are covered only by the official chart after it settles.
+        player activated off injured reserve gets one informative post. On a
+        scheduled report day, the chart establishes the injury baseline; later
+        changes are posted one player at a time.
         """
         for target in targets:
-            moves, _ = combine_roster_news(
+            had_injury_history = self.announcement_state.has_target_keys(
+                INJURY_KEY_PREFIX, target.key_id
+            )
+            unseen_updates = [
+                update
+                for update in report.updates
+                if self._unseen(target, injury_announcement_key(update))
+            ]
+            moves, standalone = combine_roster_news(
                 [
                     transaction
                     for transaction in transactions
                     if self._unseen(target, transaction_announcement_key(transaction))
                 ],
-                report.updates,
+                unseen_updates,
             )
             for news in moves:
                 embeds, carried = roster_news_post(news, target_date)
+                transaction_key = transaction_announcement_key(news.transaction)
                 await self._announce(
                     target,
                     [
-                        transaction_announcement_key(news.transaction),
+                        transaction_key,
                         *(injury_announcement_key(update) for update in carried),
                     ],
                     embeds,
+                )
+                if not self._unseen(target, transaction_key):
+                    for update in news.injuries:
+                        self.announcement_state.mark(
+                            channel_key(
+                                injury_announcement_key(update),
+                                target.key_id,
+                            )
+                        )
+            remaining = [
+                update
+                for update in standalone
+                if self._unseen(target, injury_announcement_key(update))
+            ]
+            chart_is_current = self.announcement_state.is_current(
+                _official_injury_slot(target_date, target.key_id), "posted"
+            )
+            baseline_slot = _injury_baseline_slot(target_date, target.key_id)
+            needs_chart_baseline = (
+                scheduled_report_date
+                and chart_is_current
+                and not self.announcement_state.is_current(baseline_slot, "applied")
+            )
+            if not had_injury_history or needs_chart_baseline:
+                for update in remaining:
+                    self.announcement_state.mark(
+                        channel_key(
+                            injury_announcement_key(update),
+                            target.key_id,
+                        )
+                    )
+                if needs_chart_baseline:
+                    self.announcement_state.mark_current(baseline_slot, "applied")
+                continue
+            if scheduled_report_date and not chart_is_current:
+                continue
+            for update in remaining:
+                await self._announce(
+                    target,
+                    [injury_announcement_key(update)],
+                    injury_embeds(InjuryReport((update,))),
                 )
 
     async def _post_new_inactives(
@@ -939,6 +1016,14 @@ def transaction_announcement_key(transaction: Transaction) -> str:
 
 def injury_announcement_key(update: InjuryUpdate) -> str:
     return f"{INJURY_KEY_PREFIX}{update.announcement_id}"
+
+
+def _official_injury_slot(report_date: date, target: int | str) -> str:
+    return channel_key(f"official-injury:{report_date.isoformat()}", target)
+
+
+def _injury_baseline_slot(report_date: date, target: int | str) -> str:
+    return channel_key(f"injury-baseline:{report_date.isoformat()}", target)
 
 
 def watching_inactives(games: Sequence[Game], moment: datetime) -> bool:

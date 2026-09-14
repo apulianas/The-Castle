@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import discord
@@ -18,6 +19,7 @@ from ravens_bot.injury_report import (
     _draw_headshot,
     _font,
     add_matchup,
+    is_scheduled_report_date,
     parse_injury_report,
     MAX_IMAGE_WIDTH,
     MIN_IMAGE_WIDTH,
@@ -155,6 +157,86 @@ def test_add_matchup_uses_schedule_order_and_team_colors() -> None:
     assert resolved.matchup.home_team == "Baltimore Ravens"
 
 
+def test_report_date_follows_the_latest_column_for_a_sunday_game() -> None:
+    report = add_matchup(
+        parse_injury_report(PAGE),
+        [
+            Game(
+                "1",
+                "Baltimore Ravens at Cleveland Browns",
+                "BAL @ CLE",
+                datetime(2025, 9, 14, 17, 0, tzinfo=timezone.utc),
+                "Scheduled",
+                away=GameTeam(TeamRef("Baltimore Ravens", "33", "BAL")),
+                home=GameTeam(TeamRef("Cleveland Browns", "5", "CLE"), is_home=True),
+                season_type=2,
+                week_number=2,
+            )
+        ],
+    )
+
+    assert is_scheduled_report_date(
+        report, date(2025, 9, 12), ZoneInfo("America/New_York")
+    )
+    assert not is_scheduled_report_date(
+        report, date(2025, 9, 13), ZoneInfo("America/New_York")
+    )
+
+
+def test_report_date_shifts_with_a_monday_game() -> None:
+    report = add_matchup(
+        parse_injury_report(
+            PAGE.replace("<th>Fri</th>", "<th>Sat</th>")
+            .replace("<th>Thu</th>", "<th>Fri</th>")
+            .replace("<th>Wed</th>", "<th>Thu</th>")
+        ),
+        [
+            Game(
+                "1",
+                "Baltimore Ravens at Cleveland Browns",
+                "BAL @ CLE",
+                datetime(2025, 9, 16, 0, 15, tzinfo=timezone.utc),
+                "Scheduled",
+                away=GameTeam(TeamRef("Baltimore Ravens", "33", "BAL")),
+                home=GameTeam(TeamRef("Cleveland Browns", "5", "CLE"), is_home=True),
+                season_type=2,
+                week_number=2,
+            )
+        ],
+    )
+
+    assert is_scheduled_report_date(
+        report, date(2025, 9, 13), ZoneInfo("America/New_York")
+    )
+
+
+def test_report_date_shifts_with_a_thursday_game() -> None:
+    report = add_matchup(
+        parse_injury_report(
+            PAGE.replace("<th>Wed</th>", "<th>Mon</th>")
+            .replace("<th>Thu</th>", "<th>Tue</th>")
+            .replace("<th>Fri</th>", "<th>Wed</th>")
+        ),
+        [
+            Game(
+                "1",
+                "Baltimore Ravens at Cleveland Browns",
+                "BAL @ CLE",
+                datetime(2025, 9, 19, 0, 15, tzinfo=timezone.utc),
+                "Scheduled",
+                away=GameTeam(TeamRef("Baltimore Ravens", "33", "BAL")),
+                home=GameTeam(TeamRef("Cleveland Browns", "5", "CLE"), is_home=True),
+                season_type=2,
+                week_number=2,
+            )
+        ],
+    )
+
+    assert is_scheduled_report_date(
+        report, date(2025, 9, 17), ZoneInfo("America/New_York")
+    )
+
+
 def test_report_key_changes_when_any_cell_or_week_changes() -> None:
     original = parse_injury_report(PAGE)
     changed_cell = parse_injury_report(PAGE.replace("QUESTIONABLE", "OUT"))
@@ -252,7 +334,7 @@ class _Destination:
         self.posts.append((embed, file))
 
 
-def test_automatic_report_posts_once_per_chart_version(tmp_path) -> None:
+def test_automatic_report_posts_once_per_report_date(tmp_path) -> None:
     report = parse_injury_report(PAGE)
     correction = parse_injury_report(PAGE.replace("QUESTIONABLE", "OUT"))
     destination = _Destination()
@@ -268,13 +350,17 @@ def test_automatic_report_posts_once_per_chart_version(tmp_path) -> None:
         )
     )
 
-    asyncio.run(bot._post_official_injury_report([target], report))
-    asyncio.run(bot._post_official_injury_report([target], report))
-    asyncio.run(bot._post_official_injury_report([target], correction))
-    asyncio.run(bot._post_official_injury_report([target], report))
+    first_date = date(2025, 9, 10)
+    asyncio.run(bot._post_official_injury_report([target], report, first_date))
+    asyncio.run(bot._post_official_injury_report([target], report, first_date))
+    asyncio.run(bot._post_official_injury_report([target], correction, first_date))
+    asyncio.run(
+        bot._post_official_injury_report(
+            [target], correction, first_date + timedelta(days=1)
+        )
+    )
 
-    # A correction that restores a previously seen chart is still an update.
-    assert len(destination.posts) == 3
+    assert len(destination.posts) == 2
     embed, file = destination.posts[0]
     assert embed.title == "Ravens Injury Report | Week 2"
     assert embed.url == (
