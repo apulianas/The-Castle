@@ -6,6 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 from typing import Callable, Mapping
 from urllib.parse import urljoin
@@ -77,6 +78,7 @@ class InjuryMatchup:
     home_logo: str | None
     opponent: str
     opponent_color: str
+    kickoff: datetime | None
 
 
 @dataclass(frozen=True)
@@ -104,6 +106,12 @@ class OfficialInjuryReport:
         """Both clubs have published the same latest practice-day column."""
         days = tuple(_latest_practice_day(table) for table in self.tables)
         return len(days) == 2 and days[0] is not None and days[0] == days[1]
+
+    @property
+    def latest_practice_day(self) -> str | None:
+        if not self.teams_are_synchronized:
+            return None
+        return _latest_practice_day(self.tables[0])
 
     @property
     def announcement_key(self) -> str:
@@ -355,8 +363,40 @@ def add_matchup(
             home_logo=game.home.team.logo_url,
             opponent=opponent.team.name,
             opponent_color=_team_color(opponent.team),
+            kickoff=game.start_time,
         ),
     )
+
+
+def is_scheduled_report_date(
+    report: OfficialInjuryReport,
+    target_date: date,
+    time_zone: ZoneInfo,
+) -> bool:
+    """Whether the report's newest practice column belongs to this date.
+
+    Matching the column's weekday back from kickoff follows ESPN's shifted
+    Mon/Tue/Wed and Thu/Fri/Sat report schedules without hard-coding game days.
+    """
+    weekdays = {
+        name.casefold(): index
+        for index, name in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+    }
+    matchup = report.matchup
+    if matchup is None or matchup.kickoff is None:
+        return False
+    kickoff = matchup.kickoff
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.replace(tzinfo=time_zone)
+    kickoff_date = kickoff.astimezone(time_zone).date()
+    for table in report.tables:
+        day = (_latest_practice_day(table) or "").strip()[:3].casefold()
+        if day not in weekdays:
+            continue
+        days_before = (kickoff_date.weekday() - weekdays[day]) % 7
+        if kickoff_date - timedelta(days=days_before) == target_date:
+            return True
+    return False
 
 
 def _week_number(week: str) -> int | None:

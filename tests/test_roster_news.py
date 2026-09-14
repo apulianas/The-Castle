@@ -526,7 +526,7 @@ def test_polling_again_repeats_neither_half_of_a_combined_post(tmp_path) -> None
     assert len(posts) == 1
 
 
-def test_an_injury_update_without_a_new_move_waits_for_the_official_chart(
+def test_an_injury_update_without_a_new_move_posts_for_one_player(
     tmp_path,
 ) -> None:
     target = build_target()
@@ -540,7 +540,66 @@ def test_an_injury_update_without_a_new_move_waits_for_the_official_chart(
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert posts == []
+    assert titles(posts) == ["TE Isaiah Likely — Active"]
+
+
+def test_a_scheduled_report_day_suppresses_updates_until_the_chart_posts(
+    tmp_path,
+) -> None:
+    target = build_target()
+    bot = build_bot(tmp_path, target, seen_injuries=True)
+    update = build_update(LIKELY)
+
+    asyncio.run(
+        bot._post_new_roster_news(
+            [target],
+            [],
+            InjuryReport((update,)),
+            TARGET_DATE,
+            scheduled_report_date=True,
+        )
+    )
+
+    assert target.destination.posts == []
+    assert bot._unseen(target, injury_announcement_key(update))
+
+
+def test_a_chart_establishes_the_baseline_then_later_updates_post_individually(
+    tmp_path,
+) -> None:
+    target = build_target()
+    bot = build_bot(tmp_path, target, seen_injuries=True)
+    baseline = build_update(LIKELY)
+    bot.announcement_state.mark_current(
+        f"official-injury:{TARGET_DATE.isoformat()}@{target.key_id}", "posted"
+    )
+
+    asyncio.run(
+        bot._post_new_roster_news(
+            [target],
+            [],
+            InjuryReport((baseline,)),
+            TARGET_DATE,
+            scheduled_report_date=True,
+        )
+    )
+    changed = InjuryUpdate(
+        player=LIKELY,
+        status="Out",
+        detail="Knee",
+        updated=datetime(2025, 11, 4, 19, 0, tzinfo=timezone.utc),
+    )
+    asyncio.run(
+        bot._post_new_roster_news(
+            [target],
+            [],
+            InjuryReport((changed,)),
+            TARGET_DATE,
+            scheduled_report_date=True,
+        )
+    )
+
+    assert titles(target.destination.posts) == ["TE Isaiah Likely — Out"]
 
 
 def test_a_first_run_posts_only_the_move_with_its_injury_context(
