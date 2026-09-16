@@ -1,24 +1,12 @@
-"""Snap counts for Ravens games.
-
-Snap counts originate in the NFL's GSIS game book, whose player participation
-page is published per game at
-``https://nflgsis.com/{season}/{Reg|Post}/{week:02d}/{gamekey}/Gamebook.pdf``.
-That file is a PDF keyed by a GSIS game key that ESPN never exposes, and its
-participation page has no stable machine-readable layout, so reading it would
-mean shipping a PDF text extractor and a mapping table for the game key, then
-re-deriving the percentages by hand. The sibling ``Gamebook.xml`` is no help:
-it lists starters, substitutions, and inactives, but carries no snap totals.
-
-nflverse publishes the same game book participation numbers as a per-season CSV
-keyed by season, week, and team, which is the form this module reads. It needs
-no PDF dependency, no GSIS game key, and it carries the unit percentages the
-game book prints alongside the counts.
-"""
+"""Pro Football Reference snap counts and player IDs, published by nflverse."""
 
 from __future__ import annotations
 
 import csv
+import logging
+import math
 from collections import Counter
+from dataclasses import dataclass, replace
 from io import StringIO
 from typing import Any, Iterable
 
@@ -44,9 +32,13 @@ SNAP_COUNTS_URL = (
     "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/"
     "snap_counts_{season}.csv"
 )
-# A finished game's snaps never change, so the season file is held far longer
-# than the live ESPN endpoints; the tail of the file grows once a week.
+# Published games can receive corrections; new games are added during the week.
 SNAP_COUNTS_TTL_SECONDS = 21600.0
+PLAYERS_URL = (
+    "https://github.com/nflverse/nflverse-data/releases/download/players/players.csv"
+)
+PLAYERS_TTL_SECONDS = 86400.0
+LOGGER = logging.getLogger(__name__)
 # Team codes where the snap count file and ESPN disagree.
 TEAM_CODE_ALIASES = {"LAR": "LA", "WSH": "WAS", "LVR": "LV", "JAC": "JAX"}
 REGULAR_SEASON_TYPE = "REG"
@@ -60,6 +52,46 @@ class SnapCountError(RuntimeError):
     """Raised when the snap count source cannot be read."""
 
 
+class SnapCountUnavailable(SnapCountError):
+    """An upstream transport failure, distinct from a malformed data contract."""
+
+
+@dataclass(frozen=True)
+class PlayerCrosswalk:
+    by_pfr: dict[str, PlayerRef]
+    by_name: dict[str, tuple[str, ...]]
+
+
+def _reader(text: str, required: set[str], source: str) -> csv.DictReader:
+    reader = csv.DictReader(StringIO(text.lstrip("\ufeff")))
+    missing = required - set(reader.fieldnames or ())
+    if missing:
+        raise SnapCountError(f"{source} CSV missing required columns: {', '.join(sorted(missing))}")
+    return reader
+
+
+def parse_players(text: str) -> PlayerCrosswalk:
+    reader = _reader(text, {"pfr_id", "espn_id", "display_name"}, "Players")
+    by_pfr: dict[str, PlayerRef] = {}
+    names: dict[str, set[str]] = {}
+    for row in reader:
+        pfr_id = (row.get("pfr_id") or "").strip()
+        if not pfr_id:
+            continue
+        name = (row.get("display_name") or "").strip()
+        espn_id = (row.get("espn_id") or "").strip() or None
+        if espn_id is not None and (not espn_id.isascii() or not espn_id.isdigit()):
+            raise SnapCountError(f"Players CSV has invalid ESPN ID for {pfr_id}")
+        if not name:
+            raise SnapCountError(f"Players CSV has no display name for {pfr_id}")
+        player = PlayerRef(name=name, athlete_id=espn_id, position=row.get("position") or None)
+        if pfr_id in by_pfr and by_pfr[pfr_id] != player:
+            raise SnapCountError(f"Players CSV has conflicting records for {pfr_id}")
+        by_pfr[pfr_id] = player
+        names.setdefault(normalize_name(name), set()).add(pfr_id)
+    return PlayerCrosswalk(by_pfr, {name: tuple(sorted(ids)) for name, ids in names.items()})
+
+
 def team_code(value: str | None) -> str | None:
     """A team abbreviation in the form the snap count file uses."""
     text = (value or "").strip().upper()
@@ -70,16 +102,24 @@ def team_code(value: str | None) -> str | None:
 
 def _as_int(value: Any) -> int:
     try:
-        return int(float(str(value).strip()))
-    except (TypeError, ValueError):
-        return 0
+        number = float(str(value).strip())
+        if not math.isfinite(number) or number < 0 or not number.is_integer():
+            raise ValueError
+        return int(number)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise SnapCountError(f"Snap count CSV has invalid count: {value!r}") from exc
 
 
 def _as_float(value: Any) -> float | None:
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
+    if value is None or str(value).strip() == "":
         return None
+    try:
+        number = float(str(value).strip())
+        if not math.isfinite(number) or not 0 <= number <= 1:
+            raise ValueError
+        return number
+    except (TypeError, ValueError) as exc:
+        raise SnapCountError(f"Snap count CSV has invalid share: {value!r}") from exc
 
 
 def _unit_total(measurements: list[tuple[int, float | None]]) -> int:
@@ -97,7 +137,7 @@ def _unit_total(measurements: list[tuple[int, float | None]]) -> int:
     if candidates:
         best = max(candidates.items(), key=lambda item: (item[1], item[0]))
         return best[0]
-    return max((snaps for snaps, _ in measurements), default=0)
+    return 0
 
 
 class GameSnaps:
@@ -140,19 +180,26 @@ def parse_snap_counts(
 ) -> dict[str, GameSnaps]:
     """Snap counts for one team, keyed by the file's game id.
 
-    A layout change upstream should leave the bot saying no snaps are published
-    rather than raising, so unreadable rows are skipped instead of rejected.
+    Malformed schemas and measurements are source errors, not unpublished games.
     """
     wanted = team_code(team)
     rows: dict[str, list[dict[str, str]]] = {}
-    reader = csv.DictReader(StringIO(csv_text))
+    reader = _reader(
+        csv_text,
+        {"game_id", "season", "week", "game_type", "team", "opponent", "player",
+         "pfr_player_id", "position", "offense_snaps", "offense_pct",
+         "defense_snaps", "defense_pct", "st_snaps", "st_pct"},
+        "Snap count",
+    )
     for row in reader:
         if team_code(row.get("team")) != wanted:
             continue
         game_id = (row.get("game_id") or "").strip()
         name = (row.get("player") or "").strip()
         if not game_id or not name:
-            continue
+            raise SnapCountError("Snap count CSV has a Ravens row without a game or player")
+        if not (row.get("opponent") or "").strip() or not (row.get("game_type") or "").strip():
+            raise SnapCountError("Snap count CSV has incomplete game metadata")
         rows.setdefault(game_id, []).append(row)
 
     games: dict[str, GameSnaps] = {}
@@ -166,9 +213,16 @@ def parse_snap_counts(
                 offense=_as_int(row.get("offense_snaps")),
                 defense=_as_int(row.get("defense_snaps")),
                 special_teams=_as_int(row.get("st_snaps")),
+                pfr_id=(row.get("pfr_player_id") or "").strip() or None,
+                offense_share=_as_float(row.get("offense_pct")),
+                defense_share=_as_float(row.get("defense_pct")),
+                special_teams_share=_as_float(row.get("st_pct")),
             )
             for row in entries
         )
+        identities = [player.identity for player in players]
+        if len(identities) != len(set(identities)):
+            raise SnapCountError(f"Snap count CSV has duplicate players in {game_id}")
         totals = {
             OFFENSE: _unit_total(
                 [
@@ -187,6 +241,9 @@ def parse_snap_counts(
             ),
         }
         first = entries[0]
+        for row in entries:
+            if any(row.get(key) != first.get(key) for key in ("season", "week", "game_type", "opponent")):
+                raise SnapCountError(f"Snap count CSV has conflicting game metadata for {game_id}")
         games[game_id] = GameSnaps(
             game_id=game_id,
             season=_as_int(first.get("season")),
@@ -209,12 +266,13 @@ def match_game(games: dict[str, GameSnaps], game: Game) -> GameSnaps | None:
     """
     opponent = game.opponent
     ravens = game.ravens
-    if opponent is None or ravens is None or game.season is None:
+    if opponent is None or ravens is None or game.season is None or game.season_type not in (2, 3):
         return None
     wanted_opponent = team_code(opponent.team.abbreviation)
     if wanted_opponent is None:
         return None
     postseason = game.season_type == 3
+    matches = []
     for entry in games.values():
         if entry.season != game.season or entry.opponent != wanted_opponent:
             continue
@@ -222,15 +280,18 @@ def match_game(games: dict[str, GameSnaps], game: Game) -> GameSnaps | None:
             continue
         if entry.is_regular_season == postseason:
             continue
-        return entry
-    return None
+        matches.append(entry)
+    if len(matches) > 1:
+        raise SnapCountError(f"Multiple snap count games match ESPN event {game.event_id}")
+    return matches[0] if matches else None
 
 
 def build_report(
-    game: Game, snaps: GameSnaps, roster: dict[str, PlayerRef] | None = None
+    game: Game, snaps: GameSnaps, roster: dict[str, PlayerRef] | None = None,
+    crosswalk: PlayerCrosswalk | None = None,
 ) -> SnapCountReport:
     """A report for one game, with roster art and links applied where known."""
-    players = tuple(_resolve(entry, roster or {}) for entry in snaps.players)
+    players = tuple(_resolve(entry, roster or {}, crosswalk) for entry in snaps.players)
     return SnapCountReport(
         game=game,
         players=players,
@@ -240,11 +301,36 @@ def build_report(
     )
 
 
-def _resolve(entry: PlayerSnaps, roster: dict[str, PlayerRef]) -> PlayerSnaps:
-    match = roster.get(normalize_name(entry.player.name))
+def _resolve(
+    entry: PlayerSnaps, roster: dict[str, PlayerRef],
+    crosswalk: PlayerCrosswalk | None = None,
+) -> PlayerSnaps:
+    pfr_id = entry.pfr_id
+    match = crosswalk.by_pfr.get(pfr_id) if crosswalk and pfr_id else None
+    name = normalize_name(entry.name)
+    if match is None and crosswalk:
+        candidates = crosswalk.by_name.get(name, ())
+        # A name must never override a known, conflicting PFR identity.
+        if len(candidates) > 1 or (pfr_id and candidates and pfr_id not in candidates):
+            return entry
+        if len(candidates) == 1:
+            pfr_id = candidates[0]
+            match = crosswalk.by_pfr[pfr_id]
+    if match is not None and match.athlete_id:
+        art = next((player for player in roster.values() if player.athlete_id == match.athlete_id), match)
+        match = replace(match, headshot=art.headshot, link=art.link)
+    else:
+        if crosswalk and len(crosswalk.by_name.get(name, ())) > 1:
+            return replace(entry, pfr_id=pfr_id)
+        candidates = [player for player in roster.values() if normalize_name(player.name) == name]
+        unique = {player.athlete_id: player for player in candidates}
+        if len(unique) == 1:
+            match = next(iter(unique.values()))
     if match is None:
-        return entry
-    return PlayerSnaps(
+        return replace(entry, pfr_id=pfr_id)
+    return replace(
+        entry,
+        pfr_id=pfr_id,
         player=PlayerRef(
             # The snap count file and the roster spell some names differently;
             # the file's spelling is what the report was built from.
@@ -254,9 +340,6 @@ def _resolve(entry: PlayerSnaps, roster: dict[str, PlayerRef]) -> PlayerSnaps:
             headshot=match.headshot,
             link=match.link,
         ),
-        offense=entry.offense,
-        defense=entry.defense,
-        special_teams=entry.special_teams,
     )
 
 
@@ -267,7 +350,7 @@ def aggregate(reports: Iterable[SnapCountReport]) -> list[PlayerSnapTotals]:
     collected: dict[str, list[tuple[Game, PlayerSnaps]]] = {}
     for report in all_reports:
         for entry in report.players:
-            key = normalize_name(entry.player.name)
+            key = entry.identity
             if key not in collected:
                 collected[key] = []
                 ordered.append(key)
@@ -280,6 +363,11 @@ def aggregate(reports: Iterable[SnapCountReport]) -> list[PlayerSnapTotals]:
         # A player's share is measured only over the games they were part of,
         # so a mid-season signing is not diluted by games before they arrived.
         played = _reports_for(all_reports, entries)
+        denominators = {
+            unit: sum(report.total(unit) for report in played)
+            if all(report.total(unit) > 0 for report in played) else 0
+            for unit in SNAP_UNITS
+        }
         totals.append(
             PlayerSnapTotals(
                 player=best,
@@ -287,11 +375,9 @@ def aggregate(reports: Iterable[SnapCountReport]) -> list[PlayerSnapTotals]:
                 offense=sum(entry.offense for _, entry in entries),
                 defense=sum(entry.defense for _, entry in entries),
                 special_teams=sum(entry.special_teams for _, entry in entries),
-                offense_total=sum(report.offense_total for report in played),
-                defense_total=sum(report.defense_total for report in played),
-                special_teams_total=sum(
-                    report.special_teams_total for report in played
-                ),
+                offense_total=denominators[OFFENSE],
+                defense_total=denominators[DEFENSE],
+                special_teams_total=denominators[SPECIAL_TEAMS],
             )
         )
     totals.sort(
@@ -336,26 +422,36 @@ class SnapCountClient:
         self._cache: AsyncTtlCache[int, dict[str, GameSnaps]] = AsyncTtlCache(
             SNAP_COUNTS_TTL_SECONDS, max_entries=8
         )
+        self._players_cache: AsyncTtlCache[str, PlayerCrosswalk] = AsyncTtlCache(
+            PLAYERS_TTL_SECONDS, max_entries=1
+        )
 
-    async def _csv(self, url: str) -> str:
+    async def _csv(self, url: str, allow_missing: bool = False) -> str | None:
         try:
             async with self.session.get(url, timeout=30) as response:
-                if response.status == 404:
+                if response.status == 404 and allow_missing:
                     # A season with no published file yet is an empty season,
                     # not an outage.
-                    return ""
+                    return None
                 if response.status >= 400:
-                    raise SnapCountError(
-                        f"Snap count data returned HTTP {response.status}"
+                    raise SnapCountUnavailable(
+                        f"nflverse data returned HTTP {response.status}"
                     )
                 return await response.text()
         except (aiohttp.ClientError, TimeoutError) as exc:
-            raise SnapCountError(f"Could not reach the snap count data: {exc}") from exc
+            raise SnapCountUnavailable(f"Could not reach nflverse data: {exc}") from exc
+
+    async def fetch_players(self) -> PlayerCrosswalk:
+        async def load() -> PlayerCrosswalk:
+            text = await self._csv(PLAYERS_URL)
+            return parse_players(text or "")
+
+        return await self._players_cache.get_or_fetch("players", load)
 
     async def fetch_season(self, season: int) -> dict[str, GameSnaps]:
         async def load() -> dict[str, GameSnaps]:
-            text = await self._csv(SNAP_COUNTS_URL.format(season=season))
-            if not text.strip():
+            text = await self._csv(SNAP_COUNTS_URL.format(season=season), allow_missing=True)
+            if text is None:
                 return {}
             return parse_snap_counts(text)
 
@@ -364,18 +460,30 @@ class SnapCountClient:
     async def fetch_reports(
         self, games: Iterable[Game], roster: dict[str, PlayerRef] | None = None
     ) -> list[SnapCountReport]:
-        """Reports for the games whose snaps have been published."""
+        """Reports for consecutive completed games, oldest first.
+
+        Unpublished games stay in the sequence and never become zero-snap games.
+        Callers include one extra predecessor, then slice the requested window.
+        """
         reports: list[SnapCountReport] = []
         seasons: dict[int, dict[str, GameSnaps]] = {}
+        try:
+            crosswalk = await self.fetch_players()
+        except SnapCountUnavailable as exc:
+            LOGGER.warning("Snap counts posted without nflverse player crosswalk: %s", exc)
+            crosswalk = None
+        previous: SnapCountReport | None = None
         for game in games:
+            if not game.completed:
+                raise SnapCountError("Snap reports require completed games")
             if game.season is None:
-                continue
+                raise SnapCountError("Completed game has no season for snap count lookup")
             if game.season not in seasons:
                 seasons[game.season] = await self.fetch_season(game.season)
             snaps = match_game(seasons[game.season], game)
-            if snaps is None or not snaps.players:
-                continue
-            reports.append(build_report(game, snaps, roster))
+            report = build_report(game, snaps, roster, crosswalk) if snaps else SnapCountReport(game=game)
+            reports.append(replace(report, previous=previous))
+            previous = report
         return reports
 
 

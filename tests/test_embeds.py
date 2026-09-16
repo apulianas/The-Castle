@@ -458,7 +458,7 @@ def test_snap_count_embed_groups_players_by_unit() -> None:
         "Special teams (25 snaps)",
     ]
     assert "68 of 68 (100%)" in (embed.fields[0].value or "")
-    assert embed.footer.text == "Data: NFL game book via nflverse"
+    assert embed.footer.text == "Data: Pro Football Reference via nflverse"
 
 
 def test_snap_count_embed_states_a_game_with_no_published_snaps() -> None:
@@ -486,7 +486,7 @@ def test_snap_count_embed_keeps_a_full_roster_inside_discord_limits() -> None:
         "Offense (68 snaps)",
         "Offense (68 snaps) (cont.)",
     ]
-    assert embed.footer.text == "Data: NFL game book via nflverse"
+    assert embed.footer.text == "Data: Pro Football Reference via nflverse"
 
 
 def test_snap_count_embed_reports_players_it_had_to_hide() -> None:

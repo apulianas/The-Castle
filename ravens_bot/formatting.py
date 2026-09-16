@@ -481,7 +481,36 @@ def format_snap_row(entry: PlayerSnaps, report: SnapCountReport, unit: str) -> s
     name = link(entry.player.name, entry.player.page_url)
     if entry.position:
         name = f"{entry.position} {name}"
-    return f"{name} — {format_snap_share(entry.snaps(unit), report.total(unit))}"
+    return f"{name} — {format_snap_share(entry.snaps(unit), report.total(unit))}{format_snap_changes(entry, report)}"
+
+
+def format_snap_changes(entry: PlayerSnaps, report: SnapCountReport) -> str:
+    """Published share differences, never inferred zeros for an absent row."""
+    if report.previous is None:
+        return ""
+    previous = report.previous_player(entry)
+    if not report.previous.players:
+        return " | change N/A (prior game unpublished)"
+    if previous is None:
+        return " | change N/A (not listed in prior game)"
+    changes = []
+    for unit, label in zip(SNAP_UNITS, ("O", "D", "ST")):
+        current_share, prior_share = entry.share(unit), previous.share(unit)
+        value = "N/A"
+        if current_share is not None and prior_share is not None:
+            difference = round((current_share - prior_share) * 100, 1)
+            value = f"{difference:+.1f} pp" if difference else "0.0 pp"
+        changes.append(f"{label} {value}")
+    return " | " + ", ".join(changes)
+
+
+def format_snap_comparison(report: SnapCountReport) -> str:
+    legend = "Change: O/D/ST snap share in percentage points (pp), not percent change."
+    if report.previous is None:
+        return f"{legend}\nChange N/A: no previous completed game available."
+    previous = report.previous.game
+    season = f"{previous.season} " if previous.season else ""
+    return f"{legend}\nVersus previous completed game: {season}{format_snap_game_line(previous)}."
 
 
 def format_snap_totals_row(totals: PlayerSnapTotals, unit: str) -> str:
@@ -494,11 +523,18 @@ def format_snap_totals_row(totals: PlayerSnapTotals, unit: str) -> str:
 
 def format_snap_breakdown(game: Game, entry: PlayerSnaps, report: SnapCountReport) -> str:
     """One game's line in a multi-week breakdown."""
-    prefix = f"{game.week} — " if game.week else ""
-    unit = entry.primary_unit
+    prefix = f"{game.season} " if game.season else ""
+    prefix += f"{game.week} — " if game.week else ""
+    units = [
+        f"{format_snap_share(entry.snaps(unit), report.total(unit))} {unit}"
+        for unit in SNAP_UNITS
+        if entry.snaps(unit)
+    ]
     return (
         f"{prefix}{format_matchup(game)}: "
-        f"{format_snap_share(entry.snaps(unit), report.total(unit))} {unit}"
+        f"{'; '.join(units) if units else 'Did not play a snap.'}"
+        + (format_snap_changes(entry, report) if report.previous is not None
+           else " | change N/A (no previous completed game)")
     )
 
 
@@ -516,7 +552,7 @@ def format_no_snap_games() -> str:
 
 
 def format_no_snap_counts(game: Game | None = None) -> str:
-    """Snaps trail the game book, so a fresh game is pending rather than broken."""
+    """Publication can lag a completed game, so missing snaps are pending."""
     if game is None:
         return "Snap counts have not been published for that game yet."
     return f"Snap counts have not been published for {format_matchup(game)} yet."

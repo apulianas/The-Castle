@@ -54,6 +54,8 @@ from .formatting import (
     format_schedule_line,
     format_situation,
     format_snap_breakdown,
+    format_snap_changes,
+    format_snap_comparison,
     format_snap_game_line,
     format_snap_period,
     format_snap_row,
@@ -111,8 +113,7 @@ LIVE_FOOTER_RESERVE = 160
 ROSTER_FOOTER_RESERVE = 200
 DATA_SOURCE = "Data: ESPN"
 OFFICIAL_INJURY_DATA_SOURCE = "Data: Baltimore Ravens"
-# Snap counts come from the NFL game book participation page, not ESPN.
-SNAP_DATA_SOURCE = "Data: NFL game book via nflverse"
+SNAP_DATA_SOURCE = "Data: Pro Football Reference via nflverse"
 # Every number behind a fourth down call is a league average, so the footer says
 # so rather than letting the recommendation read as a scouted opinion. Which of
 # the two models answered is stated as well, since they are different questions.
@@ -822,9 +823,10 @@ def help_embed() -> discord.Embed:
     embed.add_field(
         name="/snapcounts [player] [weeks]",
         value=(
-            "Snap counts from the NFL game book for the last game, or the last "
+            "Pro Football Reference snap counts for the last game, or the last "
             f"1-{MAX_SNAP_GAMES} games. Name a player for their own line and a per-game "
-            "breakdown; omit one for the full team report by unit."
+            "breakdown; omit one for the full team report by unit. Share changes "
+            "compare with the previous completed game in percentage points."
         ),
         inline=False,
     )
@@ -937,6 +939,7 @@ def snap_count_embed(report: SnapCountReport) -> discord.Embed:
         embed.set_footer(text=SNAP_DATA_SOURCE)
         return embed
 
+    embed.description = f"{format_game_status(game)}\n{format_snap_comparison(report)}"
     blocks = []
     for unit in SNAP_UNITS:
         entries = report.unit(unit)
@@ -944,6 +947,21 @@ def snap_count_embed(report: SnapCountReport) -> discord.Embed:
         blocks.append(
             (title, [format_snap_row(entry, report, unit) for entry in entries])
         )
+    zero_snap_players = [entry for entry in report.players if entry.total == 0]
+    if zero_snap_players:
+        blocks.append((
+            "No snaps",
+            [f"{entry.name} — 0 snaps{format_snap_changes(entry, report)}"
+             for entry in zero_snap_players],
+        ))
+    if report.previous and report.previous.players:
+        current = {entry.identity for entry in report.players}
+        absent = [
+            f"{entry.name} — change N/A (not listed this game; not assumed zero)"
+            for entry in report.previous.players if entry.identity not in current
+        ]
+        if absent:
+            blocks.append(("Previously listed players", absent))
     available = sum(len(lines) for _, lines in blocks)
     shown = _add_field_blocks(embed, blocks)
     embed.set_footer(text=_snap_footer(shown, available))
@@ -957,14 +975,32 @@ def snap_totals_embed(
     period = format_snap_period(weeks)
     embed = _base_embed(f"Ravens snap counts — {period}")
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
-    if not totals:
+    if not reports:
         embed.description = format_no_snap_counts()
         embed.set_footer(text=SNAP_DATA_SOURCE)
         return embed
 
     embed.description = _limit_description(
-        "\n".join(format_snap_game_line(report.game) for report in reports)
+        "\n".join(
+            f"{report.game.season or ''} {format_snap_game_line(report.game)}"
+            + ("" if report.players else " — not published")
+            for report in reports
+        ) + "\nLatest game trends:\n" + format_snap_comparison(reports[-1])
     )
+    latest = reports[-1]
+    latest_players = {entry.identity: entry for entry in latest.players}
+
+    def row(item: PlayerSnapTotals, unit: str) -> str:
+        identity = item.entries[-1][1].identity
+        entry = latest_players.get(identity)
+        if entry is not None:
+            change = format_snap_changes(entry, latest)
+        elif not latest.players:
+            change = " | change N/A (latest game unpublished)"
+        else:
+            change = " | change N/A (not listed in latest game)"
+        return format_snap_totals_row(item, unit) + change
+
     blocks = []
     for unit in SNAP_UNITS:
         entries = [
@@ -972,11 +1008,12 @@ def snap_totals_embed(
         ]
         entries.sort(key=lambda item: (-item.snaps(unit), item.player.name))
         blocks.append(
-            (unit.capitalize(), [format_snap_totals_row(item, unit) for item in entries])
+            (unit.capitalize(), [row(item, unit) for item in entries])
         )
     available = sum(len(lines) for _, lines in blocks)
     shown = _add_field_blocks(embed, blocks)
-    embed.set_footer(text=_snap_footer(shown, available, f"{len(reports)} games"))
+    published = sum(bool(report.players) for report in reports)
+    embed.set_footer(text=_snap_footer(shown, available, f"{published}/{len(reports)} games published"))
     return embed
 
 
@@ -985,12 +1022,18 @@ def player_snap_embed(entry: PlayerSnaps, report: SnapCountReport) -> discord.Em
     game = report.game
     embed = _base_embed(
         f"{entry.player.display_name} — snap counts",
-        f"{format_game_title(game)}\n{format_game_status(game)}",
+        f"{format_game_title(game)}\n{format_game_status(game)}\n{format_snap_comparison(report)}",
         url=game_url(game.event_id),
     )
     embed.add_field(
         name="Snaps", value=_limit_field(format_player_snaps(entry, report)), inline=False
     )
+    if report.previous is not None:
+        embed.add_field(
+            name="Snap-share change",
+            value=format_snap_changes(entry, report).removeprefix(" | "),
+            inline=False,
+        )
     photo = entry.player.photo_url(HEADSHOT_FEATURE_WIDTH)
     if photo:
         embed.set_image(url=photo)
@@ -1007,27 +1050,35 @@ def player_snap_totals_embed(
     period = format_snap_period(weeks)
     embed = _base_embed(
         f"{totals.player.display_name} — snap counts",
-        f"{period.capitalize()} • {totals.games} played",
+        f"{period.capitalize()} • {totals.games} listed\n"
+        "O/D/ST changes are percentage points (pp) versus each game's previous "
+        "completed Ravens game, including across seasons. N/A is not zero.",
     )
     embed.add_field(
         name="Totals", value=_limit_field(format_player_snap_totals(totals)), inline=False
     )
-    by_game = {report.game.event_id: report for report in reports}
-    lines = [
-        format_snap_breakdown(game, entry, by_game[game.event_id])
-        for game, entry in totals.entries
-        if game.event_id in by_game
-    ]
+    by_game = {game.event_id: entry for game, entry in totals.entries}
+    lines = []
+    for report in reports:
+        entry = by_game.get(report.game.event_id)
+        if entry is not None:
+            lines.append(format_snap_breakdown(report.game, entry, report))
+        else:
+            reason = "not listed; change N/A" if report.players else "not published; change N/A"
+            lines.append(
+                f"{report.game.season or ''} {format_snap_game_line(report.game)}: {reason}"
+            )
     if lines:
-        embed.add_field(
-            name="By game", value=_limit_field("\n".join(lines)), inline=False
-        )
+        shown = _add_field_blocks(embed, [("By game", lines)])
+    else:
+        shown = 0
     photo = totals.player.photo_url(HEADSHOT_FEATURE_WIDTH)
     if photo:
         embed.set_image(url=photo)
     else:
         embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
-    embed.set_footer(text=SNAP_DATA_SOURCE)
+    hidden = f"Showing {shown} of {len(lines)} games • " if shown < len(lines) else ""
+    embed.set_footer(text=f"{hidden}{SNAP_DATA_SOURCE}")
     return embed
 
 

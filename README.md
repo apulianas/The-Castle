@@ -125,7 +125,9 @@ means the wording is unit tested without constructing a client.
   unit's field rather than a field of their own, because a full report names
   forty players and Discord allows twenty five fields. Naming a player switches
   to their own embed, with their headshot and, over several games, a week by
-  week breakdown.
+  week breakdown. Offensive/defensive/special-team share changes use the previous
+  completed Ravens game and are labelled in percentage points (pp). Team totals
+  over several games show trends for the latest game, not a change in totals.
 
 Embeds are truncated to Discord's limits rather than being rejected at send
 time, and any list longer than 25 fields states how many entries were hidden.
@@ -135,8 +137,8 @@ time, and any list longer than 25 fields states how many entries were hidden.
 `ravens_bot/cache.py` holds a small TTL cache in front of the slower endpoints:
 standings for 5 minutes, the injury report for 5, the schedule for 3, the roster
 for an hour, a game summary for 45 seconds, a season of snap counts for 6 hours,
-since a finished game's snaps never change and the file only grows a week at a
-time, and the live scoreboard for 12 seconds, which is only long enough to
+the nflverse player-ID crosswalk for 24 hours, and the live scoreboard for
+12 seconds, which is only long enough to
 collapse a burst of commands without ever answering with last play's down. A
 live game moves play by play, so the short summary entry exists to absorb a
 burst of `/live` calls rather than to spare ESPN the traffic; the score shown
@@ -338,25 +340,37 @@ after its move was already posted — is announced on its own as before.
 
 ### Snap counts
 
-ESPN does not publish snap counts. They come from the NFL's GSIS game book,
-whose player participation page is posted per game at
-`https://nflgsis.com/{season}/{Reg|Post}/{week:02d}/{gamekey}/Gamebook.pdf`.
+`ravens_bot/snapcounts.py` reads **Pro Football Reference via nflverse**, the
+source identified by [nflreadr's `load_snap_counts` documentation](https://nflreadr.nflverse.com/reference/load_snap_counts.html).
+Season CSVs come from the nflverse-data `snap_counts` release
+(`snap_counts_{season}.csv`), not NFL GSIS game books or ESPN.
 
-`ravens_bot/snapcounts.py` does not read that PDF. Doing so would mean shipping
-a PDF text extractor, mapping ESPN's event id onto the GSIS game key the URL
-needs, and re-deriving each percentage by hand from a page whose layout carries
-no guarantee. The sibling `Gamebook.xml` does not help: it names starters,
-substitutions, and inactives, but carries no snap totals.
+Player links and headshots use `pfr_player_id` from the snap CSV, joined to
+`pfr_id` and `espn_id` in the `players/players.csv` release crosswalk. This works
+for historical players who are no longer on the current ESPN roster. A missing
+ID can use an unambiguous normalized full-name fallback; known conflicting IDs
+are never overridden by names. A crosswalk transport outage logs a warning and
+keeps snap counts available with safe roster fallback. Malformed CSV schemas
+or measurements are reported as source errors rather than unpublished data.
 
-nflverse republishes the same participation numbers as a per-season CSV keyed by
-season, week, and team, and that is what the bot reads. It needs no PDF
-dependency and no game key, and it carries the unit percentages the game book
-prints beside the counts.
-
-Three consequences are worth knowing:
+Details worth knowing:
 
 - Snap counts trail the final whistle by hours, so a game with no published
   numbers is reported as pending rather than as an error.
+- The immediately preceding completed regular-season or postseason Ravens game
+  is the comparison (preseason is excluded), even
+  across a bye, playoffs, or a season boundary. An extra game is fetched for
+  context but excluded from requested totals. An unpublished game is never
+  skipped to compare against an older published game, and an unpublished latest
+  game is never replaced by the prior game.
+- Changes use the published unit shares: 60% after 45% is **+15.0 pp**, not a
+  15% relative increase. Missing shares, a missing prior report, and players
+  absent from either report show **N/A**, not zero. Explicit zero shares can
+  produce a real decline. Previously listed players are called out in the team
+  report, while named-player breakdowns mark unlisted and unpublished games.
+  Aggregate shares continue to include only games where the player is listed.
+- Source corrections and new games can take up to six hours to appear because
+  the season CSV is cached.
 - The file states each player's share of a unit rather than the unit's total, so
   the denominator is rebuilt from the counts and shares and the value most of a
   unit agrees on is used. A count larger than that total is printed on its own

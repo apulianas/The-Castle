@@ -731,6 +731,18 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             )
             return
 
+        if weeks == 1 and not reports[-1].players:
+            await interaction.followup.send(
+                embed=no_snap_counts_embed(format_no_snap_counts(reports[-1].game))
+            )
+            return
+        if not any(report.players for report in reports):
+            await interaction.followup.send(
+                embed=no_snap_counts_embed(
+                    "Snap counts have not been published for any of the requested games yet."
+                )
+            )
+            return
         totals = aggregate(reports)
         if player is None:
             if weeks == 1:
@@ -742,6 +754,8 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             return
 
         matches = match_players(totals, player)
+        if not matches and weeks == 1 and reports[-1].previous is not None:
+            matches = match_players(aggregate([reports[-1].previous]), player)
         if len(matches) != 1:
             suggestions = [item.player.name for item in matches][
                 :MAX_PLAYER_SUGGESTIONS
@@ -758,12 +772,15 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         if weeks == 1:
             report = reports[-1]
             entry = next(
-                (item for item in report.players if item.player.name == match.player.name),
+                (item for item in report.players if item.identity == match.entries[-1][1].identity),
                 None,
             )
             if entry is None:
                 await interaction.followup.send(
-                    embed=no_snap_counts_embed(format_no_snap_counts(report.game)),
+                    embed=no_snap_counts_embed(
+                        f"{match.player.name} is not listed in this game's published snap counts. "
+                        "Snap-share change is unavailable; absence is not assumed to mean zero snaps."
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -933,7 +950,7 @@ def _remembered_fourth_down(
 async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountReport] | None:
     """Reports for the last ``weeks`` completed games, or None when none exist."""
     espn = _require_espn(bot)
-    games = await espn.fetch_recent_games(weeks, today_in_zone(bot.config.time_zone))
+    games = await espn.fetch_recent_games(weeks + 1, today_in_zone(bot.config.time_zone))
     if not games:
         return None
     roster: dict[str, PlayerRef] = {}
@@ -943,7 +960,8 @@ async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountRepo
         # Player art and links are a bonus; a roster outage should not hide the
         # snap counts themselves.
         LOGGER.warning("Snap counts posted without roster art")
-    return await _require_snap_counts(bot).fetch_reports(games, roster)
+    reports = await _require_snap_counts(bot).fetch_reports(games, roster)
+    return reports[-weeks:]
 
 
 def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:

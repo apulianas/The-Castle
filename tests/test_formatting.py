@@ -478,6 +478,7 @@ def test_format_snap_breakdown_names_the_week_and_the_matchup() -> None:
 
     assert format_snap_breakdown(game, entry, report) == (
         "Week 2 — Baltimore Ravens at Cleveland Browns: 54 of 68 (79%) offense"
+        " | change N/A (no previous completed game)"
     )
 
 
