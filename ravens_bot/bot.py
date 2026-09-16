@@ -103,6 +103,7 @@ from .snapcounts import (
     match_players,
 )
 from .recall import FourthDownMemory, RememberedSituation
+from .recap import RecapClient, RecapError, find_recap_game
 from .state import AnnouncementState, channel_key
 
 
@@ -157,6 +158,7 @@ class RavensBot(commands.Bot):
         self.official_transactions: OfficialTransactionsClient | None = None
         self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
+        self.recaps: RecapClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
         self.fourth_downs = FourthDownMemory()
         self._idle_track_ticks = 0
@@ -169,6 +171,7 @@ class RavensBot(commands.Bot):
         self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
+        self.recaps = RecapClient(self.session)
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
         self.tree.add_command(_inactives_command(self))
@@ -177,6 +180,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_next_game_command(self))
         self.tree.add_command(_live_command(self))
         self.tree.add_command(_schedule_command(self))
+        self.tree.add_command(_recap_command(self))
         self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_fourthdown_command(self))
         self.tree.add_command(_fieldgoal_command(self))
@@ -697,6 +701,38 @@ def _schedule_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         await interaction.followup.send(embed=schedule_embed(games, bot.config.time_zone, days))
 
     return schedule
+
+
+def _recap_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    from .embeds import no_recap_embed, recap_embed
+
+    @app_commands.command(name="recap", description="Recap a completed Ravens game with NFLverse postgame analytics.")
+    @app_commands.describe(date="Game date (YYYY-MM-DD); omit for the latest completed regular-season/playoff game")
+    async def recap(interaction: discord.Interaction, date: str | None = None) -> None:
+        try:
+            target_date = parse_user_date(date, bot.config.time_zone) if date is not None else None
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            game = await find_recap_game(
+                _require_espn(bot), today_in_zone(bot.config.time_zone),
+                bot.config.time_zone, target_date,
+            )
+            if game is None:
+                await interaction.followup.send(embed=no_recap_embed(target_date))
+                return
+            if bot.recaps is None:
+                raise RecapError("The postgame recap client is not ready.")
+            report = await bot.recaps.fetch(game)
+        except (EspnApiError, RecapError) as exc:
+            LOGGER.warning("Postgame recap unavailable: %s", exc)
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.followup.send(embed=recap_embed(report, bot.config.time_zone))
+
+    return recap
 
 
 def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:

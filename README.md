@@ -12,6 +12,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
   - `/live` — live score, clock, possession, team totals, and leaders for today's game.
+  - `/recap [date]` — final score, offensive efficiency, passing/rushing leaders,
+    and Ravens-perspective win-probability swings for the latest completed
+    regular-season/playoff game, or a game on `YYYY-MM-DD` in `TIME_ZONE`.
   - `/schedule [days]` — upcoming Ravens games over the next 1-366 days, so a full
     schedule is one command.
   - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-42 games.
@@ -36,11 +39,51 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.
 
+## Postgame recaps and data freshness
+
+`/recap` selects completed Ravens regular-season or playoff games from ESPN's
+season schedule, including the previous season in the offseason. A supplied
+date selects that exact local game date, not the nearest game. Preseason and
+in-progress games are not eligible. `/live` and all live feeds remain ESPN-backed
+and unchanged.
+
+Recap analytics are calculated from NFLverse's compressed season PBP release
+(`pbp/play_by_play_{season}.csv.gz`), not a live API or the stale `player_stats`
+release. NFLverse publishes in batches after games; a final score can appear
+before analytics are published. Missing releases/games say **Not published**;
+missing end-of-game records, mismatched final scores, and missing measurements
+are labelled **Partial recap**. HTTP failures and changed/malformed schemas are
+reported as errors rather than an empty report.
+
+Offensive EPA/play and success rate (EPA greater than zero) use nflfastR pass/run
+plays with a dropback or rush attempt, excluding no-plays, spikes, kneels and
+two-point tries. Dropbacks include sacks and scrambles; designed runs exclude
+dropbacks. Each line shows measured/eligible play counts. Passing/rushing
+production is derived separately from credited PBP statistics, includes spikes
+and kneels, and excludes nullified plays and two-point tries. Gross passing yards
+do not subtract sacks; team net passing yards do. Player leaders are ranked by
+credited yards, including lateral rushing credits without adding a carry to
+the lateral recipient. WPA excludes kneels/spikes, which lack model estimates,
+and is signed using the **pre-play** possession team, so positive
+always helps Baltimore, including opponent turnovers; swings are percentage
+points, not relative percentages.
+
+The compressed download is streamed to a temporary file, with 256 MiB compressed
+and 2 GiB decompressed limits. CSV decompression and row-by-row aggregation run
+off the Discord event loop; only Ravens game aggregates are retained in memory.
+Concurrent season requests collapse into one fetch. Up to three seasons are
+cached for one hour (including not-yet-published results), then refreshed so late
+data and corrections can appear. The embed attributes ESPN and NFLverse/nflfastR,
+shows fetch time and source modification time when available, and notes that
+postgame statistics may lag or be corrected. Temporary downloads are removed
+on completion, failure, or cancellation.
+
 ## Embeds
 
 Every response is an embed built in `ravens_bot/embeds.py` from the plain-text
-helpers in `ravens_bot/formatting.py`. Keeping rendering separate from Discord
-means the wording is unit tested without constructing a client.
+helpers in `ravens_bot/formatting.py` and `ravens_bot/recap_formatting.py`.
+Keeping rendering separate from Discord means the wording is unit tested
+without constructing a client.
 
 - **Transactions** list one field per move. ESPN's NFL transaction feed carries
   only prose — no athlete record — so player names and positions are parsed out

@@ -94,6 +94,8 @@ from .models import (
 )
 from .snapcounts import MAX_SNAP_GAMES
 from .official_transactions import transaction_log_url
+from .recap import RecapReport
+from .recap_formatting import recap_fields
 
 
 RAVENS_PURPLE = 0x24125F
@@ -683,6 +685,36 @@ def next_game_embed(game: Game | None, time_zone: ZoneInfo) -> discord.Embed:
     return embed
 
 
+def no_recap_embed(target_date: date | None = None) -> discord.Embed:
+    when = f" on {target_date.isoformat()}" if target_date else ""
+    embed = _base_embed("Ravens postgame recap", f"No completed Ravens regular-season or playoff game found{when}.")
+    embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+    embed.set_footer(text=DATA_SOURCE)
+    return embed
+
+
+def recap_embed(report: RecapReport, time_zone: ZoneInfo) -> discord.Embed:
+    game = report.game
+    context = [f"{game.season} season | {format_game_status(game)}", format_kickoff(game, time_zone)]
+    if game.venue:
+        context.append(format_venue(game))
+    embed = _base_embed(
+        ("Postgame recap: " + format_game_title(game))[:256],
+        _limit_description("\n".join(context), 700),
+        url=game_url(game.event_id),
+    )
+    _set_game_art(embed, game)
+    for name, value in recap_fields(report):
+        embed.add_field(name=name, value=_limit_field(value), inline=False)
+    fetched = report.source.fetched_at.astimezone(time_zone).strftime("%Y-%m-%d %H:%M %Z")
+    modified = report.source.last_modified
+    footer = f"Final/context: ESPN | Analytics: NFLverse/nflfastR | Fetched {fetched}"
+    if modified:
+        footer += f" | Source modified: {modified[:80]}"
+    embed.set_footer(text=footer)
+    return embed
+
+
 def fourth_down_embed(
     game: Game, advice: FourthDownAdvice, age_seconds: float | None = None
 ) -> discord.Embed:
@@ -818,6 +850,11 @@ def help_embed() -> discord.Embed:
             f"Upcoming Ravens games for 1-{MAX_SCHEDULE_DAYS} days, with kickoff, "
             "broadcast, and venue. Ask for a year to get the whole schedule."
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/recap [date]",
+        value="Postgame final score, Ravens efficiency, passing/rushing leaders, and win-probability swings. Omit the date for the latest completed REG/POST game. NFLverse batch data can lag.",
         inline=False,
     )
     embed.add_field(
