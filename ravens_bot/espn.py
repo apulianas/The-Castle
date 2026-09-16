@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
@@ -42,6 +43,7 @@ from .roster_moves import POSITION_CODES, extract_players, transaction_action
 from .winprob import parse_clock_seconds
 
 
+LOGGER = logging.getLogger(__name__)
 SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
 # The site/v2 standings route now returns only a "full standings" link, so the
 # grouped table lives on the older apis/v2 route.
@@ -702,8 +704,9 @@ def parse_transactions(payload: dict[str, Any], target_date: date) -> list[Trans
 
 
 def parse_roster(payload: dict[str, Any]) -> dict[str, PlayerRef]:
-    """An index of the active roster keyed by normalized full name."""
+    """An index of the active roster keyed by unambiguous normalized full name."""
     index: dict[str, PlayerRef] = {}
+    ambiguous: set[str] = set()
     for group in _as_list(payload.get("athletes")):
         group_data = _as_dict(group)
         items = _as_list(group_data.get("items")) or [group_data]
@@ -723,7 +726,13 @@ def parse_roster(payload: dict[str, Any]) -> dict[str, PlayerRef]:
                 headshot=headshot if isinstance(headshot, str) and headshot else None,
                 link=player_url(athlete_id),
             )
-            index.setdefault(normalize_name(name), player)
+            key = normalize_name(name)
+            if key in index and index[key].athlete_id != player.athlete_id:
+                ambiguous.add(key)
+            index.setdefault(key, player)
+    for key in ambiguous:
+        LOGGER.warning("Roster name is ambiguous; skipping name resolution: %s", key)
+        index.pop(key)
     return index
 
 
@@ -1538,13 +1547,21 @@ class EspnClient:
                 selected.append(game)
         return selected
 
-    async def fetch_season_schedule(self, season: int | None = None) -> list[Game]:
+    async def fetch_season_schedule(
+        self, season: int | None = None, season_type: int | None = None
+    ) -> list[Game]:
         key = "season" if season is None else f"season:{season}"
+        if season_type is not None:
+            key += f":type:{season_type}"
 
         async def load() -> list[Game]:
-            params = None if season is None else {"season": str(season)}
+            params = {}
+            if season is not None:
+                params["season"] = str(season)
+            if season_type is not None:
+                params["seasontype"] = str(season_type)
             payload = await self._json(
-                f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule", params
+                f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule", params or None
             )
             return parse_schedule(payload)
 
@@ -1552,7 +1569,7 @@ class EspnClient:
         return list(games)
 
     async def fetch_recent_games(self, count: int, today: date) -> list[Game]:
-        """The most recent completed Ravens games, oldest first.
+        """The most recent completed regular/postseason Ravens games, oldest first.
 
         Completion comes from ESPN's status rather than from comparing dates,
         so a game in progress is not reported as played. Early in a season, and
@@ -1562,25 +1579,37 @@ class EspnClient:
         a single step, so asking for more games than a season holds returns
         them instead of a short list.
         """
-        schedule = await self.fetch_season_schedule()
-        games = [game for game in schedule if game.completed]
-        season = next(
-            (game.season for game in reversed(schedule) if game.season), None
-        )
-        if season is None:
-            # The NFL season is named for the year it kicks off in.
-            season = today.year if today.month >= 3 else today.year - 1
+        # ESPN's default season type omits playoffs (or returns preseason).
+        # Explicit types keep January and cross-season comparisons consecutive.
+        season = today.year if today.month >= 3 else today.year - 1
+        games = await self._completed_season_games(season)
         while len(games) < count and season > MIN_SEASON:
             season -= 1
             try:
-                earlier = await self.fetch_season_schedule(season)
-            except EspnApiError:
+                played = await self._completed_season_games(season)
+            except EspnApiError as exc:
+                LOGGER.warning("Recent games stop at unavailable season %s: %s", season, exc)
                 break
-            played = [game for game in earlier if game.completed]
             if not played:
                 break
             games = played + games
         return games[-count:]
+
+    async def _completed_season_games(self, season: int) -> list[Game]:
+        regular, postseason = await asyncio.gather(
+            self.fetch_season_schedule(season, season_type=2),
+            self.fetch_season_schedule(season, season_type=3),
+        )
+        unique = {
+            game.event_id: game for game in regular + postseason
+            if game.completed and game.season == season and game.season_type in (2, 3)
+        }
+        if any(game.start_time is None for game in unique.values()):
+            raise EspnApiError("Cannot order completed games with missing kickoff dates")
+        return sorted(
+            unique.values(),
+            key=lambda game: game.start_time or datetime.min,
+        )
 
     async def fetch_injuries(self) -> InjuryReport:
         async def load() -> InjuryReport:

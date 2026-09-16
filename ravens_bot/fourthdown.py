@@ -6,29 +6,13 @@ answer from: the arithmetic has to happen here. What follows is a deliberately
 small expected points model, built from four league-average curves and no
 runtime data at all, so it is pure, offline, and testable.
 
-The four curves, and where their shape comes from:
-
-- **Conversion rate by distance.** Fourth down conversion rates by yards to go,
-  as published by nflfastR play-by-play summaries and reproduced in nfl4th's
-  documentation: a little over two thirds on fourth-and-1, about half at three,
-  and a slow decay to roughly one attempt in six past fifteen. Goal line tries
-  convert slightly less often than the same distance in open field, because the
-  defence has no space behind it to cover.
-- **Field goal rate by kick distance.** The kick is snapped seven yards back and
-  the ball is spotted ten yards deep in the end zone, so the attempt is the
-  distance to the goal line plus seventeen. Modern league-wide rates are near
-  certain inside thirty yards, a little under nine in ten at forty, seven in ten
-  at fifty, and fall away past sixty, beyond which the attempt is treated as out
-  of range.
-- **Punt outcome by field position.** From a team's own end the punt nets about
-  forty yards. Nearer the opposing end zone the punter runs out of room, so the
-  return team's average start rises off the floor to around their own ten rather
-  than the net continuing to grow.
-- **Expected points by field position.** The value to a team of a first down at
-  a given distance from the end zone, in points of the next score. This is the
-  usual expected points curve: a shade below zero backed up against one's own
-  goal line, around one point at the twenty, two near midfield, and rising to
-  the value of a touchdown at the goal line.
+The bundled curves are smoothed estimates from 2022-2024 nflverse PBP,
+individually checked against the former hand-set baseline on 2025. They cover
+ordinary fourth-down attempts (goal-to-go separately), actual field goals,
+ordinary punts' next receiving-team spot, and signed next-score first-down EP.
+The artifact records filters, local support, priors, source hashes and holdout
+losses. ``tools/calibrate_decisions.py`` regenerates it without bot dependencies.
+These are observational league estimates, not a causal or full nfl4th model.
 
 Expected points is the right objective for most of a game and the wrong one once
 the clock decides the result: a team down eight with a minute left should go for
@@ -56,6 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .calibration import MODEL, support_text
 from .models import GameSituation
 from .winprob import possession_value, win_probability
 
@@ -89,72 +74,11 @@ GO_SECONDS = 6.0
 FIELD_GOAL_SECONDS = 5.0
 # A punt is a longer play than either, and the return costs more still.
 PUNT_SECONDS = 12.0
-# Inside this many yards a goal line try is harder than the same distance would
-# be in open field, since there is no room behind the defence.
-GOAL_LINE_PENALTY = 0.9
-
-# Yards to go -> share of fourth down attempts converted.
-CONVERSION_RATES: tuple[tuple[int, float], ...] = (
-    (1, 0.68),
-    (2, 0.55),
-    (3, 0.50),
-    (4, 0.45),
-    (5, 0.42),
-    (6, 0.38),
-    (7, 0.35),
-    (8, 0.33),
-    (9, 0.31),
-    (10, 0.30),
-    (12, 0.26),
-    (15, 0.20),
-    (20, 0.14),
-    (30, 0.08),
-)
-
-# Kick distance in yards -> share made.
-FIELD_GOAL_RATES: tuple[tuple[int, float], ...] = (
-    (20, 0.99),
-    (25, 0.97),
-    (30, 0.95),
-    (35, 0.92),
-    (40, 0.88),
-    (45, 0.82),
-    (50, 0.72),
-    (55, 0.58),
-    (60, 0.40),
-    (63, 0.26),
-    (MAX_FIELD_GOAL_YARDS, 0.15),
-)
-
-# Yards to goal at the punt -> the receiving team's average starting yard line,
-# measured from their own goal.
-PUNT_RESULTS: tuple[tuple[int, float], ...] = (
-    (30, 8.0),
-    (40, 10.0),
-    (50, 13.0),
-    (60, 19.0),
-    (70, 29.0),
-    (80, 39.0),
-    (90, 49.0),
-    (99, 58.0),
-)
-
-# Yards to goal -> expected points of the next score for the team in possession.
-EXPECTED_POINTS: tuple[tuple[int, float], ...] = (
-    (1, 6.3),
-    (5, 5.8),
-    (10, 5.2),
-    (20, 4.3),
-    (30, 3.7),
-    (40, 3.0),
-    (50, 2.3),
-    (60, 1.9),
-    (70, 1.5),
-    (80, 1.0),
-    (90, 0.5),
-    (95, 0.1),
-    (99, -0.4),
-)
+CONVERSION_RATES = MODEL.curves["conversion"].points
+GOAL_CONVERSION_RATES = MODEL.curves["goal_conversion"].points
+FIELD_GOAL_RATES = MODEL.curves["field_goal"].points
+PUNT_RESULTS = MODEL.curves["punt"].points
+EXPECTED_POINTS = MODEL.curves["ep"].points
 
 
 def _interpolate(table: tuple[tuple[int, float], ...], value: float) -> float:
@@ -175,8 +99,8 @@ def _interpolate(table: tuple[tuple[int, float], ...], value: float) -> float:
 
 
 def conversion_rate(distance: int, goal_to_go: bool = False) -> float:
-    rate = _interpolate(CONVERSION_RATES, max(distance, 1))
-    return rate * GOAL_LINE_PENALTY if goal_to_go else rate
+    table = GOAL_CONVERSION_RATES if goal_to_go else CONVERSION_RATES
+    return _interpolate(table, max(distance, 1))
 
 
 def field_goal_distance(yards_to_goal: int) -> int:
@@ -216,17 +140,31 @@ class Scoreboard:
 
     score_differential: int
     seconds_remaining: float
+    half_seconds_remaining: float | None = None
 
     def after(self, seconds: float) -> "Scoreboard":
         """The same score with a play's worth of clock taken off it."""
         return Scoreboard(
             score_differential=self.score_differential,
             seconds_remaining=max(0.0, self.seconds_remaining - seconds),
+            half_seconds_remaining=(
+                max(0.0, self.half_seconds_remaining - seconds)
+                if self.half_seconds_remaining is not None else None
+            ),
         )
+
+    def possession_points(self, yards_to_goal: float) -> float:
+        # Rejected WP fits retain their baseline possession curve too, so the
+        # shipped state estimator is exactly the one evaluated in the artifact.
+        points = _interpolate(MODEL.wp_possession_curve, yards_to_goal)
+        seconds = self.seconds_remaining
+        if MODEL.wp_half_cap and self.half_seconds_remaining is not None:
+            seconds = min(seconds, self.half_seconds_remaining)
+        return possession_value(points, seconds)
 
     def keeping_ball(self, yards_to_goal: float) -> float:
         """Our chance of winning, still holding the ball at this spot."""
-        value = possession_value(expected_points(yards_to_goal), self.seconds_remaining)
+        value = self.possession_points(yards_to_goal)
         return win_probability(
             self.score_differential, self.seconds_remaining, value
         )
@@ -237,9 +175,7 @@ class Scoreboard:
         Football is zero sum, so this is read as their chance of winning from
         where they now stand, subtracted from one.
         """
-        value = possession_value(
-            expected_points(their_yards_to_goal), self.seconds_remaining
-        )
+        value = self.possession_points(their_yards_to_goal)
         return 1.0 - win_probability(
             -self.score_differential, self.seconds_remaining, value
         )
@@ -247,11 +183,9 @@ class Scoreboard:
     def scoring(self, points: float) -> float:
         """Our chance of winning having just scored, with the kickoff to come.
 
-        The kickoff is not priced separately, because the points curves already
-        are net of it: a touchdown is worth ``TOUCHDOWN_POINTS`` rather than
-        seven precisely because the other team receives afterwards. Late in a
-        game that average is generous to a team that scores and must then kick
-        off with seconds left, which is the sharpest edge on this model.
+        The kickoff is not priced separately. The fixed touchdown/PAT value
+        and no-ball state are heuristics, not learned transitions or net kickoff
+        values. Late scoring and conversion strategy remain limitations.
         """
         return win_probability(
             self.score_differential + points, self.seconds_remaining
@@ -345,7 +279,10 @@ def _go_option(
         kind=GO,
         label="Go for it",
         expected_points=value,
-        detail=f"{round(rate * 100)}% convert → {detail_success}",
+        detail=(
+            f"{round(rate * 100)}% convert → {detail_success}; "
+            f"{support_text('goal_conversion' if goal_to_go else 'conversion', distance)}"
+        ),
         win_probability=chance,
     )
 
@@ -376,7 +313,7 @@ def _field_goal_option(
         kind=FIELD_GOAL,
         label="Field goal",
         expected_points=value,
-        detail=f"{kick}-yard attempt, {round(rate * 100)}% made",
+        detail=f"{kick}-yard attempt, {round(rate * 100)}% made; {support_text('field_goal', kick)}",
         win_probability=chance,
     )
 
@@ -391,7 +328,7 @@ def _punt_option(yards_to_goal: int, scoreboard: Scoreboard | None = None) -> Op
         kind=PUNT,
         label="Punt",
         expected_points=value,
-        detail=f"opponent starts around their own {round(their_start)}",
+        detail=f"opponent starts around their own {round(their_start)}; {support_text('punt', yards_to_goal)}",
         win_probability=chance,
     )
 
@@ -402,7 +339,10 @@ def _scoreboard(situation: GameSituation) -> Scoreboard | None:
     differential = situation.score_differential
     if seconds is None or differential is None:
         return None
-    return Scoreboard(score_differential=differential, seconds_remaining=seconds)
+    return Scoreboard(
+        score_differential=differential, seconds_remaining=seconds,
+        half_seconds_remaining=situation.half_seconds_remaining,
+    )
 
 
 def _caveats(situation: GameSituation) -> tuple[str, ...]:

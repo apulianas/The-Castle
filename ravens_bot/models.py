@@ -623,6 +623,25 @@ class PlayerSnaps:
     offense: int = 0
     defense: int = 0
     special_teams: int = 0
+    pfr_id: str | None = None
+    offense_share: float | None = None
+    defense_share: float | None = None
+    special_teams_share: float | None = None
+
+    @property
+    def identity(self) -> str:
+        if self.pfr_id:
+            return f"pfr:{self.pfr_id}"
+        if self.player.athlete_id:
+            return f"espn:{self.player.athlete_id}"
+        return f"name:{normalize_name(self.name)}"
+
+    def share(self, unit: str) -> float | None:
+        if unit == OFFENSE:
+            return self.offense_share
+        if unit == DEFENSE:
+            return self.defense_share
+        return self.special_teams_share
 
     @property
     def name(self) -> str:
@@ -658,6 +677,13 @@ class SnapCountReport:
     offense_total: int = 0
     defense_total: int = 0
     special_teams_total: int = 0
+    previous: SnapCountReport | None = None
+
+    def previous_player(self, entry: PlayerSnaps) -> PlayerSnaps | None:
+        if self.previous is None:
+            return None
+        matches = [item for item in self.previous.players if item.identity == entry.identity]
+        return matches[0] if len(matches) == 1 else None
 
     def total(self, unit: str) -> int:
         if unit == OFFENSE:

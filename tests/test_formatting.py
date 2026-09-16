@@ -478,6 +478,7 @@ def test_format_snap_breakdown_names_the_week_and_the_matchup() -> None:
 
     assert format_snap_breakdown(game, entry, report) == (
         "Week 2 — Baltimore Ravens at Cleveland Browns: 54 of 68 (79%) offense"
+        " | change N/A (no previous completed game)"
     )
 
 
@@ -567,7 +568,9 @@ def test_format_fourth_down_lists_the_call_then_every_option() -> None:
     lines = format_fourth_down(build_game(), advice).splitlines()
 
     assert lines[0] == "Field goal"
-    assert [line.split(":")[0] for line in lines[-3:]] == ["Field goal", "Go for it", "Punt"]
+    options = [line.split(":")[0] for line in lines if line.startswith(("Field goal:", "Go for it:", "Punt:"))]
+    assert options == ["Field goal", "Go for it", "Punt"]
+    assert any("nflverse 2022-2024" in line for line in lines)
 
 
 def test_format_unknown_team_offers_who_is_playing() -> None:
