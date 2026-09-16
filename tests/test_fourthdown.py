@@ -243,3 +243,16 @@ def test_impossible_ball_spot_cannot_be_advised() -> None:
 
     assert not advice.can_advise
     assert advice.reason is not None and "spot" in advice.reason
+
+
+@pytest.mark.parametrize("period,clock", [(2, "0:01"), (2, "0:00"), (4, "0:00"), (5, "2:00"), (5, "0:00")])
+def test_clock_boundaries_keep_finite_bounded_outcomes(period: int, clock: str) -> None:
+    advice = advise(situation(3, 25, period=period, clock=clock, score_differential=-3))
+
+    assert advice.ranked_by_win_probability
+    assert advice.best is not None
+    assert all(option.win_probability is not None and 0 < option.win_probability < 1
+               for option in advice.options)
+    assert [option.win_probability for option in advice.options] == sorted(
+        (option.win_probability for option in advice.options), reverse=True
+    )

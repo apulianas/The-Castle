@@ -72,6 +72,7 @@ from .formatting import (
     short_team_name,
 )
 from .dates import MAX_SCHEDULE_DAYS
+from .calibration import MODEL_LIMITS, WP_DESCRIPTION
 from .fourthdown import FieldGoalOutlook, FourthDownAdvice
 from .injury_report import INJURY_REPORT_URL, OfficialInjuryReport
 from .models import (
@@ -120,12 +121,10 @@ SNAP_DATA_SOURCE = "Data: Pro Football Reference via nflverse"
 # so rather than letting the recommendation read as a scouted opinion. Which of
 # the two models answered is stated as well, since they are different questions.
 FOURTH_DOWN_FOOTER = (
-    "League-average expected points. Ignores the clock, the score, and how good "
-    "either team is. • Live data: ESPN"
+    f"{MODEL_LIMITS} Expected points ignore clock and score. • Live data: ESPN"
 )
 FOURTH_DOWN_WIN_PROBABILITY_FOOTER = (
-    "League-average win probability from the score and the clock. Ignores "
-    "timeouts and how good either team is. • Live data: ESPN"
+    f"{MODEL_LIMITS} {WP_DESCRIPTION} End-half and OT strategy are not calibrated. • Live data: ESPN"
 )
 
 

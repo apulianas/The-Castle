@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+from .calibration import MODEL_LIMITS, WP_DESCRIPTION, support_text
 from .espn_urls import link
 from .fourthdown import (
     FIELD_GOAL_OVERHEAD,
@@ -740,6 +741,10 @@ def format_fourth_down(game: Game, advice: FourthDownAdvice) -> str:
             f"{option.label}: {format_fourth_down_option(option, best=index == 0)}"
         )
     lines.extend(advice.caveats)
+    lines.append(MODEL_LIMITS)
+    if advice.ranked_by_win_probability:
+        lines.append(WP_DESCRIPTION)
+        lines.append("End-half and OT strategy are not calibrated. Live data: ESPN.")
     return "\n".join(lines)
 
 
@@ -794,6 +799,7 @@ def format_field_goal_detail(outlook: FieldGoalOutlook) -> str:
             f"League average from {outlook.kick_distance} yards: "
             f"{round(outlook.make_rate * 100)}% made."
         )
+        lines.append(support_text("field_goal", outlook.kick_distance) + ".")
     else:
         lines.append(
             f"Past {MAX_FIELD_GOAL_YARDS} yards the model has no rate to quote, so a "
@@ -810,6 +816,7 @@ def format_field_goal_detail(outlook: FieldGoalOutlook) -> str:
             f"{format_expected_points(outlook.expected_points)} expected points, "
             "counting where a miss hands the ball over."
         )
+    lines.append(MODEL_LIMITS)
     return "\n".join(lines)
 
 

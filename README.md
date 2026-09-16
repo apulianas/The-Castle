@@ -276,11 +276,59 @@ overrides all of it.
 The recommendation itself is computed in `ravens_bot/fourthdown.py`. The
 published fourth down bot, `nfl4th`, is an R package, and nflverse distributes
 no per-situation decision feed, so there is nothing to look the answer up in.
-The module is a small expected points model built from four league-average
-curves — fourth down conversion rate by distance, field goal rate by kick
-distance, where a punt leaves the receiving team, and expected points by field
-position — each documented in the module docstring with the shape it comes from.
-It reads no data at runtime, so it is unit tested exactly like the formatters.
+The module uses bundled, historically estimated league-average curves: ordinary
+fourth-down conversion by distance (goal-to-go separately), field-goal success
+by kick distance, the receiving team's next field position after an ordinary
+punt, and first-down expected points of the next score in the same half.
+`ravens_bot/data/decision_calibration.json` contains the compact model,
+sample counts, source SHA-256 hashes, release/retrieval dates, filtering,
+smoothing assumptions, and holdout losses. Scoring is deterministic and offline;
+neither command downloads seasons or needs runtime ML dependencies. Docker's
+existing package copy includes the artifact. Missing/corrupt artifacts fail
+explicitly rather than silently falling back.
+
+The estimates use complete **2022-2024 regular seasons and postseason**, with
+**2025 held out from fitting**. Triangular local smoothing shrinks toward the
+original hand-set curves (10 pseudo-observations; 20 for goal-to-go), followed by
+weighted monotone regression. Goal-to-go's prior uses the training-only open-field
+fit. Sparse extreme distances therefore remain prior-sensitive rather than
+turning one long make into a confident recommendation. The command shows
+nearby training support (`n` counts observations with positive local smoothing
+weight, not independent games or effective sample size), vintage and limits.
+Distances outside supported nodes clamp to endpoints; kicks beyond 66 yards
+remain intentionally out of range, not a claim that longer kicks are impossible.
+
+Each curve ships only if its overall 2025 loss improves over the original
+hand-set baseline. Binary curves must improve both Brier score and log loss;
+continuous outcomes must improve mean squared error (MSE). Current results:
+
+| Component | Training / holdout observations | Baseline → historical holdout loss |
+|---|---:|---:|
+| Open-field fourth-down conversion | 2,100 / 807 | Brier 0.225991 → 0.224767 |
+| Goal-to-go conversion | 204 / 87 | Brier 0.260073 → 0.257880 |
+| Field goals | 3,326 / 1,120 | Brier 0.113670 → 0.111124 |
+| Ordinary punts | 5,916 / 1,786 | MSE 80.943998 → 74.996551 yards squared |
+| First-down next-score EP | 29,691 / 9,562 | MSE 21.841367 → 21.783385 points squared |
+
+These are descriptive component checks, **not a causal backtest of go/kick/punt
+recommendations**, proof of improvement in every situation, or a significance
+claim. Attempt selection is observational, plays within games are correlated,
+and 2025 is a model-selection holdout, not an untouched final test. Small gains,
+especially EP and goal-to-go, should not be read as precise advantages.
+
+Filtering excludes preseason/OT, deleted/no-play records and games without a
+known final result. Conversion includes sacks as failures but excludes kneels,
+spikes, penalties and special-teams/fake plays. Some fake kicks have
+`special_teams_play=0`, so descriptions containing "fake", "punt formation" or
+"field goal formation" are also excluded from scrimmage samples.
+Field-goal attempts on any down
+include blocks as misses and exclude penalties. Punt training excludes blocks,
+fumbles, scores and penalties and requires a subsequent receiving-team first
+down in the same half. EP uses first-and-10/goal with at least five minutes in
+the half and a score margin of at most 14; its observed signed next score is
+TD 6.95, FG 3, safety 2 or zero for no remaining score. It does **not** train
+against nflfastR's published EP predictions. Nonfinite numeric data is rejected
+as missing; final scores are outcome labels, never WP predictors.
 
 Expected points is the right objective until the clock decides the result: a
 team down eight with a minute left should go for it on fourth-and-goal from
@@ -294,6 +342,19 @@ the game state they leave behind and scored there, and the ranking is on win
 probability. The embed prices each option in win probability instead of points
 and the footer says which model answered.
 
+The current **WP layer is still the original score/clock approximation**, not
+historically calibrated WP. A training-only two-slope logistic fit was evaluated
+on 43,257 training and 14,038 holdout first-down states. Its Brier score improved
+overall (0.174989 → 0.173757) and in the final five minutes
+(0.109429 → 0.103629), but regressed in the final two minutes of the first half
+(0.172743 → 0.176925; 1,013 states). Log loss regressed there too. The candidate
+also capped possession value at the half boundary. It was **rejected**: both
+original slopes and the original WP possession-value curve/clock treatment are
+retained, so the deployed WP state estimator matches the evaluated baseline.
+The historical conversion, kick and punt estimates still weight decision
+outcomes; the historical EP curve supplies the expected-points alternative.
+The footer explicitly distinguishes these from the retained WP approximation.
+
 The clock is not always published: between periods, and on a down ESPN has not
 filled in, there is no time and sometimes no score. Those downs fall back to the
 expected points ranking exactly as before, keep the caveats explaining what the
@@ -306,9 +367,40 @@ Three limits are stated in the embed footer rather than hidden:
   the closing point spread to know who is on the field.
 - Nobody publishes timeouts on the scoreboard route this reads, so two minutes
   with three timeouts and two minutes with none are the same game here.
-- A score is worth what the points curves say it is worth, which is already net
-  of the kickoff that follows on average. Late in a game that average is
-  generous to a team that scores and must then kick off with seconds left.
+- Play duration, touchdown/PAT value, post-score kickoff treatment and outcome
+  transitions remain heuristics. The points curve is **not** a net kickoff
+  valuation. End-half drive timing, timeouts, conversion strategy and OT rules
+  are not calibrated. Existing zero-clock and overtime approximations remain;
+  they should not be mistaken for rule-complete late-game strategy.
+
+### Regenerating the decision estimates
+
+Run from the repository root with Python 3.12+; no Discord configuration, bot
+startup, pandas, numpy or scipy is needed. Keep the raw cache **outside** the
+repository (about 80 MB compressed). In PowerShell:
+
+```powershell
+python tools\calibrate_decisions.py --cache-dir "$env:TEMP\castle-nflverse-pbp" --download
+```
+
+With the four gzip files cached, omit `--download` for a fully offline rebuild.
+Use `--output <path>` to write a comparison artifact; identical pinned inputs
+produce identical output bytes. Source URLs, hashes, release times and the
+2026-09-16 retrieval provenance are pinned in the generator/artifact, not replaced
+with a new timestamp on every rebuild. If nflverse revises a release asset, a
+hash mismatch stops regeneration: review and repin source provenance deliberately,
+then rerun and review all holdout evidence before shipping a new vintage. No
+holdout outcomes enter curve smoothing, goal priors or WP parameter fitting.
+Do not tune parameters repeatedly to the same holdout and call it independent
+validation. The generator writes only the compact artifact, never raw PBP into
+the repository.
+
+Derived data attribution: [nflverse/nflverse-data](https://github.com/nflverse/nflverse-data),
+including nflfastR play-by-play, licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+([source license](https://github.com/nflverse/nflverse-data/blob/master/LICENSE.md)).
+The bundled artifact modifies that data by filtering, aggregating, smoothing and
+calibrating it. nflverse is credited, not represented as endorsing this model.
 
 ## Data source
 

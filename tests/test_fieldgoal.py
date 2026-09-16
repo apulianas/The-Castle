@@ -99,7 +99,7 @@ def test_the_call_states_the_distance_and_the_rate() -> None:
     call = format_field_goal_call(field_goal_outlook(kick_distance=40))
 
     assert call.startswith("40-yard field goal")
-    assert "88% good" in call
+    assert f"{round(field_goal_rate(40) * 100)}% good" in call
 
 
 def test_the_plain_text_answer_carries_the_game_and_the_situation() -> None:
@@ -147,3 +147,17 @@ def test_the_fallback_messages_say_what_to_do_instead() -> None:
 
     embed = no_field_goal_embed(format_no_field_goal_spot())
     assert embed.title == "Field goal"
+
+
+def test_long_kick_exposes_historical_support_and_vintage() -> None:
+    outlook = field_goal_outlook(kick_distance=66)
+    text = format_field_goal(outlook)
+    embed = field_goal_embed(outlook)
+
+    for content in (text, embed.description):
+        assert content is not None
+        assert "nflverse 2022-2024" in content
+        assert "2025 holdout" in content
+        assert "nearby n=" in content
+        assert "sparse/prior-sensitive" in content
+        assert "kicker or weather" in content

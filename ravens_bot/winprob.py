@@ -22,7 +22,9 @@ zero as the clock runs out.
 
 Two things this is not. It is not ``nfl4th``, which is a gradient boosted model
 trained on play by play data and reads the closing spread to know how good the
-teams are; this has no training data, no teams, and no runtime inputs. And it
+teams are. The bundled artifact records a historical two-slope fit and holdout
+evaluation; a fit that fails any safety subgroup retains the original slopes
+and possession curve rather than claiming calibrated WP. And it
 does not know timeouts, because ESPN's scoreboard ``situation`` block does not
 publish them — a two minute drill with three timeouts and one with none are the
 same game here.
@@ -33,6 +35,7 @@ from __future__ import annotations
 import math
 import re
 
+from .calibration import MODEL
 
 PERIOD_SECONDS = 15 * 60
 REGULATION_PERIODS = 4
@@ -132,11 +135,11 @@ def win_probability(
             return MIN_WIN_PROBABILITY
         # Tied at zero is overtime, which starts as a coin toss.
         return 0.5
-    spread = FULL_GAME_SCORE_SPREAD * math.sqrt(
-        max(seconds_remaining, MIN_EFFECTIVE_SECONDS) / GAME_SECONDS
-    )
-    margin = score_differential + possession_points
-    exponent = LOGISTIC_SCALE * margin / spread
+    time_scale = math.sqrt(max(seconds_remaining, MIN_EFFECTIVE_SECONDS) / GAME_SECONDS)
+    score_weight, possession_weight = MODEL.wp_coefficients
+    exponent = (
+        score_weight * score_differential + possession_weight * possession_points
+    ) / time_scale
     # A large exponent overflows before it changes the answer.
     if exponent > 30:
         return MAX_WIN_PROBABILITY
