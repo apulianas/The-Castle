@@ -1538,13 +1538,21 @@ class EspnClient:
                 selected.append(game)
         return selected
 
-    async def fetch_season_schedule(self, season: int | None = None) -> list[Game]:
+    async def fetch_season_schedule(
+        self, season: int | None = None, season_type: int | None = None
+    ) -> list[Game]:
         key = "season" if season is None else f"season:{season}"
+        if season_type is not None:
+            key += f":type:{season_type}"
 
         async def load() -> list[Game]:
-            params = None if season is None else {"season": str(season)}
+            params = {}
+            if season is not None:
+                params["season"] = str(season)
+            if season_type is not None:
+                params["seasontype"] = str(season_type)
             payload = await self._json(
-                f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule", params
+                f"{SITE_BASE}/teams/{RAVENS_SLUG}/schedule", params or None
             )
             return parse_schedule(payload)
 
