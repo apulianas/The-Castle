@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import discord
+import pytest
 
 from ravens_bot.bot import (
     RavensBot,
@@ -564,14 +565,16 @@ def test_a_scheduled_report_day_suppresses_updates_until_the_chart_posts(
     assert bot._unseen(target, injury_announcement_key(update))
 
 
+@pytest.mark.parametrize("version", ["posted", "official-injury:week-2:partial"])
 def test_a_chart_establishes_the_baseline_then_later_updates_post_individually(
     tmp_path,
+    version,
 ) -> None:
     target = build_target()
     bot = build_bot(tmp_path, target, seen_injuries=True)
     baseline = build_update(LIKELY)
     bot.announcement_state.mark_current(
-        f"official-injury:{TARGET_DATE.isoformat()}@{target.key_id}", "posted"
+        f"official-injury:{TARGET_DATE.isoformat()}@{target.key_id}", version
     )
 
     asyncio.run(

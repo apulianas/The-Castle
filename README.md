@@ -26,9 +26,12 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Roster-backed player resolution, so names in a transaction become real links.
 - Background polling for today's roster transactions, practice-squad standard
   elevations, and injury report changes. The official weekly Ravens chart is posted as an image
-  after both clubs publish the same practice day and the chart remains unchanged
-  for five minutes. Individual ESPN injury changes are not posted separately,
-  and the chart automatically advances with the site's selected week.
+  on the first poll with practice data from either club, without waiting for the
+  opponent or a settling period. Missing or out-of-sync opponent data is labeled
+  as a partial report. Every subsequent chart change edits that day's same post,
+  including its image, for both channel and webhook targets. Individual ESPN
+  injury changes are not posted separately, and the chart automatically advances
+  with the site's selected week.
 - Game day inactives watched on their own clock: ESPN publishes the lists about
   90 minutes before kickoff, so the watcher looks every minute from 90 minutes
   out until a quarter hour past the scheduled start, and otherwise only reads
@@ -143,6 +146,13 @@ without constructing a client.
   column showing "DNP" takes no more room than that, and both clubs' tables
   share one set of widths so they line up. Its title links back to the live
   report.
+- Automatic injury posts keep one message per practice date and destination.
+  Message IDs and the last delivered chart version are saved in `/data/state.json`,
+  so edits resume after restarts and failed deliveries are retried. Late updates
+  can still edit an existing previous day's report; stale reports do not create
+  new posts. Deleted messages are replaced when the chart next changes. Posts
+  created by older bot versions cannot be edited automatically because their
+  message IDs were not saved.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post

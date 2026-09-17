@@ -577,6 +577,11 @@ def official_injury_embed(report: OfficialInjuryReport) -> discord.Embed:
         report.title,
         url=report.url,
     )
+    if not report.teams_are_synchronized:
+        embed.description = (
+            "Partial report: one or both teams' practice reports are missing "
+            "or cover different days."
+        )
     embed.set_image(url="attachment://ravens-injury-report.png")
     embed.set_footer(text=OFFICIAL_INJURY_DATA_SOURCE)
     return embed

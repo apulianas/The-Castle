@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 from collections.abc import Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -75,10 +76,9 @@ from .formatting import (
 from .injury_report import (
     InjuryReportClient,
     InjuryReportError,
-    OfficialReportGate,
     OfficialInjuryReport,
     add_matchup,
-    is_scheduled_report_date,
+    practice_report_date,
     render_injury_report,
 )
 from .models import (
@@ -157,7 +157,6 @@ class RavensBot(commands.Bot):
         self.injury_reports: InjuryReportClient | None = None
         self.artwork: ArtworkLoader | None = None
         self.official_transactions: OfficialTransactionsClient | None = None
-        self.official_injury_gate = OfficialReportGate()
         self.snap_counts: SnapCountClient | None = None
         self.recaps: RecapClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
@@ -220,16 +219,17 @@ class RavensBot(commands.Bot):
             LOGGER.warning("Official injury report polling skipped: %s", exc)
         else:
             official_report = await self._add_official_injury_matchup(official_report)
-            scheduled_report_date = is_scheduled_report_date(
-                official_report, target_date, self.config.time_zone
-            )
-            if (
-                scheduled_report_date
-                and self.official_injury_gate.ready(official_report)
-            ):
-                image = await self._render_official_injury_report(official_report)
+            report_date = practice_report_date(official_report, self.config.time_zone)
+            scheduled_report_date = report_date == target_date
+            if report_date is None:
+                LOGGER.warning(
+                    "Official injury report has no dated practice data: %s",
+                    official_report.week,
+                )
+            elif report_date <= target_date:
                 await self._post_official_injury_report(
-                    targets, official_report, target_date, image
+                    targets, official_report, report_date,
+                    allow_new=scheduled_report_date,
                 )
 
         client = _require_espn(self)
@@ -261,18 +261,30 @@ class RavensBot(commands.Bot):
         report: OfficialInjuryReport,
         report_date: date,
         image: bytes | None = None,
+        *,
+        allow_new: bool = True,
     ) -> None:
-        image = image or render_injury_report(report)
+        pending: list[_AnnouncementTarget] = []
         for target in targets:
             slot = _official_injury_slot(report_date, target.key_id)
-            if not self.announcement_state.is_current(slot, "posted"):
-                await self._announce_image(
-                    target,
-                    slot,
-                    "posted",
-                    official_injury_embed(report),
-                    image,
-                )
+            # Older releases saved no message ID; leave those posts alone.
+            if self.announcement_state.is_current(slot, "posted"):
+                continue
+            if self.announcement_state.is_current(slot, report.announcement_key):
+                continue
+            if allow_new or self.announcement_state.message_id(slot) is not None:
+                pending.append(target)
+        if not pending:
+            return
+        image = image or await self._render_official_injury_report(report)
+        for target in pending:
+            await self._announce_image(
+                target,
+                _official_injury_slot(report_date, target.key_id),
+                report.announcement_key,
+                official_injury_embed(report),
+                image,
+            )
 
     async def _add_official_injury_matchup(
         self, report: OfficialInjuryReport
@@ -352,9 +364,9 @@ class RavensBot(commands.Bot):
                 for update in standalone
                 if self._unseen(target, injury_announcement_key(update))
             ]
-            chart_is_current = self.announcement_state.is_current(
-                _official_injury_slot(target_date, target.key_id), "posted"
-            )
+            chart_is_current = self.announcement_state.current_version(
+                _official_injury_slot(target_date, target.key_id)
+            ) is not None
             baseline_slot = _injury_baseline_slot(target_date, target.key_id)
             needs_chart_baseline = (
                 scheduled_report_date
@@ -484,16 +496,45 @@ class RavensBot(commands.Bot):
         embed: discord.Embed,
         image: bytes,
     ) -> None:
-        file = discord.File(
-            io.BytesIO(image),
-            filename="ravens-injury-report.png",
-        )
+        message_id = self.announcement_state.message_id(slot)
         try:
-            await target.destination.send(embed=embed, file=file)
+            if message_id is not None:
+                try:
+                    with closing(discord.File(
+                        io.BytesIO(image), filename="ravens-injury-report.png"
+                    )) as file:
+                        if isinstance(target.destination, discord.Webhook):
+                            await target.destination.edit_message(
+                                message_id, embed=embed, attachments=[file]
+                            )
+                        else:
+                            channel = self.get_partial_messageable(int(target.key_id))
+                            await channel.get_partial_message(message_id).edit(
+                                embed=embed, attachments=[file]
+                            )
+                except discord.NotFound as exc:
+                    if exc.code != 10008:  # Unknown Message, not a missing webhook.
+                        raise
+                    LOGGER.warning(
+                        "Injury report message %s was deleted from %s; replacing it",
+                        message_id, target.label,
+                    )
+                else:
+                    self.announcement_state.mark_message(slot, version, message_id)
+                    return
+            with closing(discord.File(
+                io.BytesIO(image), filename="ravens-injury-report.png"
+            )) as file:
+                if isinstance(target.destination, discord.Webhook):
+                    message = await target.destination.send(
+                        embed=embed, file=file, wait=True
+                    )
+                else:
+                    message = await target.destination.send(embed=embed, file=file)
         except discord.DiscordException as exc:
-            LOGGER.warning("Could not post to %s: %s", target.label, exc)
+            LOGGER.warning("Could not post or edit injury report in %s: %s", target.label, exc)
             return
-        self.announcement_state.mark_current(slot, version)
+        self.announcement_state.mark_message(slot, version, message.id)
 
     @poll_updates.before_loop
     async def before_poll_updates(self) -> None:

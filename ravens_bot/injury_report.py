@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import html
-import logging
-import time
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
-from typing import Callable, Mapping
+from typing import Mapping
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -49,8 +48,6 @@ from .models import Game, RAVENS_NAME, TeamRef
 
 
 INJURY_REPORT_URL = "https://www.baltimoreravens.com/team/injury-report/"
-REPORT_SETTLE_SECONDS = 300
-LOGGER = logging.getLogger(__name__)
 
 
 class InjuryReportError(RuntimeError):
@@ -260,30 +257,6 @@ def _latest_practice_day(table: InjuryTable) -> str | None:
     return None
 
 
-class OfficialReportGate:
-    """Release a synchronized report after its contents stay quiet for five minutes."""
-
-    def __init__(
-        self,
-        delay_seconds: float = REPORT_SETTLE_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._delay_seconds = delay_seconds
-        self._clock = clock
-        self._pending_key: str | None = None
-        self._pending_since = 0.0
-
-    def ready(self, report: OfficialInjuryReport) -> bool:
-        if not report.teams_are_synchronized:
-            self._pending_key = None
-            return False
-        if report.announcement_key != self._pending_key:
-            self._pending_key = report.announcement_key
-            self._pending_since = self._clock()
-            return False
-        return self._clock() - self._pending_since >= self._delay_seconds
-
-
 def parse_injury_report(page: str) -> OfficialInjuryReport:
     parser = _ReportParser()
     parser.feed(page)
@@ -373,7 +346,14 @@ def is_scheduled_report_date(
     target_date: date,
     time_zone: ZoneInfo,
 ) -> bool:
-    """Whether the report's newest practice column belongs to this date.
+    return practice_report_date(report, time_zone) == target_date
+
+
+def practice_report_date(
+    report: OfficialInjuryReport,
+    time_zone: ZoneInfo,
+) -> date | None:
+    """Date of the newest published practice column from either club.
 
     Matching the column's weekday back from kickoff follows ESPN's shifted
     Mon/Tue/Wed and Thu/Fri/Sat report schedules without hard-coding game days.
@@ -384,19 +364,19 @@ def is_scheduled_report_date(
     }
     matchup = report.matchup
     if matchup is None or matchup.kickoff is None:
-        return False
+        return None
     kickoff = matchup.kickoff
     if kickoff.tzinfo is None:
         kickoff = kickoff.replace(tzinfo=time_zone)
     kickoff_date = kickoff.astimezone(time_zone).date()
+    report_dates: list[date] = []
     for table in report.tables:
         day = (_latest_practice_day(table) or "").strip()[:3].casefold()
         if day not in weekdays:
             continue
         days_before = (kickoff_date.weekday() - weekdays[day]) % 7
-        if kickoff_date - timedelta(days=days_before) == target_date:
-            return True
-    return False
+        report_dates.append(kickoff_date - timedelta(days=days_before))
+    return max(report_dates, default=None)
 
 
 def _week_number(week: str) -> int | None:

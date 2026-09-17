@@ -75,3 +75,21 @@ def test_state_persists_the_current_version_of_a_changing_report(tmp_path) -> No
 
     assert restarted.is_current("official-injury@123", "week-1:first")
     assert not restarted.is_current("official-injury@123", "week-1:corrected")
+
+
+def test_state_persists_message_id_with_delivered_report_version(tmp_path) -> None:
+    path = tmp_path / "state.json"
+    state = AnnouncementState(str(path))
+    state.mark_message("official-injury@123", "week-2:partial", 987)
+    restarted = AnnouncementState(str(path))
+    restarted.load()
+    assert restarted.current_version("official-injury@123") == "week-2:partial"
+    assert restarted.message_id("official-injury@123") == 987
+    assert restarted.message_id("unknown") is None
+
+
+def test_invalid_saved_message_id_is_logged(tmp_path, caplog) -> None:
+    state = AnnouncementState(str(tmp_path / "state.json"))
+    state.mark_current("official-injury@123:message-id", "invalid")
+    assert state.message_id("official-injury@123") is None
+    assert "Invalid saved message ID" in caplog.text
