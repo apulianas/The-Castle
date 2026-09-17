@@ -82,6 +82,27 @@ class AnnouncementState:
     def is_current(self, slot: str, value: str) -> bool:
         return self._current.get(slot) == value
 
+    def current_version(self, slot: str) -> str | None:
+        return self._current.get(slot)
+
+    def message_id(self, slot: str) -> int | None:
+        value = self._current.get(f"{slot}:message-id")
+        if value is None:
+            return None
+        try:
+            message_id = int(value)
+            if message_id > 0:
+                return message_id
+        except ValueError:
+            pass
+        LOGGER.warning("Invalid saved message ID for %s: %r", slot, value)
+        return None
+
+    def mark_message(self, slot: str, version: str, message_id: int) -> None:
+        self._current[slot] = version
+        self._current[f"{slot}:message-id"] = str(message_id)
+        self.save()
+
     def mark_current(self, slot: str, value: str) -> None:
         self._current[slot] = value
         self.save()
