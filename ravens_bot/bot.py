@@ -42,8 +42,8 @@ from .embeds import (
     player_snap_totals_embed,
     roster_news_post,
     schedule_embed,
-    snap_count_embed,
-    snap_totals_embed,
+    snap_count_embeds,
+    snap_totals_embeds,
     standings_embed,
     transaction_embeds,
 )
@@ -87,6 +87,7 @@ from .models import (
     InjuryReport,
     InjuryUpdate,
     PlayerRef,
+    SNAP_UNITS,
     SnapCountReport,
     Transaction,
 )
@@ -781,12 +782,14 @@ def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             return
         totals = aggregate(reports)
         if player is None:
-            if weeks == 1:
-                await interaction.followup.send(embed=snap_count_embed(reports[-1]))
-            else:
-                await interaction.followup.send(
-                    embed=snap_totals_embed(totals, reports, weeks)
+            # Discord's 6,000-character limit is shared by all embeds in a message.
+            for unit in SNAP_UNITS:
+                pages = (
+                    snap_count_embeds(reports[-1], unit)
+                    if weeks == 1 else snap_totals_embeds(totals, reports, weeks, unit)
                 )
+                for embed in pages:
+                    await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
         matches = match_players(totals, player)

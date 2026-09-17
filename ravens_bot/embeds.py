@@ -77,6 +77,7 @@ from .fourthdown import FieldGoalOutlook, FourthDownAdvice
 from .injury_report import INJURY_REPORT_URL, OfficialInjuryReport
 from .models import (
     AFC_NORTH_GROUP_ID,
+    OFFENSE,
     RAVENS_SLUG,
     SNAP_UNITS,
     Game,
@@ -861,7 +862,8 @@ def help_embed() -> discord.Embed:
         value=(
             "Pro Football Reference snap counts for the last game, or the last "
             f"1-{MAX_SNAP_GAMES} games. Name a player for their own line and a per-game "
-            "breakdown; omit one for the full team report by unit. Share changes "
+            "breakdown; omit one for separate offense, defense, and special-teams "
+            "reports, including every participant in each unit. Share changes "
             "compare with the previous completed game in percentage points."
         ),
         inline=False,
@@ -961,11 +963,52 @@ def no_snap_counts_embed(message: str) -> discord.Embed:
     return embed
 
 
-def snap_count_embed(report: SnapCountReport) -> discord.Embed:
+def _snap_pages(
+    template: discord.Embed, blocks: list[tuple[str, list[str]]], extra: str | None = None,
+) -> list[discord.Embed]:
+    """Keep every row, with each page sent as a separate Discord message."""
+    remaining = [(title, lines) for title, lines in blocks if lines]
+    available = sum(len(lines) for _, lines in remaining)
+    pages = []
+    while remaining:
+        embed = template.copy()
+        shown = _add_field_blocks(embed, remaining)
+        if not shown:
+            raise ValueError("A snap-count row cannot fit within Discord's embed limits")
+        embed.set_footer(text=_snap_footer(shown, available, extra))
+        pages.append(embed)
+        to_skip = shown
+        next_blocks = []
+        for title, lines in remaining:
+            skip = min(to_skip, len(lines))
+            to_skip -= skip
+            if skip < len(lines):
+                next_blocks.append((title, lines[skip:]))
+        remaining = next_blocks
+    if not pages:
+        template.set_footer(text=_snap_footer(0, 0, extra))
+        return [template]
+    if len(pages) > 1:
+        for index, embed in enumerate(pages, 1):
+            embed.set_footer(text=f"Page {index}/{len(pages)} • {embed.footer.text}")
+    return pages
+
+
+def snap_count_embed(report: SnapCountReport, unit: str | None = None) -> discord.Embed:
+    """The first page of a single-game report."""
+    embed = snap_count_embeds(report, unit)[0]
+    if embed.footer.text and embed.footer.text.startswith("Page "):
+        embed.set_footer(text=embed.footer.text.split(" • ", 1)[1])
+    return embed
+
+
+def snap_count_embeds(report: SnapCountReport, unit: str | None = None) -> list[discord.Embed]:
     """Every Ravens player's snaps in one game, grouped by unit."""
+    if unit is not None and unit not in SNAP_UNITS:
+        raise ValueError(f"Unknown snap unit: {unit}")
     game = report.game
     embed = _base_embed(
-        f"{format_game_title(game)} — snap counts",
+        f"{format_game_title(game)} — {unit + ' ' if unit else ''}snap counts",
         format_game_status(game),
         url=game_url(game.event_id),
     )
@@ -973,24 +1016,29 @@ def snap_count_embed(report: SnapCountReport) -> discord.Embed:
     if not report.players:
         embed.description = format_no_snap_counts(game)
         embed.set_footer(text=SNAP_DATA_SOURCE)
-        return embed
+        return [embed]
 
     embed.description = f"{format_game_status(game)}\n{format_snap_comparison(report)}"
     blocks = []
-    for unit in SNAP_UNITS:
-        entries = report.unit(unit)
-        title = f"{unit.capitalize()} ({report.total(unit)} snaps)"
+    for selected_unit in (SNAP_UNITS if unit is None else (unit,)):
+        entries = report.unit(selected_unit)
+        title = f"{selected_unit.capitalize()} ({report.total(selected_unit)} snaps)"
         blocks.append(
-            (title, [format_snap_row(entry, report, unit) for entry in entries])
+            (title, [
+                format_snap_row(entry, report, selected_unit, unit_change_only=unit is not None)
+                for entry in entries
+            ])
         )
+    if unit is not None and not report.unit(unit):
+        embed.description += "\nNo players have recorded snaps in this unit."
     zero_snap_players = [entry for entry in report.players if entry.total == 0]
-    if zero_snap_players:
+    if zero_snap_players and unit in (None, OFFENSE):
         blocks.append((
             "No snaps",
             [f"{entry.name} — 0 snaps{format_snap_changes(entry, report)}"
              for entry in zero_snap_players],
         ))
-    if report.previous and report.previous.players:
+    if report.previous and report.previous.players and unit in (None, OFFENSE):
         current = {entry.identity for entry in report.players}
         absent = [
             f"{entry.name} — change N/A (not listed this game; not assumed zero)"
@@ -998,23 +1046,34 @@ def snap_count_embed(report: SnapCountReport) -> discord.Embed:
         ]
         if absent:
             blocks.append(("Previously listed players", absent))
-    available = sum(len(lines) for _, lines in blocks)
-    shown = _add_field_blocks(embed, blocks)
-    embed.set_footer(text=_snap_footer(shown, available))
-    return embed
+    return _snap_pages(embed, blocks)
 
 
 def snap_totals_embed(
-    totals: list[PlayerSnapTotals], reports: list[SnapCountReport], weeks: int
+    totals: list[PlayerSnapTotals], reports: list[SnapCountReport], weeks: int,
+    unit: str | None = None,
 ) -> discord.Embed:
+    """The first page of a multi-game report."""
+    embed = snap_totals_embeds(totals, reports, weeks, unit)[0]
+    if embed.footer.text and embed.footer.text.startswith("Page "):
+        embed.set_footer(text=embed.footer.text.split(" • ", 1)[1])
+    return embed
+
+
+def snap_totals_embeds(
+    totals: list[PlayerSnapTotals], reports: list[SnapCountReport], weeks: int,
+    unit: str | None = None,
+) -> list[discord.Embed]:
     """Team snap totals across several games, without the per-game rows."""
+    if unit is not None and unit not in SNAP_UNITS:
+        raise ValueError(f"Unknown snap unit: {unit}")
     period = format_snap_period(weeks)
-    embed = _base_embed(f"Ravens snap counts — {period}")
+    embed = _base_embed(f"Ravens {unit + ' ' if unit else ''}snap counts — {period}")
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
     if not reports:
         embed.description = format_no_snap_counts()
         embed.set_footer(text=SNAP_DATA_SOURCE)
-        return embed
+        return [embed]
 
     embed.description = _limit_description(
         "\n".join(
@@ -1026,31 +1085,28 @@ def snap_totals_embed(
     latest = reports[-1]
     latest_players = {entry.identity: entry for entry in latest.players}
 
-    def row(item: PlayerSnapTotals, unit: str) -> str:
+    def row(item: PlayerSnapTotals, selected_unit: str) -> str:
         identity = item.entries[-1][1].identity
         entry = latest_players.get(identity)
         if entry is not None:
-            change = format_snap_changes(entry, latest)
+            change = format_snap_changes(entry, latest, selected_unit if unit is not None else None)
         elif not latest.players:
             change = " | change N/A (latest game unpublished)"
         else:
             change = " | change N/A (not listed in latest game)"
-        return format_snap_totals_row(item, unit) + change
+        return format_snap_totals_row(item, selected_unit) + change
 
     blocks = []
-    for unit in SNAP_UNITS:
-        entries = [
-            item for item in totals if item.primary_unit == unit and item.snaps(unit)
-        ]
-        entries.sort(key=lambda item: (-item.snaps(unit), item.player.name))
+    for selected_unit in (SNAP_UNITS if unit is None else (unit,)):
+        entries = [item for item in totals if item.snaps(selected_unit)]
+        entries.sort(key=lambda item: (-item.snaps(selected_unit), item.player.name))
         blocks.append(
-            (unit.capitalize(), [row(item, unit) for item in entries])
+            (selected_unit.capitalize(), [row(item, selected_unit) for item in entries])
         )
-    available = sum(len(lines) for _, lines in blocks)
-    shown = _add_field_blocks(embed, blocks)
+    if unit is not None and not any(item.snaps(unit) for item in totals):
+        embed.description += "\nNo players have recorded snaps in this unit in the published games."
     published = sum(bool(report.players) for report in reports)
-    embed.set_footer(text=_snap_footer(shown, available, f"{published}/{len(reports)} games published"))
-    return embed
+    return _snap_pages(embed, blocks, f"{published}/{len(reports)} games published")
 
 
 def player_snap_embed(entry: PlayerSnaps, report: SnapCountReport) -> discord.Embed:

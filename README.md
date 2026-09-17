@@ -163,8 +163,14 @@ without constructing a client.
   and its make rate, or where a punt leaves the opponent. A call the model rates
   as a coin flip says so instead of picking a side, and anything the model
   cannot see is added as its own field.
-- **Snap counts** list players by unit — offence, defence, special teams — each
-  in the unit they played most, sorted by snaps. A player is a line inside a
+- **Snap counts** send separate offence, defence, and special-teams reports,
+  each listing every player with snaps in that unit, sorted by snaps. Players
+  who contribute to more than one unit appear in each applicable report with
+  that unit's counts and share. Reports are separate messages so the Discord
+  character limit cannot let offence or defence crowd out special teams.
+  Long unit reports continue in numbered pages instead of dropping players.
+  This applies to both single-game reports and multi-game totals.
+  A player is a line inside a
   unit's field rather than a field of their own, because a full report names
   forty players and Discord allows twenty five fields. Naming a player switches
   to their own embed, with their headshot and, over several games, a week by
