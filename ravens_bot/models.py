@@ -693,8 +693,8 @@ class SnapCountReport:
         return self.special_teams_total
 
     def unit(self, unit: str) -> tuple[PlayerSnaps, ...]:
-        """Players whose game was mostly this unit, most snaps first."""
-        entries = [entry for entry in self.players if entry.primary_unit == unit and entry.snaps(unit)]
+        """Every participant in this unit, most snaps first."""
+        entries = [entry for entry in self.players if entry.snaps(unit)]
         entries.sort(key=lambda entry: (-entry.snaps(unit), entry.name))
         return tuple(entries)
 

@@ -478,14 +478,18 @@ def format_player_snap_totals(totals: PlayerSnapTotals) -> str:
     return "\n".join(lines)
 
 
-def format_snap_row(entry: PlayerSnaps, report: SnapCountReport, unit: str) -> str:
+def format_snap_row(
+    entry: PlayerSnaps, report: SnapCountReport, unit: str, *, unit_change_only: bool = False,
+) -> str:
     name = link(entry.player.name, entry.player.page_url)
     if entry.position:
         name = f"{entry.position} {name}"
-    return f"{name} — {format_snap_share(entry.snaps(unit), report.total(unit))}{format_snap_changes(entry, report)}"
+    return f"{name} — {format_snap_share(entry.snaps(unit), report.total(unit))}{format_snap_changes(entry, report, unit if unit_change_only else None)}"
 
 
-def format_snap_changes(entry: PlayerSnaps, report: SnapCountReport) -> str:
+def format_snap_changes(
+    entry: PlayerSnaps, report: SnapCountReport, selected_unit: str | None = None,
+) -> str:
     """Published share differences, never inferred zeros for an absent row."""
     if report.previous is None:
         return ""
@@ -496,6 +500,8 @@ def format_snap_changes(entry: PlayerSnaps, report: SnapCountReport) -> str:
         return " | change N/A (not listed in prior game)"
     changes = []
     for unit, label in zip(SNAP_UNITS, ("O", "D", "ST")):
+        if selected_unit is not None and selected_unit != unit:
+            continue
         current_share, prior_share = entry.share(unit), previous.share(unit)
         value = "N/A"
         if current_share is not None and prior_share is not None:

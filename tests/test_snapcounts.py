@@ -17,7 +17,9 @@ from ravens_bot.embeds import (
     player_snap_embed,
     player_snap_totals_embed,
     snap_count_embed,
+    snap_count_embeds,
     snap_totals_embed,
+    snap_totals_embeds,
 )
 from ravens_bot.espn import parse_roster
 from ravens_bot.formatting import format_snap_changes, format_snap_row
@@ -198,7 +200,7 @@ def test_build_report_applies_roster_art_and_links() -> None:
     assert report.offense_total == 68
 
 
-def test_report_units_are_sorted_and_exclusive() -> None:
+def test_report_units_include_every_participant_sorted_by_unit_snaps() -> None:
     report = build_report(_ravens_game(), parse_snap_counts(SAMPLE)["2025_02_BAL_CLE"])
 
     assert [entry.name for entry in report.unit(OFFENSE)] == [
@@ -206,7 +208,9 @@ def test_report_units_are_sorted_and_exclusive() -> None:
         "Zay Flowers",
     ]
     assert [entry.name for entry in report.unit(DEFENSE)] == ["Roquan Smith"]
-    assert [entry.name for entry in report.unit(SPECIAL_TEAMS)] == ["Nick Moore"]
+    assert [entry.name for entry in report.unit(SPECIAL_TEAMS)] == [
+        "Nick Moore", "Zay Flowers", "Roquan Smith",
+    ]
 
 
 def test_aggregate_sums_only_the_games_a_player_appeared_in() -> None:
@@ -618,3 +622,117 @@ def test_command_explains_a_player_who_disappeared_instead_of_inventing_zero() -
     embed = interaction.followup.send.call_args.kwargs["embed"]
     assert "Lamar Jackson is not listed" in embed.description
     assert "absence is not assumed" in embed.description
+
+
+@pytest.mark.parametrize("weeks", [1, 2])
+def test_team_command_sends_separate_units_including_crossover_players(weeks) -> None:
+    baseline = _report()
+    current = replace(baseline, game=_ravens_game(event_id="current"), previous=baseline)
+    bot = SimpleNamespace(
+        config=SimpleNamespace(time_zone=ZoneInfo("UTC")),
+        espn=SimpleNamespace(
+            fetch_recent_games=AsyncMock(return_value=[baseline.game, current.game]),
+            fetch_roster=AsyncMock(return_value={}),
+        ),
+        snap_counts=SimpleNamespace(fetch_reports=AsyncMock(return_value=[baseline, current])),
+    )
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    asyncio.run(_snapcounts_command(bot).callback(interaction, weeks=weeks))
+    calls = interaction.followup.send.call_args_list
+    assert len(calls) == 3
+    offense, defense, special = [call.kwargs["embed"] for call in calls]
+    for call, unit in zip(calls, (OFFENSE, DEFENSE, SPECIAL_TEAMS)):
+        assert call.kwargs["ephemeral"] is True
+        embed = call.kwargs["embed"]
+        assert unit in embed.title
+        assert len(embed) <= MAX_EMBED_CHARS
+        assert len(embed.fields) <= MAX_EMBED_FIELDS
+        assert all(len(field.value) <= MAX_FIELD_CHARS for field in embed.fields)
+    assert "Zay Flowers" in offense.fields[0].value
+    assert "Roquan Smith" in defense.fields[0].value
+    text = "\n".join(field.value for field in special.fields)
+    assert text.index("Nick Moore") < text.index("Zay Flowers") < text.index("Roquan Smith")
+    assert f"{3 * weeks} of {25 * weeks} (12%)" in text
+    assert f"{2 * weeks} of {25 * weeks} (8%)" in text
+    assert "Lamar Jackson" not in text
+    assert "ST 0.0 pp" in text
+    assert all(field.name.startswith("Special teams") for field in special.fields)
+
+
+@pytest.mark.parametrize("weeks", [1, 2])
+def test_special_teams_report_is_not_crowded_out_by_offense(weeks) -> None:
+    original = _report()
+    player = original.players[1]
+    players = tuple(
+        replace(player, pfr_id=f"P{index}", special_teams=0,
+                player=PlayerRef(f"Offensive Player Number {index}"))
+        for index in range(100)
+    ) + (original.players[3],)
+    current = replace(original, players=players, previous=original)
+    reports = [original, current]
+    embed = (
+        snap_count_embed(current, SPECIAL_TEAMS) if weeks == 1
+        else snap_totals_embed(aggregate(reports), reports, weeks, SPECIAL_TEAMS)
+    )
+    assert "Nick Moore" in embed.fields[0].value
+    assert "Offensive Player Number" not in "\n".join(field.value for field in embed.fields)
+    assert "Showing " not in embed.footer.text
+
+
+@pytest.mark.parametrize("weeks", [1, 2])
+def test_empty_special_teams_unit_is_explicit(weeks) -> None:
+    report = replace(_report(), players=(_report().players[0],))
+    embed = (
+        snap_count_embed(report, SPECIAL_TEAMS) if weeks == 1
+        else snap_totals_embed(aggregate([report]), [report], weeks, SPECIAL_TEAMS)
+    )
+    assert "No players have recorded snaps in this unit" in embed.description
+    assert not embed.fields
+
+
+@pytest.mark.parametrize("weeks", [1, 2])
+def test_long_unit_reports_paginate_without_dropping_or_repeating_players(weeks) -> None:
+    original = _report()
+    players = tuple(
+        replace(original.players[1], pfr_id=f"P{index}",
+                player=PlayerRef(f"Special Teams Contributor {index:03d}", athlete_id=str(index)))
+        for index in range(100)
+    )
+    baseline = replace(original, players=players)
+    current = replace(baseline, game=_ravens_game(event_id="current"), previous=baseline)
+    reports = [baseline, current]
+    pages = (
+        snap_count_embeds(current, SPECIAL_TEAMS) if weeks == 1
+        else snap_totals_embeds(aggregate(reports), reports, weeks, SPECIAL_TEAMS)
+    )
+    assert len(pages) > 1
+    text = "\n".join(field.value for embed in pages for field in embed.fields)
+    for player in players:
+        assert text.count(player.name) == 1
+    for index, embed in enumerate(pages, 1):
+        assert len(embed) <= MAX_EMBED_CHARS
+        assert len(embed.fields) <= MAX_EMBED_FIELDS
+        assert all(len(field.value) <= MAX_FIELD_CHARS for field in embed.fields)
+        assert embed.footer.text.startswith(f"Page {index}/{len(pages)}")
+
+    bot = SimpleNamespace(
+        config=SimpleNamespace(time_zone=ZoneInfo("UTC")),
+        espn=SimpleNamespace(
+            fetch_recent_games=AsyncMock(return_value=[baseline.game, current.game]),
+            fetch_roster=AsyncMock(return_value={}),
+        ),
+        snap_counts=SimpleNamespace(fetch_reports=AsyncMock(return_value=reports)),
+    )
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    asyncio.run(_snapcounts_command(bot).callback(interaction, weeks=weeks))
+    sent = [
+        call.kwargs["embed"] for call in interaction.followup.send.call_args_list
+        if "special teams" in call.kwargs["embed"].title
+    ]
+    assert [embed.to_dict() for embed in sent] == [embed.to_dict() for embed in pages]
