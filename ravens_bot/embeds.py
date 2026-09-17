@@ -1038,14 +1038,6 @@ def snap_count_embeds(report: SnapCountReport, unit: str | None = None) -> list[
             [f"{entry.name} — 0 snaps{format_snap_changes(entry, report)}"
              for entry in zero_snap_players],
         ))
-    if report.previous and report.previous.players and unit in (None, OFFENSE):
-        current = {entry.identity for entry in report.players}
-        absent = [
-            f"{entry.name} — change N/A (not listed this game; not assumed zero)"
-            for entry in report.previous.players if entry.identity not in current
-        ]
-        if absent:
-            blocks.append(("Previously listed players", absent))
     return _snap_pages(embed, blocks)
 
 

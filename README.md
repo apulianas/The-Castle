@@ -169,6 +169,8 @@ without constructing a client.
   that unit's counts and share. Reports are separate messages so the Discord
   character limit cannot let offence or defence crowd out special teams.
   Long unit reports continue in numbered pages instead of dropping players.
+  The previous game is only a comparison baseline: players listed only in that
+  game are not added to the current game's report.
   This applies to both single-game reports and multi-game totals.
   A player is a line inside a
   unit's field rather than a field of their own, because a full report names

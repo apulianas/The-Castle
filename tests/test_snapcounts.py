@@ -415,14 +415,19 @@ def test_missing_share_and_missing_player_are_not_zero() -> None:
     assert "+0" not in format_snap_changes(newcomer, report)
 
 
-def test_team_report_calls_out_disappearing_players_without_fake_declines() -> None:
+@pytest.mark.parametrize("unit", [None, OFFENSE, DEFENSE, SPECIAL_TEAMS])
+def test_team_report_does_not_list_players_only_in_the_comparison_game(unit) -> None:
     first = _report()
     report = replace(first, players=first.players[1:], previous=first)
-    embed = snap_count_embed(report)
-    absent = next(field for field in embed.fields if field.name == "Previously listed players")
-    assert "Lamar Jackson" in absent.value
-    assert "not assumed zero" in absent.value
-    assert "-100" not in absent.value
+    for embed in snap_count_embeds(report, unit):
+        assert all(field.name != "Previously listed players" for field in embed.fields)
+        text = "\n".join(field.value for field in embed.fields)
+        assert "Lamar Jackson" not in text
+        assert "-100" not in text
+    assert "ST 0.0 pp" in "\n".join(
+        field.value for embed in snap_count_embeds(report, SPECIAL_TEAMS)
+        for field in embed.fields
+    )
 
 
 def test_team_report_keeps_explicit_zero_snap_players_and_their_real_decline() -> None:
