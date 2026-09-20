@@ -42,4 +42,6 @@ def upcoming_window(days: int, time_zone: ZoneInfo) -> DateWindow:
 
 
 def espn_dates(window: DateWindow) -> str:
+    if window.start == window.end:
+        return f"{window.start:%Y%m%d}"
     return f"{window.start:%Y%m%d}-{window.end:%Y%m%d}"

@@ -130,11 +130,14 @@ without constructing a client.
   footer summarising where the Ravens sit.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
-- **Inactives** come from the event roster ESPN publishes for each of the day's
-  Ravens games, where a declared inactive is marked inactive for the game; a
-  player who has simply not taken a snap is not one, so nothing is listed until
-  the clubs declare, and the game summary is read instead when the roster
-  carries no list. They are drawn as a chart image in the injury report's style:
+- **Inactives** use ESPN's event roster to find candidates, then require an
+  explicit inactive status on the entry or a game-day inactive designation in
+  the player's record. Neither `active: false` nor `didNotPlay` proves a player
+  is inactive: ESPN can mark the entire roster inactive, and dressed reserves
+  may not take a snap. Player statuses refresh every 45 seconds so a pregame
+  lookup cannot freeze an unpublished list. The event summary is a fallback
+  when the roster lookup produces no confirmed list or fails; that summary can
+  omit healthy scratches. They are drawn as a chart image in the injury report's style:
   a panel per club in matchup order, away first, with the club's colors and
   logo. Each row is a headshot, position, and name in one column, with the reason
   alongside, and the table carries no headings because a name and a reason need
