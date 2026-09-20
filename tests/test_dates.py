@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from ravens_bot.dates import (
     MAX_SCHEDULE_DAYS,
+    DateWindow,
     espn_dates,
     today_in_zone,
     upcoming_window,
@@ -14,6 +15,17 @@ from ravens_bot.dates import (
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+
+def test_espn_single_day_is_not_a_degenerate_range() -> None:
+    day = date(2026, 9, 20)
+    assert espn_dates(DateWindow(day, day)) == "20260920"
+
+
+def test_espn_multi_day_keeps_both_dates() -> None:
+    assert espn_dates(
+        DateWindow(date(2026, 9, 20), date(2026, 9, 27))
+    ) == "20260920-20260927"
 
 
 def test_upcoming_window_covers_the_days_asked_for() -> None:

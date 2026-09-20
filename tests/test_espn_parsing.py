@@ -471,6 +471,7 @@ def test_parse_event_roster_keeps_every_declared_inactive() -> None:
             {
                 "playerId": 102,
                 "displayName": "Lineman",
+                "status": {"displayName": "Inactive"},
                 "active": False,
                 "didNotPlay": True,
                 "athlete": {"$ref": "http://example.test/athletes/102"},
@@ -554,6 +555,9 @@ def test_fetch_inactives_resolves_core_athletes_and_normalizes_refs(monkeypatch)
                 "id": "77",
                 "fullName": "Raven One",
                 "position": {"abbreviation": "DT"},
+                "injuries": [
+                    {"details": {"fantasyStatus": {"description": "INACTIVE"}}}
+                ],
             }
         raise AssertionError(url)
 
@@ -619,12 +623,12 @@ def test_parse_event_roster_reads_a_real_game_day_list() -> None:
     """A club declares six or seven, not a squad's worth of unused players."""
     ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
     declared = [
-        ("4430807", "Zay Flowers", "WR"),
-        ("4362250", "Joe Fagnano", "QB"),
-        ("4429025", "Andrew Vorhees", "G"),
-        ("4685702", "Garrett Lichtenhan", "OT"),
-        ("3916594", "Nnamdi Madubuike", "DT"),
-        ("4362617", "Jay Higgins", "ILB"),
+        ("4429615", "Zay Flowers", "WR"),
+        ("4429582", "Joe Fagnano", "QB"),
+        ("4243220", "Andrew Vorhees", "G"),
+        ("4686768", "Gerad Lichtenhan", "OT"),
+        ("4035245", "Nnamdi Madubuike", "DT"),
+        ("4698244", "Teddye Buchanan", "LB"),
     ]
     roster = {
         "entries": [
@@ -641,13 +645,13 @@ def test_parse_event_roster_reads_a_real_game_day_list() -> None:
             {
                 "playerId": 8,
                 "displayName": "Lamar Jackson",
-                "active": True,
+                "active": False,
                 "didNotPlay": False,
             },
             {
                 "playerId": 9,
                 "displayName": "Dressed Reserve",
-                "active": True,
+                "active": False,
                 "didNotPlay": True,
             },
         ]
@@ -657,6 +661,9 @@ def test_parse_event_roster_reads_a_real_game_day_list() -> None:
             "id": athlete_id,
             "fullName": name,
             "position": {"abbreviation": position},
+            "injuries": [
+                {"details": {"fantasyStatus": {"description": "INACTIVE"}}}
+            ],
         }
         for athlete_id, name, position in declared
     }
@@ -693,6 +700,8 @@ def test_fetch_inactives_falls_back_when_the_roster_lists_no_inactives(
 
     async def json(url, params=None):
         nonlocal summaries
+        if url.startswith("https://example.test/athletes/"):
+            return {"injuries": []}
         if "/roster" in url:
             return {
                 "entries": [
@@ -758,6 +767,7 @@ def test_fetch_inactives_ignores_an_implausibly_long_roster_list(monkeypatch) ->
                         "displayName": f"Player {index}",
                         "active": False,
                         "didNotPlay": True,
+                        "status": {"displayName": "Inactive"},
                     }
                     for index in range(MAX_INACTIVES_PER_TEAM + 1)
                 ]
