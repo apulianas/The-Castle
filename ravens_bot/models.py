@@ -799,12 +799,13 @@ class PlayerGameStats:
 
 @dataclass(frozen=True)
 class LiveGameReport:
-    """A snapshot of one game: score, situation, team totals, and leaders."""
+    """A snapshot of one game: score, situation, team totals, and player stats."""
 
     game: Game
     situation: LiveSituation | None = None
     teams: tuple[TeamGameStats, ...] = ()
     leaders: tuple[PlayerGameStats, ...] = ()
+    players: tuple[PlayerGameStats, ...] = ()
 
     @property
     def is_live(self) -> bool:

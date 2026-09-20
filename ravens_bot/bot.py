@@ -57,6 +57,13 @@ from .espn import (
     team_names,
 )
 from .inactives_report import artwork_urls, render_inactive_report
+from .live_report import (
+    LIVE_CHART_FILENAME,
+    artwork_urls as live_artwork_urls,
+    expanded_stats_text,
+    render_live_pages,
+    render_live_report,
+)
 from .fourthdown import (
     LONGEST_ASKABLE_FIELD_GOAL,
     MIN_FIELD_GOAL_YARDS,
@@ -1067,7 +1074,10 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(
         name="live", description="Show live in-game stats for the Ravens."
     )
-    async def live(interaction: discord.Interaction) -> None:
+    @app_commands.describe(
+        all_stats="Show all player stats, including defense and special teams, in multiple graphics"
+    )
+    async def live(interaction: discord.Interaction, all_stats: bool = False) -> None:
         await interaction.response.defer(ephemeral=True)
         today = today_in_zone(bot.config.time_zone)
         try:
@@ -1078,9 +1088,75 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         if report is None:
             await interaction.followup.send(embed=no_live_game_embed(today))
             return
-        await interaction.followup.send(
-            embed=live_game_embed(report, bot.config.time_zone)
+        if all_stats and (report.has_details or report.players) and (
+            report.game.state != "pre" or report.game.completed
+        ):
+            images = ()
+            try:
+                artwork = (
+                    await bot.artwork.fetch(live_artwork_urls(report, all_stats=True))
+                    if bot.artwork is not None else {}
+                )
+                images = await asyncio.to_thread(render_live_pages, report, artwork)
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("Expanded live stats charts could not be drawn: %s", exc)
+            if any(len(image) > MAX_ATTACHMENT_BYTES for image in images):
+                LOGGER.warning("Expanded live stats chart is too large to post")
+                images = ()
+            moment = datetime.now(bot.config.time_zone)
+            if not images:
+                embed = live_game_embed(report, bot.config.time_zone, all_stats=True)
+                embed.description = (
+                    f"{embed.description}\nFull stats attached as text; graphic unavailable."
+                )
+                await interaction.followup.send(
+                    embed=embed,
+                    file=discord.File(
+                        io.BytesIO(expanded_stats_text(report).encode("utf-8")),
+                        filename="ravens-all-player-stats.txt",
+                    ),
+                    ephemeral=True,
+                )
+            for index, image in enumerate(images, 1):
+                embed = live_game_embed(
+                    report, bot.config.time_zone, as_of=moment,
+                    with_chart=True, all_stats=True,
+                )
+                embed.set_footer(
+                    text=f"Page {index}/{len(images)} \u2022 {embed.footer.text}"
+                )
+                await interaction.followup.send(
+                    embed=embed,
+                    file=discord.File(io.BytesIO(image), filename=LIVE_CHART_FILENAME),
+                    ephemeral=True,
+                )
+            return
+        image = None
+        if report.has_details and (report.game.state != "pre" or report.game.completed):
+            try:
+                artwork = (
+                    await bot.artwork.fetch(live_artwork_urls(report))
+                    if bot.artwork is not None
+                    else {}
+                )
+                image = await asyncio.to_thread(render_live_report, report, artwork)
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("Live stats chart could not be drawn: %s", exc)
+            if image is not None and len(image) > MAX_ATTACHMENT_BYTES:
+                LOGGER.warning(
+                    "Live stats chart is too large to post: %d bytes", len(image)
+                )
+                image = None
+        embed = live_game_embed(
+            report, bot.config.time_zone, with_chart=image is not None
         )
+        if image is not None:
+            await interaction.followup.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(image), filename=LIVE_CHART_FILENAME),
+            )
+        else:
+            await interaction.followup.send(embed=embed)
 
     return live
 

@@ -90,6 +90,7 @@ class ChartSection:
     rows: tuple[tuple[str, ...], ...]
     headshots: tuple[str | None, ...] = ()
     logo_url: str | None = None
+    wrap_cells: bool = False
 
 
 class ArtworkLoader:
@@ -169,18 +170,22 @@ def render_chart(
         else MIN_IMAGE_WIDTH * scale
     )
     width = max(width, MIN_IMAGE_WIDTH * scale)
+    layouts = [
+        _table_layout(measure, table, column_widths, cell_font, headshots, scale)
+        for table in sections
+    ]
     height = margin
-    for table in sections:
-        height += (
-            team_height + row_height * _drawn_rows(table) + table_gap
-        )
+    for table, layout in zip(sections, layouts):
+        height += team_height + sum(size for _, size in layout) + table_gap
+        if table.headers:
+            height += row_height
 
     image = Image.new("RGB", (width, height), PAGE_BACKGROUND)
     _draw_page_background(image, left_color, right_color)
     draw = ImageDraw.Draw(image)
 
     y = margin
-    for table in sections:
+    for table, layout in zip(sections, layouts):
         team_color = table.color
         header_text_color = _contrasting_text_color(team_color)
         team_text_color = (
@@ -195,7 +200,8 @@ def render_chart(
                 margin - 8 * scale,
                 y - 6 * scale,
                 margin + table_width + 8 * scale,
-                y + team_height + row_height * _drawn_rows(table) + 8 * scale,
+                y + team_height + sum(size for _, size in layout)
+                + (row_height if table.headers else 0) + 8 * scale,
             ),
             team_color,
             scale,
@@ -255,7 +261,7 @@ def render_chart(
                 x += column_width
             y += row_height
 
-        for index, row in enumerate(table.rows):
+        for index, (row, cell_height) in enumerate(layout):
             x = margin
             glass_alpha = (
                 ROW_GLASS_ALPHA if index % 2 == 0 else ALT_ROW_GLASS_ALPHA
@@ -263,12 +269,12 @@ def render_chart(
             for column, (cell, column_width) in enumerate(zip(row, column_widths)):
                 _draw_glass_cell(
                     image,
-                    (x, y, x + column_width, y + row_height),
+                    (x, y, x + column_width, y + cell_height),
                     glass_alpha,
                     scale,
                 )
                 draw.rectangle(
-                    (x, y, x + column_width, y + row_height),
+                    (x, y, x + column_width, y + cell_height),
                     outline=GRID_COLOR,
                     width=scale,
                 )
@@ -278,28 +284,80 @@ def render_chart(
                         image,
                         headshots[_row_headshot(table, index, headshots)],
                         x + cell_padding,
-                        y + (row_height - headshot_size) // 2,
+                        y + (cell_height - headshot_size) // 2,
                         headshot_size,
                     )
                     text_x += headshot_size + headshot_gap
-                draw.text(
-                    (text_x, _text_top(draw, y, row_height, cell_font)),
-                    _fit_text(
-                        draw,
-                        cell,
-                        cell_font,
-                        x + column_width - cell_padding - text_x,
-                    ),
-                    fill=TEXT_COLOR,
-                    font=cell_font,
-                )
+                line_height = 30 * scale
+                text_top = _text_top(draw, y, cell_height, cell_font)
+                text_top -= (len(cell) - 1) * line_height // 2
+                for line_index, line in enumerate(cell):
+                    draw.text(
+                        (text_x, text_top + line_index * line_height),
+                        _fit_text(
+                            draw, line, cell_font,
+                            x + column_width - cell_padding - text_x,
+                        ),
+                        fill=TEXT_COLOR,
+                        font=cell_font,
+                    )
                 x += column_width
-            y += row_height
+            y += cell_height
         y += table_gap
 
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
+
+
+def _table_layout(
+    draw: ImageDraw.ImageDraw,
+    table: ChartSection,
+    widths: Sequence[int],
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    artwork: Mapping[str, bytes],
+    scale: int,
+) -> list[tuple[list[list[str]], int]]:
+    layout = []
+    for index, row in enumerate(table.rows):
+        cells = []
+        for column, (text, width) in enumerate(zip(row, widths)):
+            available = width - 2 * CELL_PADDING * scale
+            if column == 0 and _row_headshot(table, index, artwork):
+                available -= (HEADSHOT_SIZE + HEADSHOT_GAP) * scale
+            cells.append(
+                _wrap_text(draw, text, font, available) if table.wrap_cells else [text]
+            )
+        lines = max((len(cell) for cell in cells), default=1)
+        height = max(ROW_HEIGHT, lines * 30 + 2 * CELL_PADDING) * scale
+        layout.append((cells, height))
+    return layout
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    width: int,
+) -> list[str]:
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = current + word
+        if current and draw.textlength(candidate, font=font) > width:
+            lines.append(current)
+            current = ""
+        for char in word:
+            candidate = current + char
+            if current and draw.textlength(candidate, font=font) > width:
+                lines.append(current)
+                current = ""
+            current += char
+        current += " "
+    if current:
+        lines.append(current.rstrip())
+    return [line.rstrip() for line in lines] or [""]
+
 
 def _contrasting_text_color(background: str) -> str:
     red, green, blue = bytes.fromhex(background.lstrip("#"))
@@ -650,11 +708,6 @@ def _row_headshot(
         return None
     url = table.headshots[index]
     return url if url and url in headshots else None
-
-
-def _drawn_rows(section: ChartSection) -> int:
-    """Rows the section takes up, counting its headings when it has any."""
-    return len(section.rows) + (1 if section.headers else 0)
 
 
 def _display_header(heading: str) -> str:
