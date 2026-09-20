@@ -62,6 +62,9 @@ INJURY_TTL_SECONDS = 300.0
 LIVE_TTL_SECONDS = 12.0
 SCHEDULE_TTL_SECONDS = 180.0
 ROSTER_TTL_SECONDS = 3600.0
+# A club declares a handful of inactives, never a squad's worth, so a longer
+# list from the event roster means the read is no longer an inactive list.
+MAX_INACTIVES_PER_TEAM = 15
 # A live game moves play by play, so this cache exists only to absorb a burst of
 # commands rather than to spare ESPN the traffic.
 LIVE_STATS_TTL_SECONDS = 45.0
@@ -882,6 +885,25 @@ def parse_inactive_report(summary: dict[str, Any], game: Game) -> InactiveReport
     return InactiveReport(game=game, players=tuple(unique))
 
 
+def _is_inactive_entry(entry: dict[str, Any]) -> bool:
+    """Whether an event roster entry is one of the club's declared inactives.
+
+    ESPN marks a declared inactive with ``active: false``. ``didNotPlay`` says
+    only that a player has taken no snap, which is true of the whole roster
+    before kickoff and of most of it while the game is on, so it cannot stand
+    in for the inactive list.
+    """
+    return entry.get("active") is False
+
+
+def inactive_roster_entries(roster: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        entry
+        for raw in _as_list(roster.get("entries"))
+        if _is_inactive_entry(entry := _as_dict(raw))
+    ]
+
+
 def parse_event_inactive_roster(
     roster: dict[str, Any],
     team: TeamRef,
@@ -889,10 +911,7 @@ def parse_event_inactive_roster(
 ) -> tuple[InactivePlayer, ...]:
     """Read every official inactive from one event competitor roster."""
     players: list[InactivePlayer] = []
-    for raw in _as_list(roster.get("entries")):
-        entry = _as_dict(raw)
-        if entry.get("didNotPlay") is not True:
-            continue
+    for entry in inactive_roster_entries(roster):
         athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
         athlete = athletes.get(athlete_id or "", {})
         name = _display_name(athlete) or _display_name(entry)
@@ -1635,9 +1654,18 @@ class EspnClient:
             try:
                 reports.append(await self._fetch_event_inactives(game))
             except EspnApiError:
-                summary = await self._json(
-                    f"{SITE_BASE}/summary", {"event": game.event_id}
-                )
+                try:
+                    summary = await self._json(
+                        f"{SITE_BASE}/summary", {"event": game.event_id}
+                    )
+                except EspnApiError as exc:
+                    # One club's list failing is not a reason to answer nothing:
+                    # the game is still reported, as one without a list yet.
+                    LOGGER.warning(
+                        "Inactives unavailable for event %s: %s", game.event_id, exc
+                    )
+                    reports.append(InactiveReport(game=game, players=()))
+                    continue
                 reports.append(parse_inactive_report(summary, game))
         return reports
 
@@ -1656,12 +1684,19 @@ class EspnClient:
             )
 
         rosters = await asyncio.gather(*(fetch_roster(side) for side in sides))
+        entries = [inactive_roster_entries(roster) for roster in rosters]
+        if not any(entries):
+            # Before ESPN publishes the lists every entry is simply a rostered
+            # player, so an empty read is news that has not arrived yet rather
+            # than a game without inactives; the summary may still carry it.
+            raise EspnApiError("ESPN has not published this event's inactives")
+        if any(len(side_entries) > MAX_INACTIVES_PER_TEAM for side_entries in entries):
+            # A club may not dress more than a handful of inactives, so a longer
+            # list means the flag no longer means what it did.
+            raise EspnApiError("ESPN event roster does not read as an inactive list")
         athlete_refs: dict[str, str] = {}
-        for roster in rosters:
-            for raw in _as_list(roster.get("entries")):
-                entry = _as_dict(raw)
-                if entry.get("didNotPlay") is not True:
-                    continue
+        for side_entries in entries:
+            for entry in side_entries:
                 athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
                 athlete_ref = _text(_as_dict(entry.get("athlete")).get("$ref"))
                 if athlete_id and athlete_ref:

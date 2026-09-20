@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 
 from ravens_bot.espn import (
     CORE_BASE,
+    MAX_INACTIVES_PER_TEAM,
     SITE_BASE,
     EspnApiError,
     EspnClient,
@@ -456,26 +457,29 @@ def test_parse_inactive_report_reads_injury_fantasy_status() -> None:
     assert report.players[0].is_ravens
 
 
-def test_parse_event_roster_keeps_every_did_not_play_entry() -> None:
+def test_parse_event_roster_keeps_every_declared_inactive() -> None:
     ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
     roster = {
         "entries": [
             {
                 "playerId": 101,
                 "displayName": "Fantasy Player",
+                "active": False,
                 "didNotPlay": True,
                 "athlete": {"$ref": "http://example.test/athletes/101"},
             },
             {
                 "playerId": 102,
                 "displayName": "Lineman",
+                "active": False,
                 "didNotPlay": True,
                 "athlete": {"$ref": "http://example.test/athletes/102"},
             },
             {
                 "playerId": 103,
-                "displayName": "Active Player",
-                "didNotPlay": False,
+                "displayName": "Dressed Player",
+                "active": True,
+                "didNotPlay": True,
                 "athlete": {"$ref": "http://example.test/athletes/103"},
             },
         ]
@@ -537,6 +541,7 @@ def test_fetch_inactives_resolves_core_athletes_and_normalizes_refs(monkeypatch)
                     {
                         "playerId": 77,
                         "displayName": "Raven",
+                        "active": False,
                         "didNotPlay": True,
                         "athlete": {"$ref": "http://example.test/athletes/77"},
                     }
@@ -608,6 +613,195 @@ def test_fetch_inactives_falls_back_to_summary_when_core_fails(monkeypatch) -> N
     reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
 
     assert [player.name for player in reports[0].players] == ["Fallback Raven"]
+
+
+def test_parse_event_roster_reads_a_real_game_day_list() -> None:
+    """A club declares six or seven, not a squad's worth of unused players."""
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    declared = [
+        ("4430807", "Zay Flowers", "WR"),
+        ("4362250", "Joe Fagnano", "QB"),
+        ("4429025", "Andrew Vorhees", "G"),
+        ("4685702", "Garrett Lichtenhan", "OT"),
+        ("3916594", "Nnamdi Madubuike", "DT"),
+        ("4362617", "Jay Higgins", "ILB"),
+    ]
+    roster = {
+        "entries": [
+            {
+                "playerId": int(athlete_id),
+                "displayName": name,
+                "active": False,
+                "didNotPlay": True,
+                "athlete": {"$ref": f"http://example.test/athletes/{athlete_id}"},
+            }
+            for athlete_id, name, _ in declared
+        ]
+        + [
+            {
+                "playerId": 8,
+                "displayName": "Lamar Jackson",
+                "active": True,
+                "didNotPlay": False,
+            },
+            {
+                "playerId": 9,
+                "displayName": "Dressed Reserve",
+                "active": True,
+                "didNotPlay": True,
+            },
+        ]
+    }
+    athletes = {
+        athlete_id: {
+            "id": athlete_id,
+            "fullName": name,
+            "position": {"abbreviation": position},
+        }
+        for athlete_id, name, position in declared
+    }
+
+    players = parse_event_inactive_roster(roster, ravens, athletes)
+
+    assert [(player.position, player.name) for player in players] == [
+        (position, name) for _, name, position in declared
+    ]
+    assert all(player.is_ravens for player in players)
+
+
+def test_fetch_inactives_falls_back_when_the_roster_lists_no_inactives(
+    monkeypatch,
+) -> None:
+    """Mid game every unused player reads as "did not play", so the flag lies."""
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    browns = TeamRef("Cleveland Browns", "5", "CLE", "cle")
+    game = Game(
+        "401",
+        "Baltimore Ravens at Cleveland Browns",
+        "BAL @ CLE",
+        None,
+        "In Progress",
+        home=GameTeam(browns, is_home=True),
+        away=GameTeam(ravens),
+        state="in",
+    )
+    client = EspnClient(None)  # type: ignore[arg-type]
+    summaries = 0
+
+    async def schedule(window):
+        return [game]
+
+    async def json(url, params=None):
+        nonlocal summaries
+        if "/roster" in url:
+            return {
+                "entries": [
+                    {
+                        "playerId": 90 + index,
+                        "displayName": f"Benched {index}",
+                        "active": True,
+                        "didNotPlay": True,
+                        "athlete": {"$ref": f"http://example.test/athletes/{index}"},
+                    }
+                    for index in range(30)
+                ]
+            }
+        assert url == f"{SITE_BASE}/summary"
+        summaries += 1
+        return {
+            "injuries": [
+                {
+                    "team": {"displayName": "Baltimore Ravens"},
+                    "injuries": [
+                        {
+                            "athlete": {"id": "77", "displayName": "Fallback Raven"},
+                            "details": {"fantasyStatus": {"description": "INACTIVE"}},
+                        }
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+
+    reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
+
+    assert summaries == 1
+    assert [player.name for player in reports[0].players] == ["Fallback Raven"]
+
+
+def test_fetch_inactives_ignores_an_implausibly_long_roster_list(monkeypatch) -> None:
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    browns = TeamRef("Cleveland Browns", "5", "CLE", "cle")
+    game = Game(
+        "401",
+        "Baltimore Ravens at Cleveland Browns",
+        "BAL @ CLE",
+        None,
+        "In Progress",
+        home=GameTeam(browns, is_home=True),
+        away=GameTeam(ravens),
+        state="in",
+    )
+    client = EspnClient(None)  # type: ignore[arg-type]
+
+    async def schedule(window):
+        return [game]
+
+    async def json(url, params=None):
+        if "/roster" in url:
+            return {
+                "entries": [
+                    {
+                        "playerId": index,
+                        "displayName": f"Player {index}",
+                        "active": False,
+                        "didNotPlay": True,
+                    }
+                    for index in range(MAX_INACTIVES_PER_TEAM + 1)
+                ]
+            }
+        assert url == f"{SITE_BASE}/summary"
+        return {}
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+
+    reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
+
+    assert reports[0].players == ()
+
+
+def test_fetch_inactives_reports_the_game_when_no_source_answers(monkeypatch) -> None:
+    """A failed read is a game without a published list, not a failed command."""
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    browns = TeamRef("Cleveland Browns", "5", "CLE", "cle")
+    game = Game(
+        "401",
+        "Baltimore Ravens at Cleveland Browns",
+        "BAL @ CLE",
+        None,
+        "In Progress",
+        home=GameTeam(browns, is_home=True),
+        away=GameTeam(ravens),
+        state="in",
+    )
+    client = EspnClient(None)  # type: ignore[arg-type]
+
+    async def schedule(window):
+        return [game]
+
+    async def json(url, params=None):
+        raise EspnApiError("ESPN API returned HTTP 400")
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+
+    reports = asyncio.run(client.fetch_inactives(date(2025, 11, 23)))
+
+    assert [report.game.event_id for report in reports] == ["401"]
+    assert reports[0].players == ()
 
 
 def test_parse_standings_reads_records() -> None:

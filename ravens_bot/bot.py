@@ -129,6 +129,9 @@ INACTIVE_WATCH_INTERVAL_SECONDS = 60
 # Outside the window there is nothing to publish, so the watcher sits out this
 # many ticks — five minutes — before checking the schedule again.
 INACTIVE_IDLE_TICKS = 4
+# Discord refuses an attachment larger than this, and a refusal costs the whole
+# post, so an oversized chart is dropped in favour of the written list.
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 # How many close names a failed player search offers back.
 MAX_PLAYER_SUGGESTIONS = 5
 # How many live teams a failed team search offers back.
@@ -428,10 +431,16 @@ class RavensBot(commands.Bot):
                 if self.artwork is not None
                 else {}
             )
-            return render_inactive_report(report, artwork)
+            image = render_inactive_report(report, artwork)
         except (OSError, ValueError) as exc:
             LOGGER.warning("Inactive chart could not be drawn: %s", exc)
             return None
+        if len(image) > MAX_ATTACHMENT_BYTES:
+            LOGGER.warning(
+                "Inactive chart is too large to post: %d bytes", len(image)
+            )
+            return None
+        return image
 
     async def _announcement_targets(self) -> list[_AnnouncementTarget]:
         targets: list[_AnnouncementTarget] = []
@@ -663,12 +672,22 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             )
             if image is None:
                 await interaction.followup.send(embeds=embeds)
-            else:
+                continue
+            try:
                 await interaction.followup.send(
                     embeds=embeds,
                     file=discord.File(
                         io.BytesIO(image), filename=INACTIVE_CHART_FILENAME
                     ),
+                )
+            except discord.HTTPException as exc:
+                # Discord rejecting the chart must not cost the answer, so the
+                # list is written out instead.
+                LOGGER.warning("Inactive chart was rejected: %s", exc)
+                await interaction.followup.send(
+                    embeds=inactive_embeds(
+                        [report], target_date, bot.config.time_zone
+                    )
                 )
 
     return inactives
