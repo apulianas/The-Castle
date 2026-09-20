@@ -75,6 +75,7 @@ from .dates import MAX_SCHEDULE_DAYS
 from .calibration import MODEL_LIMITS, WP_DESCRIPTION
 from .fourthdown import FieldGoalOutlook, FourthDownAdvice
 from .injury_report import INJURY_REPORT_URL, OfficialInjuryReport
+from .live_report import LIVE_CHART_FILENAME
 from .models import (
     AFC_NORTH_GROUP_ID,
     OFFENSE,
@@ -841,11 +842,13 @@ def help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="/live",
+        name="/live [all_stats]",
         value=(
             "Live score, clock, possession, and down and distance for today's "
-            "game, with team totals and leading players. Shows the final box "
-            "score once the game ends."
+            "game, with a player-first stats graphic and compact team totals. "
+            "Shows the final box score once the game ends."
+            " Set all_stats to true for every published player line, including "
+            "defense (sacks, interceptions, and fumbles/recoveries), across multiple images."
         ),
         inline=False,
     )
@@ -1187,16 +1190,21 @@ def _live_title(game: Game) -> str:
 
 
 def _add_live_fields(embed: discord.Embed, report: LiveGameReport) -> None:
-    """Team totals and leader lines, within Discord's field and size limits."""
+    """Player leaders before team totals, within Discord's field and size limits."""
     blocks = [
-        ("Team stats", format_team_stat_lines(report)),
         ("Leaders", [format_player_stat_line(line) for line in report.leaders]),
+        ("Team stats", format_team_stat_lines(report)),
     ]
     _add_field_blocks(embed, blocks, LIVE_FOOTER_RESERVE)
 
 
 def live_game_embed(
-    report: LiveGameReport, time_zone: ZoneInfo, as_of: datetime | None = None
+    report: LiveGameReport,
+    time_zone: ZoneInfo,
+    as_of: datetime | None = None,
+    *,
+    with_chart: bool = False,
+    all_stats: bool = False,
 ) -> discord.Embed:
     """A live snapshot, or the closest thing ESPN publishes for this game.
 
@@ -1205,6 +1213,7 @@ def live_game_embed(
     which is what a final box score is.
     """
     game = report.game
+    has_details = report.has_details or (all_stats and bool(report.players))
     lines = []
     if game.state == "pre" and not game.completed:
         lines.append(format_pregame(game, time_zone))
@@ -1218,15 +1227,23 @@ def live_game_embed(
         last_play = format_last_play(report.situation)
         if last_play:
             lines.append(last_play)
-        if not report.has_details:
+        if not has_details:
             lines.append(format_no_live_stats())
+        elif all_stats and not report.players:
+            lines.append(
+                "ESPN has not published the full player box score yet; "
+                "showing available leaders and team totals."
+            )
 
     embed = _base_embed(
         _live_title(game), "\n".join(lines), url=game_url(game.event_id)
     )
     _set_game_art(embed, game)
     if game.state != "pre" or game.completed:
-        _add_live_fields(embed, report)
+        if with_chart and has_details:
+            embed.set_image(url=f"attachment://{LIVE_CHART_FILENAME}")
+        else:
+            _add_live_fields(embed, report)
 
     moment = as_of or datetime.now(timezone.utc)
     stamp = format_time_of_day(moment, time_zone)

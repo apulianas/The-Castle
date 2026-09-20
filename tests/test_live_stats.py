@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
+import pytest
+from PIL import Image, ImageDraw
+
+from ravens_bot.bot import RavensBot, _live_command
+from ravens_bot.chart import MAX_IMAGE_WIDTH, OUTPUT_SCALE, _font, _wrap_text
+from ravens_bot.config import BotConfig
 from ravens_bot.embeds import live_game_embed, no_live_game_embed
 from ravens_bot.espn import (
     EspnClient,
     parse_leaders,
     parse_live_game,
     parse_live_situation,
+    parse_player_stats,
     parse_team_stats,
 )
 from ravens_bot.formatting import (
@@ -30,6 +40,16 @@ from ravens_bot.models import (
     PlayerRef,
     TeamGameStats,
     TeamRef,
+)
+from ravens_bot.live_report import (
+    LIVE_CHART_FILENAME,
+    ROWS_PER_PAGE,
+    artwork_urls,
+    chart_pages,
+    chart_sections,
+    expanded_stats_text,
+    render_live_pages,
+    render_live_report,
 )
 
 
@@ -441,9 +461,9 @@ def test_live_embed_shows_score_situation_and_stats() -> None:
     assert "CLE 13 — BAL 21" in embed.description
     assert "7:21 Q3" in embed.description
     assert "Last play: Derrick Henry run for 3 yards" in embed.description
-    assert [field.name for field in embed.fields] == ["Team stats", "Leaders"]
-    assert "Total Yards: 180 | 291" in embed.fields[0].value
-    assert "Lamar Jackson" in embed.fields[1].value
+    assert [field.name for field in embed.fields] == ["Leaders", "Team stats"]
+    assert "Lamar Jackson" in embed.fields[0].value
+    assert "Total Yards: 180 | 291" in embed.fields[1].value
     assert embed.footer.text == "As of 3:05 PM EST • Data: ESPN"
 
 
@@ -538,3 +558,323 @@ def test_fetch_live_game_falls_back_to_a_finished_game() -> None:
 
     assert report is not None
     assert client.requested == ["1"]
+
+
+def test_live_chart_prioritizes_ravens_players_over_opponents_and_teams() -> None:
+    report = parse_live_game(live_summary(), build_game())
+    opponent = PlayerGameStats(PlayerRef("Browns QB"), "PASS", "140 YDS", BROWNS_TEAM)
+    report = replace(report, leaders=(opponent, *report.leaders))
+
+    sections = chart_sections(report)
+
+    assert [section.title for section in sections] == [
+        "BAL player leaders", "CLE player leaders", "Team snapshot"
+    ]
+    assert sections[0].rows == (("Lamar Jackson", "PASS: 18/24, 212 YDS, 2 TD"),)
+    assert sections[-1].headers == ("Stat", "BAL | CLE")
+    assert ("Total Yards", "291 | 180") in sections[-1].rows
+    assert all(section.wrap_cells for section in sections)
+    urls = artwork_urls(report)
+    assert len(urls) == len(set(urls))
+    assert report.leaders[1].player.photo_url() in urls
+
+
+def test_live_chart_keeps_team_totals_compact_and_marks_missing_values() -> None:
+    report = LiveGameReport(
+        game=build_game(),
+        teams=(
+            TeamGameStats(RAVENS_TEAM, (
+                ("1st Downs", "15"), ("Total Yards", "291"), ("Passing", "212"),
+                ("Turnovers", "0"), ("3rd down efficiency", "4-8"),
+                ("Possession", "21:30"),
+            )),
+            TeamGameStats(BROWNS_TEAM, (("Total Yards", "180"),)),
+        ),
+    )
+
+    assert chart_sections(report)[0].rows == (
+        ("Total Yards", "291 | 180"), ("Turnovers", "0 | -"),
+        ("3rd down efficiency", "4-8 | -"), ("Possession", "21:30 | -"),
+    )
+
+
+def test_live_chart_handles_players_without_a_team_or_artwork() -> None:
+    report = LiveGameReport(
+        game=build_game(),
+        leaders=(PlayerGameStats(PlayerRef("Player"), "PASS", "212 YDS"),),
+    )
+    assert chart_sections(report)[0].title == "Player leaders"
+    assert artwork_urls(report) == []
+    with Image.open(io.BytesIO(render_live_report(report))) as image:
+        assert image.format == "PNG"
+        assert 0 < image.width <= MAX_IMAGE_WIDTH * OUTPUT_SCALE
+
+
+def test_live_chart_wraps_full_stat_lines_without_losing_values() -> None:
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    font = _font(24)
+    text = "Passing: 18/24 C/ATT, 212 YDS, 2 TD, 0 INT, 0-0 SACKS, 130.2 RTG"
+    lines = _wrap_text(draw, text, font, 280)
+    assert len(lines) > 1
+    assert " ".join(lines) == text
+    assert all(draw.textlength(line, font=font) <= 280 for line in lines)
+    long_name = "ExtremelyLongUnbrokenPlayerName"
+    assert "".join(_wrap_text(draw, long_name, font, 100)) == long_name
+
+    report = parse_live_game(live_summary(), build_game())
+    longer = replace(report, leaders=(replace(report.leaders[0], detail=text * 4),))
+    with Image.open(io.BytesIO(render_live_report(report))) as short_image:
+        with Image.open(io.BytesIO(render_live_report(longer))) as long_image:
+            assert long_image.height > short_image.height
+            assert long_image.width <= MAX_IMAGE_WIDTH * OUTPUT_SCALE
+
+
+def test_live_embed_uses_attachment_without_repeating_stats() -> None:
+    report = parse_live_game(live_summary(), build_game())
+    embed = live_game_embed(report, EASTERN, with_chart=True)
+    assert embed.image.url == f"attachment://{LIVE_CHART_FILENAME}"
+    assert embed.fields == []
+    assert "7:21 Q3" in embed.description
+    for empty in (
+        LiveGameReport(build_game()),
+        replace(report, game=build_game(state="pre")),
+    ):
+        assert not live_game_embed(empty, EASTERN, with_chart=True).image.url
+
+
+@pytest.mark.parametrize("state", ["in", "post", "pre", "missing", "empty"])
+@pytest.mark.parametrize("all_stats", [False, True])
+def test_live_command_only_attaches_available_in_game_stats(
+    tmp_path, monkeypatch, state, all_stats
+) -> None:
+    bot = RavensBot(BotConfig(
+        discord_token="token", discord_channel_ids=(123,), discord_webhook_urls=(),
+        poll_interval_seconds=300, time_zone=EASTERN,
+        state_file=str(tmp_path / "state.json"),
+    ))
+    report = parse_live_game(live_summary(), build_game())
+    if state == "missing":
+        report = None
+    elif state == "empty":
+        report = LiveGameReport(build_game())
+    else:
+        report = replace(report, game=build_game(state=state, completed=state == "post"))
+    fetch = AsyncMock(return_value=report)
+    monkeypatch.setattr(EspnClient, "fetch_live_game", fetch)
+    bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
+    interaction = AsyncMock()
+
+    asyncio.run(_live_command(bot).callback(interaction, all_stats=all_stats))
+
+    sent = interaction.followup.send.call_args.kwargs
+    assert ("file" in sent) == (state in {"in", "post"})
+    if "file" in sent:
+        assert sent["file"].filename == LIVE_CHART_FILENAME
+        assert sent["embed"].image.url == f"attachment://{LIVE_CHART_FILENAME}"
+        assert sent["embed"].fields == []
+
+
+@pytest.mark.parametrize("failure", ["render", "size"])
+def test_live_command_logs_chart_failure_and_sends_player_first_text(
+    tmp_path, monkeypatch, caplog, failure
+) -> None:
+    bot = RavensBot(BotConfig(
+        discord_token="token", discord_channel_ids=(123,), discord_webhook_urls=(),
+        poll_interval_seconds=300, time_zone=EASTERN,
+        state_file=str(tmp_path / "state.json"),
+    ))
+    report = parse_live_game(live_summary(), build_game())
+    monkeypatch.setattr(EspnClient, "fetch_live_game", AsyncMock(return_value=report))
+    bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
+
+    def render(*args):
+        if failure == "render":
+            raise OSError("no fonts")
+        return b"oversized"
+
+    monkeypatch.setattr("ravens_bot.bot.render_live_report", render)
+    monkeypatch.setattr("ravens_bot.bot.MAX_ATTACHMENT_BYTES", 1)
+    interaction = AsyncMock()
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_live_command(bot).callback(interaction))
+    sent = interaction.followup.send.call_args.kwargs
+    assert "file" not in sent
+    assert not sent["embed"].image.url
+    assert [field.name for field in sent["embed"].fields] == ["Leaders", "Team stats"]
+    assert "Live stats chart" in caplog.text
+
+
+def full_summary() -> dict[str, Any]:
+    def category(name, labels, athletes):
+        return {
+            "name": name,
+            "labels": labels,
+            "athletes": [
+                {"athlete": {"displayName": player}, "stats": stats}
+                for player, stats in athletes
+            ],
+        }
+
+    payload = live_summary()
+    payload["boxscore"]["players"] = [
+        {
+            "team": {"id": "5", "displayName": "Cleveland Browns", "abbreviation": "CLE"},
+            "statistics": [
+                category("defensive", ["TOT", "SACKS", "PD"], [("Browns LB", ["7", "0.5", "1"])]),
+            ],
+        },
+        {
+            "team": {"id": "33", "displayName": "Baltimore Ravens", "abbreviation": "BAL"},
+            "statistics": [
+                category("rushing", ["CAR", "YDS", "TD"], [
+                    ("Derrick Henry", ["17", "94", "1"]),
+                    ("Backup Back", ["2", "6", "0"]),
+                ]),
+                category("defensive", ["TOT", "SOLO", "SACKS", "TFL", "PD"], [
+                    (f"Ravens Defender {index}", ["8", None, "1.5", "", "2"])
+                    for index in range(23)
+                ]),
+                category("interceptions", ["INT", "YDS", "TD"], [
+                    ("Ravens Safety", ["1", "12", "0"]),
+                ]),
+                category("fumbles", ["FUM", "LOST", "REC"], [
+                    ("Ravens LB", ["0", "0", "1"]),
+                ]),
+                category("kicking", ["FG", "PCT", "XP"], [("Kicker", ["1/1", "100", "3/3"])]),
+                category("kickReturns", ["NO", "YDS", "TD"], [("Returner", ["2", "55", "0"])]),
+                category("punting", ["NO", "YDS"], [("Punter", ["3", "144"])]),
+            ],
+        },
+    ]
+    return payload
+
+
+def test_full_box_score_keeps_every_player_and_defensive_and_special_teams_category() -> None:
+    payload = full_summary()
+    report = parse_live_game(payload, build_game())
+
+    assert report.players == parse_player_stats(payload)
+    assert len(report.players) == 31
+    assert report.players[0].player.name == "Derrick Henry"
+    assert report.players[1].player.name == "Backup Back"
+    assert report.players[-1].player.name == "Browns LB"
+    assert report.leaders[0].player.name == "Lamar Jackson"
+    assert report.players[2].detail == "8 TOT, 1.5 SACKS, 2 PD"
+    assert {line.category.lower() for line in report.players} == {
+        "rushing", "defensive", "interceptions", "fumbles", "kicking", "kickreturns", "punting",
+    }
+    assert parse_player_stats({}) == ()
+
+
+def test_expanded_pages_keep_all_rows_and_repeat_headings() -> None:
+    report = parse_live_game(full_summary(), build_game())
+    sections = chart_sections(report, all_stats=True)
+    pages = chart_pages(report)
+
+    assert len(pages) > 1
+    assert sections[0].title == "BAL Rushing"
+    assert sections[-1].title == "Team snapshot"
+    assert [row for page in pages for section in page for row in section.rows] == [
+        row for section in sections for row in section.rows
+    ]
+    assert all(
+        sum(len(section.rows) + 2 for section in page) <= ROWS_PER_PAGE for page in pages
+    )
+    assert any(section.title.endswith("(cont.)") for page in pages for section in page)
+    assert all(section.headers for page in pages for section in page)
+    assert all(not section.headshots or len(section.headshots) == len(section.rows)
+               for page in pages for section in page)
+    text = expanded_stats_text(report)
+    assert "Ravens Defender 22 | Defensive: 8 TOT, 1.5 SACKS, 2 PD" in text
+    assert "Ravens Safety | Interceptions: 1 INT, 12 YDS, 0 TD" in text
+    assert "Ravens LB | Fumbles: 0 FUM, 0 LOST, 1 REC" in text
+
+
+def test_expanded_takeaways_are_opponents_turnovers_not_forced_fumbles() -> None:
+    report = LiveGameReport(
+        game=build_game(),
+        teams=(
+            TeamGameStats(BROWNS_TEAM, (("Turnovers", "3"), ("Forced Fumbles", "5"))),
+            TeamGameStats(RAVENS_TEAM, (("Turnovers", "1"), ("Forced Fumbles", "4"))),
+        ),
+    )
+    section = chart_sections(report, all_stats=True)[0]
+    assert section.headers == ("Stat", "BAL | CLE")
+    assert ("Takeaways", "3 | 1") in section.rows
+    missing = replace(report, teams=(
+        TeamGameStats(BROWNS_TEAM, (("Total Yards", "123"),)), report.teams[1],
+    ))
+    assert ("Takeaways", "- | 1") in chart_sections(missing, all_stats=True)[0].rows
+    assert not any(row[0] == "Takeaways" for row in chart_sections(report)[0].rows)
+
+
+def test_expanded_missing_box_score_is_explicit_and_does_not_change_default() -> None:
+    report = parse_live_game(live_summary(), build_game())
+    assert "full player box score" in live_game_embed(report, EASTERN, all_stats=True).description
+    assert "full player box score" not in live_game_embed(report, EASTERN).description
+    assert chart_sections(report, all_stats=True)[0].rows[0][0] == "Lamar Jackson"
+
+
+def test_expanded_only_defensive_stats_are_not_treated_as_empty() -> None:
+    report = LiveGameReport(
+        game=build_game(),
+        players=(PlayerGameStats(PlayerRef("Defender"), "Defensive", "2 SACKS", RAVENS_TEAM),),
+    )
+    embed = live_game_embed(report, EASTERN, all_stats=True, with_chart=True)
+    assert embed.image.url == f"attachment://{LIVE_CHART_FILENAME}"
+    assert "not published" not in embed.description
+    assert len(chart_pages(report)) == 1
+
+
+def test_expanded_renders_multiple_bounded_pngs() -> None:
+    report = parse_live_game(full_summary(), build_game())
+    images = render_live_pages(report)
+    assert len(images) == len(chart_pages(report))
+    for data in images:
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.format == "PNG"
+            assert image.width <= MAX_IMAGE_WIDTH * OUTPUT_SCALE
+            assert image.height <= 1800
+
+
+@pytest.mark.parametrize("failure", [None, "render", "size"])
+def test_expanded_command_sends_every_page_or_complete_text(
+    tmp_path, monkeypatch, caplog, failure
+) -> None:
+    bot = RavensBot(BotConfig(
+        discord_token="token", discord_channel_ids=(123,), discord_webhook_urls=(),
+        poll_interval_seconds=300, time_zone=EASTERN,
+        state_file=str(tmp_path / "state.json"),
+    ))
+    report = parse_live_game(full_summary(), build_game())
+    monkeypatch.setattr(EspnClient, "fetch_live_game", AsyncMock(return_value=report))
+    bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
+    count = len(chart_pages(report))
+
+    def render(*args):
+        if failure == "render":
+            raise OSError("no fonts")
+        return tuple(b"chart" for _ in range(count))
+
+    monkeypatch.setattr("ravens_bot.bot.render_live_pages", render)
+    if failure == "size":
+        monkeypatch.setattr("ravens_bot.bot.MAX_ATTACHMENT_BYTES", 1)
+    interaction = AsyncMock()
+    command = _live_command(bot)
+    assert command.parameters[0].name == "all_stats"
+    assert command.parameters[0].default is False
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(command.callback(interaction, all_stats=True))
+    sent = [call.kwargs for call in interaction.followup.send.call_args_list]
+    assert all(post["ephemeral"] for post in sent)
+    if failure:
+        assert len(sent) == 1
+        assert sent[0]["file"].filename == "ravens-all-player-stats.txt"
+        assert sent[0]["file"].fp.read().decode("utf-8") == expanded_stats_text(report)
+        assert "Expanded live stats chart" in caplog.text
+    else:
+        assert len(sent) == count
+        for index, post in enumerate(sent, 1):
+            assert post["file"].filename == LIVE_CHART_FILENAME
+            assert post["embed"].image.url == f"attachment://{LIVE_CHART_FILENAME}"
+            assert post["embed"].footer.text.startswith(f"Page {index}/{count}")

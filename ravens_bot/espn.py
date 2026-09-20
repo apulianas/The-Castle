@@ -1256,8 +1256,10 @@ def _leaders_from_block(
     return lines
 
 
-def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
-    """Top line per category from the player box score.
+def _players_from_boxscore(
+    summary: dict[str, Any], *, leaders_only: bool = False
+) -> list[PlayerGameStats]:
+    """Read every player category, or just the first offensive leader in each.
 
     ESPN drops the `leaders` block on some games, but the box score carries the
     same numbers as labelled columns, with the leading player listed first.
@@ -1270,7 +1272,7 @@ def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
         for group in _as_list(entry.get("statistics")):
             category_data = _as_dict(group)
             name = _text(category_data.get("name")) or ""
-            if name.lower() not in BOXSCORE_CATEGORIES:
+            if not name or (leaders_only and name.lower() not in BOXSCORE_CATEGORIES):
                 continue
             labels = [
                 str(label).strip() for label in _as_list(category_data.get("labels"))
@@ -1283,7 +1285,7 @@ def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
                 pairs = [
                     (str(value).strip(), labels[index] if index < len(labels) else "")
                     for index, value in enumerate(_as_list(athlete_data.get("stats")))
-                    if str(value).strip()
+                    if value is not None and str(value).strip()
                 ]
                 if player is None or not pairs:
                     continue
@@ -1298,7 +1300,8 @@ def _leaders_from_boxscore(summary: dict[str, Any]) -> list[PlayerGameStats]:
                         team=team,
                     )
                 )
-                break
+                if leaders_only:
+                    break
     return lines
 
 
@@ -1310,9 +1313,14 @@ def parse_leaders(summary: dict[str, Any]) -> tuple[PlayerGameStats, ...]:
         team = team_ref(block.get("team")) if block.get("team") else None
         lines.extend(_leaders_from_block(block, team))
     if not lines:
-        lines = _leaders_from_boxscore(summary)
+        lines = _players_from_boxscore(summary, leaders_only=True)
     lines.sort(key=lambda line: not line.is_ravens)
     return tuple(lines)
+
+
+def parse_player_stats(summary: dict[str, Any]) -> tuple[PlayerGameStats, ...]:
+    """All published offensive, defensive, and special-teams player stat lines."""
+    return tuple(sorted(_players_from_boxscore(summary), key=lambda line: not line.is_ravens))
 
 
 def parse_live_game(summary: dict[str, Any], game: Game) -> LiveGameReport:
@@ -1323,6 +1331,7 @@ def parse_live_game(summary: dict[str, Any], game: Game) -> LiveGameReport:
         situation=parse_live_situation(summary, refreshed),
         teams=parse_team_stats(summary),
         leaders=parse_leaders(summary),
+        players=parse_player_stats(summary),
     )
 
 

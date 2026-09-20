@@ -11,7 +11,7 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
-  - `/live` — live score, clock, possession, team totals, and leaders for today's game.
+  - `/live [all_stats]` — live score, clock, possession, and a player-first stats graphic for today's game. Use `/live all_stats:true` for the full player box score.
   - `/recap [date]` — final score, offensive efficiency, passing/rushing leaders,
     and Ravens-perspective win-probability swings for the latest completed
     regular-season/playoff game, or a game on `YYYY-MM-DD` in `TIME_ZONE`.
@@ -165,8 +165,22 @@ without constructing a client.
   under an "Injury report" field. The photo is the player joining the roster,
   and a post about one person keeps the full-size headshot.
 - **Live stats** lead with the score, clock, quarter, possession, and down and
-  distance, then list both teams' box score totals side by side and a leading
-  player per category, Ravens first. A game that has not kicked off points at
+  distance, then show a graphic in the injury report's glass-panel style.
+  Leading players per category come first, Ravens before their opponent, with
+  headshots and full stat lines. A compact comparison of up to four team totals
+  follows, prioritizing yards, turnovers, third downs, and possession when available.
+  The title links to ESPN's full box score. If the image cannot be rendered,
+  the post falls back to written leaders followed by team totals.
+  Set `all_stats:true` to expand to every player line ESPN publishes for both
+  teams, grouped by team and category: passing, rushing, receiving, defense
+  (including sacks), interceptions, fumbles/recoveries, kicking, and returns.
+  Expanded charts repeat headings across multiple images instead of dropping
+  players. Team takeaways are the opponent's turnovers, not forced fumbles;
+  missing stats are not treated as zero. ESPN may not publish all categories
+  immediately; when the full player box score is absent, the post says so.
+  If expanded graphics cannot be rendered, a text attachment preserves every
+  available player line.
+  A game that has not kicked off points at
   `/nextgame` instead, since there is nothing to report yet, and a finished game
   shows the same layout as a live one, which is what a final box score is. ESPN
   publishes these sections at different points in a game, so the post degrades
