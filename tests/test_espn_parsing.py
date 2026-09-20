@@ -615,6 +615,60 @@ def test_fetch_inactives_falls_back_to_summary_when_core_fails(monkeypatch) -> N
     assert [player.name for player in reports[0].players] == ["Fallback Raven"]
 
 
+def test_parse_event_roster_reads_a_real_game_day_list() -> None:
+    """A club declares six or seven, not a squad's worth of unused players."""
+    ravens = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
+    declared = [
+        ("4430807", "Zay Flowers", "WR"),
+        ("4362250", "Joe Fagnano", "QB"),
+        ("4429025", "Andrew Vorhees", "G"),
+        ("4685702", "Garrett Lichtenhan", "OT"),
+        ("3916594", "Nnamdi Madubuike", "DT"),
+        ("4362617", "Jay Higgins", "ILB"),
+    ]
+    roster = {
+        "entries": [
+            {
+                "playerId": int(athlete_id),
+                "displayName": name,
+                "active": False,
+                "didNotPlay": True,
+                "athlete": {"$ref": f"http://example.test/athletes/{athlete_id}"},
+            }
+            for athlete_id, name, _ in declared
+        ]
+        + [
+            {
+                "playerId": 8,
+                "displayName": "Lamar Jackson",
+                "active": True,
+                "didNotPlay": False,
+            },
+            {
+                "playerId": 9,
+                "displayName": "Dressed Reserve",
+                "active": True,
+                "didNotPlay": True,
+            },
+        ]
+    }
+    athletes = {
+        athlete_id: {
+            "id": athlete_id,
+            "fullName": name,
+            "position": {"abbreviation": position},
+        }
+        for athlete_id, name, position in declared
+    }
+
+    players = parse_event_inactive_roster(roster, ravens, athletes)
+
+    assert [(player.position, player.name) for player in players] == [
+        (position, name) for _, name, position in declared
+    ]
+    assert all(player.is_ravens for player in players)
+
+
 def test_fetch_inactives_falls_back_when_the_roster_lists_no_inactives(
     monkeypatch,
 ) -> None:
