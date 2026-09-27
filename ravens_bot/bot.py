@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from collections.abc import Sequence
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -288,12 +289,13 @@ class RavensBot(commands.Bot):
             return
         image = image or await self._render_official_injury_report(report)
         for target in pending:
-            await self._announce_image(
+            await self._announce_report(
                 target,
                 _official_injury_slot(report_date, target.key_id),
                 report.announcement_key,
                 official_injury_embed(report),
                 image,
+                filename="ravens-injury-report.png",
             )
 
     async def _add_official_injury_matchup(
@@ -413,6 +415,22 @@ class RavensBot(commands.Bot):
             if not report.players:
                 continue
             key = inactive_announcement_key(report)
+            pending = []
+            for target in targets:
+                slot = _inactive_slot(report.game.event_id, target.key_id)
+                if self.announcement_state.is_current(slot, key):
+                    continue
+                # Legacy posts have no message ID; do not duplicate them.
+                if (
+                    self.announcement_state.message_id(slot) is None
+                    and self.announcement_state.has_target_keys(
+                        f"inactives:{report.game.event_id}:", target.key_id
+                    )
+                ):
+                    continue
+                pending.append(target)
+            if not pending:
+                continue
             image = await self._inactive_chart(report)
             embeds = inactive_embeds(
                 [report],
@@ -420,11 +438,15 @@ class RavensBot(commands.Bot):
                 self.config.time_zone,
                 with_players=image is None,
             )
-            for target in targets:
-                if self._unseen(target, key):
-                    await self._announce(
-                        target, [key], embeds, image, INACTIVE_CHART_FILENAME
-                    )
+            for target in pending:
+                await self._announce_report(
+                    target,
+                    _inactive_slot(report.game.event_id, target.key_id),
+                    key,
+                    embeds[0],
+                    image,
+                    filename=INACTIVE_CHART_FILENAME,
+                )
 
     async def _inactive_chart(self, report: InactiveReport) -> bytes | None:
         """The inactive list as a chart, or nothing when it cannot be drawn.
@@ -504,51 +526,57 @@ class RavensBot(commands.Bot):
         for key in keys:
             self.announcement_state.mark(channel_key(key, target.key_id))
 
-    async def _announce_image(
+    async def _announce_report(
         self,
         target: _AnnouncementTarget,
         slot: str,
         version: str,
         embed: discord.Embed,
-        image: bytes,
+        image: bytes | None,
+        *,
+        filename: str,
     ) -> None:
         message_id = self.announcement_state.message_id(slot)
         try:
             if message_id is not None:
                 try:
-                    with closing(discord.File(
-                        io.BytesIO(image), filename="ravens-injury-report.png"
-                    )) as file:
+                    with (
+                        closing(discord.File(io.BytesIO(image), filename=filename))
+                        if image is not None else nullcontext(None)
+                    ) as file:
+                        attachments = [file] if file is not None else []
                         if isinstance(target.destination, discord.Webhook):
                             await target.destination.edit_message(
-                                message_id, embed=embed, attachments=[file]
+                                message_id, embed=embed, attachments=attachments
                             )
                         else:
                             channel = self.get_partial_messageable(int(target.key_id))
                             await channel.get_partial_message(message_id).edit(
-                                embed=embed, attachments=[file]
+                                embed=embed, attachments=attachments
                             )
                 except discord.NotFound as exc:
                     if exc.code != 10008:  # Unknown Message, not a missing webhook.
                         raise
                     LOGGER.warning(
-                        "Injury report message %s was deleted from %s; replacing it",
+                        "Report message %s was deleted from %s; replacing it",
                         message_id, target.label,
                     )
                 else:
                     self.announcement_state.mark_message(slot, version, message_id)
                     return
-            with closing(discord.File(
-                io.BytesIO(image), filename="ravens-injury-report.png"
-            )) as file:
+            with (
+                closing(discord.File(io.BytesIO(image), filename=filename))
+                if image is not None else nullcontext(None)
+            ) as file:
+                file_args = {"file": file} if file is not None else {}
                 if isinstance(target.destination, discord.Webhook):
                     message = await target.destination.send(
-                        embed=embed, file=file, wait=True
+                        embed=embed, wait=True, **file_args
                     )
                 else:
-                    message = await target.destination.send(embed=embed, file=file)
+                    message = await target.destination.send(embed=embed, **file_args)
         except discord.DiscordException as exc:
-            LOGGER.warning("Could not post or edit injury report in %s: %s", target.label, exc)
+            LOGGER.warning("Could not post or edit report in %s: %s", target.label, exc)
             return
         self.announcement_state.mark_message(slot, version, message.id)
 
@@ -1238,8 +1266,22 @@ def watching_inactives(games: Sequence[Game], moment: datetime) -> bool:
     return False
 
 
+def _inactive_slot(event_id: str, target: int | str) -> str:
+    return channel_key(f"inactives:{event_id}", target)
+
+
 def inactive_announcement_key(report: InactiveReport) -> str:
-    players = ",".join(sorted(player.name for player in report.players))
+    players = json.dumps(sorted(
+        (
+            player.team or "",
+            player.name,
+            player.reason or "",
+            player.athlete_id or "",
+            player.position or "",
+            player.is_ravens,
+        )
+        for player in report.players
+    ))
     return f"inactives:{report.game.event_id}:{players}"
 
 
