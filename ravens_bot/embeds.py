@@ -817,7 +817,11 @@ def help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="/inactives [date]",
-        value="Game day inactives as a chart, by team, with position and reason, when ESPN publishes them.",
+        value=(
+            "Game day inactives as a chart, by team, with position and reason. "
+            "Takes today, a `YYYY-MM-DD` date, a week of this season such as "
+            "`week 5`, or a round such as `wild card`."
+        ),
         inline=False,
     )
     embed.add_field(

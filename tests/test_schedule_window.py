@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from ravens_bot.dates import DateWindow
+from ravens_bot.dates import DateWindow, WeekRequest
 from ravens_bot.espn import EspnApiError, EspnClient
 from ravens_bot.models import Game, GameTeam, TeamRef
 
@@ -253,3 +253,81 @@ def test_season_type_requests_have_distinct_cache_keys(monkeypatch) -> None:
         {"season": "2024", "seasontype": "2"},
         {"season": "2024", "seasontype": "3"},
     ]
+
+
+WEEK_ZONE = ZoneInfo("America/New_York")
+
+
+def _week_client(monkeypatch, games):
+    client = EspnClient(None)  # type: ignore[arg-type]
+    asked: list[tuple[int | None, int | None]] = []
+
+    async def season_schedule(season=None, season_type=None):
+        asked.append((season, season_type))
+        return [game for game in games if game.season_type == season_type]
+
+    monkeypatch.setattr(client, "fetch_season_schedule", season_schedule)
+    return client, asked
+
+
+def _game(event_id, kickoff, week_number, season_type=2, season=2026):
+    return Game(
+        event_id,
+        "Ravens game",
+        "BAL",
+        kickoff,
+        "Final",
+        completed=True,
+        season=season,
+        season_type=season_type,
+        week_number=week_number,
+    )
+
+
+WEEK_GAMES = [
+    _game("w2", datetime(2026, 9, 13, 17, tzinfo=timezone.utc), 2),
+    _game("w3", datetime(2026, 9, 20, 17, tzinfo=timezone.utc), 3),
+    _game("wc", datetime(2027, 1, 10, 18, tzinfo=timezone.utc), 1, season_type=3),
+]
+
+
+def test_a_week_is_dated_from_the_season_schedule(monkeypatch) -> None:
+    client, asked = _week_client(monkeypatch, WEEK_GAMES)
+
+    moment = asyncio.run(
+        client.resolve_week_date(WeekRequest(3), date(2026, 9, 24), WEEK_ZONE)
+    )
+
+    assert moment == date(2026, 9, 20)
+    assert asked == [(2026, 2)]
+
+
+def test_a_january_question_still_means_last_autumn_s_season(monkeypatch) -> None:
+    client, asked = _week_client(monkeypatch, WEEK_GAMES)
+
+    moment = asyncio.run(
+        client.resolve_week_date(WeekRequest(2), date(2027, 1, 20), WEEK_ZONE)
+    )
+
+    assert moment == date(2026, 9, 13)
+    assert asked == [(2026, 2)]
+
+
+def test_a_postseason_round_reads_the_postseason_schedule(monkeypatch) -> None:
+    client, asked = _week_client(monkeypatch, WEEK_GAMES)
+
+    moment = asyncio.run(
+        client.resolve_week_date(WeekRequest(1, 3), date(2027, 1, 20), WEEK_ZONE)
+    )
+
+    assert moment == date(2027, 1, 10)
+    assert asked == [(2026, 3)]
+
+
+def test_a_week_the_ravens_did_not_play_says_so(monkeypatch) -> None:
+    client, _ = _week_client(monkeypatch, WEEK_GAMES)
+
+    with pytest.raises(EspnApiError):
+        asyncio.run(
+            client.resolve_week_date(WeekRequest(14), date(2026, 12, 1), WEEK_ZONE)
+        )

@@ -7,6 +7,7 @@ import pytest
 
 from ravens_bot.espn import (
     INACTIVE_ATHLETE_TTL_SECONDS,
+    MAX_INACTIVES_PER_TEAM,
     SITE_BASE,
     EspnApiError,
     EspnClient,
@@ -204,3 +205,142 @@ def test_failed_athlete_lookup_does_not_turn_a_reserve_into_an_inactive(
     report = asyncio.run(client._fetch_event_inactives(GAME))
     assert {player.name for player in report.players} == EXPECTED
     assert "Inactive status unavailable for athlete 4035671" in caplog.text
+
+
+FINISHED = Game(
+    "401872939",
+    "Baltimore Ravens at Cleveland Browns",
+    "BAL @ CLE",
+    datetime(2026, 9, 13, 17, tzinfo=timezone.utc),
+    "Final",
+    state="post",
+    completed=True,
+    home=GameTeam(TeamRef("Cleveland Browns", "5", "CLE", "cle"), is_home=True),
+    away=GameTeam(RAVENS),
+)
+PLAYED = ("Marlon Humphrey", "Roquan Smith", "Derrick Henry")
+
+
+def finished_roster():
+    """A competitor roster as ESPN freezes it once a game has been played."""
+    entries = []
+    athletes = {}
+    for athlete_id, name, position, _ in PLAYERS[:5]:
+        entries.append(
+            {
+                "playerId": int(athlete_id),
+                "active": False,
+                "didNotPlay": True,
+                "athlete": {"$ref": f"http://example.test/athletes/{athlete_id}"},
+            }
+        )
+        athletes[athlete_id] = {
+            "id": athlete_id,
+            "fullName": name,
+            "position": {"abbreviation": position},
+            # A finished game keeps no historical status: the athlete record is
+            # current, which is exactly why the roster has to be read instead.
+            "injuries": [],
+        }
+    for index, name in enumerate(PLAYED):
+        athlete_id = f"played-{index}"
+        entries.append(
+            {
+                "playerId": index,
+                "active": True,
+                "didNotPlay": False,
+                "athlete": {"$ref": f"http://example.test/athletes/{athlete_id}"},
+            }
+        )
+        athletes[athlete_id] = {"id": athlete_id, "fullName": name, "injuries": []}
+    return {"entries": entries}, athletes
+
+
+def _finished_client(monkeypatch, roster, athletes, opponent=None):
+    client = EspnClient(None)  # type: ignore[arg-type]
+    requested: list[str] = []
+
+    async def schedule(window):
+        return [FINISHED]
+
+    async def json(url, params=None):
+        if "/competitors/33/roster" in url:
+            return roster
+        if "/competitors/5/roster" in url:
+            return opponent or {"entries": []}
+        requested.append(url)
+        return athletes[url.rsplit("/", 1)[1]]
+
+    monkeypatch.setattr(client, "fetch_schedule", schedule)
+    monkeypatch.setattr(client, "_json", json)
+    return client, requested
+
+
+def test_a_played_game_reports_the_inactives_its_roster_froze(monkeypatch):
+    roster, athletes = finished_roster()
+    client, _ = _finished_client(monkeypatch, roster, athletes)
+
+    reports = asyncio.run(client.fetch_inactives(date(2026, 9, 13)))
+
+    assert len(reports) == 1
+    names = {player.name for player in reports[0].players}
+    assert names == {name for _, name, _, _ in PLAYERS[:5]}
+    assert not names & set(PLAYED)
+    assert all(player.reason is None for player in reports[0].players)
+    assert all(player.is_ravens for player in reports[0].players)
+
+
+def test_a_played_game_reads_no_list_from_an_unpublished_roster(monkeypatch):
+    """The pregame shape — every entry inactive — is not an inactive list."""
+    roster, athletes = roster_and_athletes()
+    for entry in roster["entries"]:
+        entry["active"] = False
+    client, _ = _finished_client(monkeypatch, roster, athletes)
+    summaries: list[str] = []
+
+    async def json(url, params=None):
+        if "/competitors/33/roster" in url:
+            return roster
+        if "/competitors/5/roster" in url:
+            return {"entries": []}
+        if url.endswith("/summary"):
+            summaries.append(url)
+            return {}
+        return athletes[url.rsplit("/", 1)[1]]
+
+    monkeypatch.setattr(client, "_json", json)
+    reports = asyncio.run(client.fetch_inactives(date(2026, 9, 13)))
+
+    assert reports[0].players == ()
+    assert summaries, "the summary route is still the fallback"
+
+
+def test_a_played_game_looks_up_only_the_players_it_cannot_name(monkeypatch):
+    roster, athletes = finished_roster()
+    roster["entries"][0]["displayName"] = "Nnamdi Madubuike"
+    roster["entries"][0]["position"] = {"abbreviation": "DT"}
+    client, requested = _finished_client(monkeypatch, roster, athletes)
+
+    reports = asyncio.run(client.fetch_inactives(date(2026, 9, 13)))
+
+    assert len(reports[0].players) == 5
+    # Four names had to be fetched; the dressed players and the named entry did not.
+    assert len(requested) == 4
+
+
+def test_a_played_game_with_too_long_a_list_is_not_read_as_inactives(monkeypatch):
+    roster, athletes = finished_roster()
+    for index in range(MAX_INACTIVES_PER_TEAM + 1):
+        athlete_id = f"extra-{index}"
+        roster["entries"].append(
+            {
+                "playerId": 900 + index,
+                "active": False,
+                "athlete": {"$ref": f"http://example.test/athletes/{athlete_id}"},
+            }
+        )
+        athletes[athlete_id] = {"id": athlete_id, "fullName": f"Extra {index}"}
+    client, _ = _finished_client(monkeypatch, roster, athletes)
+
+    with pytest.raises(EspnApiError):
+        asyncio.run(client._fetch_event_inactives(FINISHED))

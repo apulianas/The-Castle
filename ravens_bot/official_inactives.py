@@ -179,11 +179,14 @@ def parse_inactive_names(page: str) -> tuple[InactivePlayer, ...]:
     parser.close()
     players: list[InactivePlayer] = []
     seen: set[str] = set()
+    started = False
     for block in parser.blocks:
-        if "inactive" not in block.casefold() and not players:
+        if not started:
             # The names only count once the article has said what the list is,
             # so a lead paragraph about the matchup contributes nobody.
-            continue
+            started = "inactive" in block.casefold()
+            if not started:
+                continue
         for player in extract_players(block):
             key = normalize_name(player.name)
             if not key or key in seen:
