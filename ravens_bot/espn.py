@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .cache import AsyncTtlCache
-from .dates import DateWindow, espn_dates
+from .dates import DateWindow, WeekRequest, espn_dates, league_year
 from .espn_urls import player_url
 from .models import (
     AFC_NORTH_GROUP_ID,
@@ -899,6 +899,65 @@ def inactive_roster_entries(roster: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def completed_inactive_entries(roster: dict[str, Any]) -> list[dict[str, Any]]:
+    """The declared inactives of a game already played.
+
+    Once a game is over its competitor roster is a frozen record of who dressed,
+    so ``active: false`` is the inactive list itself. The athlete records ESPN
+    keeps are current rather than historical, which is why a finished game
+    cannot be read the way a pregame one is. The distinction that makes this
+    safe is that a finished roster marks the players who dressed ``active:
+    true``; before the lists are published every entry reads ``active: false``,
+    and that roster says nothing at all, so it is rejected here.
+    """
+    entries = [entry for raw in _as_list(roster.get("entries")) if (entry := _as_dict(raw))]
+    if not any(entry.get("active") is True for entry in entries):
+        return []
+    return [entry for entry in entries if entry.get("active") is False]
+
+
+def _needs_athlete_record(entry: dict[str, Any]) -> bool:
+    """Whether the entry alone cannot name and place the player.
+
+    A finished game's roster entry usually carries neither, and a full name is
+    two words: a bare surname would leave the chart naming half a player.
+    """
+    name = _display_name(entry) or ""
+    return len(name.split()) < 2 or not _position_text(entry.get("position"))
+
+
+def parse_completed_inactive_roster(
+    roster: dict[str, Any],
+    team: TeamRef,
+    athletes: dict[str, dict[str, Any]],
+) -> tuple[InactivePlayer, ...]:
+    """Read the inactive list of a finished game from its competitor roster.
+
+    ESPN keeps no historical reason for a past game's inactive, so a player
+    whose reason cannot be recovered is still reported, without one: the list
+    is the answer, and the reason is the detail.
+    """
+    players: list[InactivePlayer] = []
+    for entry in completed_inactive_entries(roster):
+        athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
+        athlete = athletes.get(athlete_id or "", _as_dict(entry.get("athlete")))
+        name = _display_name(athlete) or _display_name(entry)
+        if not name:
+            continue
+        players.append(
+            InactivePlayer(
+                name=name,
+                team=team.name,
+                reason=None,
+                athlete_id=athlete_id,
+                position=_position_text(athlete.get("position"))
+                or _position_text(entry.get("position")),
+                is_ravens=team.is_ravens,
+            )
+        )
+    return tuple(players)
+
+
 def _inactive_injury(
     athlete: dict[str, Any], game: Game | None
 ) -> dict[str, Any] | None:
@@ -1674,6 +1733,35 @@ class EspnClient:
 
         return await self._injury_cache.get_or_fetch("injuries", load)
 
+    async def resolve_week_date(
+        self, request: WeekRequest, today: date, time_zone: ZoneInfo
+    ) -> date:
+        """The day the Ravens played a week of the current league year.
+
+        Only the schedule knows which day a week fell on, and January belongs to
+        the season before the calendar year, so the league year is taken the
+        same way a recent-games lookup takes it.
+        """
+        season = league_year(today)
+        try:
+            games = await self.fetch_season_schedule(
+                season, season_type=request.season_type
+            )
+        except EspnApiError as exc:
+            raise EspnApiError(
+                f"The {season} schedule could not be read, so {request.label}"
+                " cannot be dated."
+            ) from exc
+        for game in games:
+            if game.week_number != request.week_number:
+                continue
+            moment = _local_game_date(game, time_zone)
+            if moment is not None:
+                return moment
+        raise EspnApiError(
+            f"No Ravens game is scheduled for {request.label} of the {season} season."
+        )
+
     async def fetch_inactives(self, target_date: date) -> list[InactiveReport]:
         games = await self.fetch_schedule(DateWindow(target_date, target_date))
         reports: list[InactiveReport] = []
@@ -1711,7 +1799,12 @@ class EspnClient:
             )
 
         rosters = await asyncio.gather(*(fetch_roster(side) for side in sides))
-        entries = [inactive_roster_entries(roster) for roster in rosters]
+        played = game.completed
+        entries = [
+            completed_inactive_entries(roster) if played
+            else inactive_roster_entries(roster)
+            for roster in rosters
+        ]
         if not any(entries):
             # Before ESPN publishes the lists every entry is simply a rostered
             # player, so an empty read is news that has not arrived yet rather
@@ -1722,8 +1815,13 @@ class EspnClient:
             for entry in side_entries:
                 athlete_id = _athlete_id(entry.get("athlete")) or _athlete_id(entry)
                 athlete_ref = _text(_as_dict(entry.get("athlete")).get("$ref"))
-                if athlete_id and athlete_ref:
-                    athlete_refs[athlete_id] = athlete_ref.replace("http://", "https://", 1)
+                if not (athlete_id and athlete_ref):
+                    continue
+                if played and not _needs_athlete_record(entry):
+                    # A finished game needs no status lookup, only the name and
+                    # position the entry may be missing.
+                    continue
+                athlete_refs[athlete_id] = athlete_ref.replace("http://", "https://", 1)
 
         athletes: dict[str, dict[str, Any]] = {}
         limit = asyncio.Semaphore(8)
@@ -1749,7 +1847,8 @@ class EspnClient:
             *(fetch_athlete(athlete_id, ref) for athlete_id, ref in athlete_refs.items())
         )
         team_players = [
-            parse_event_inactive_roster(roster, side.team, athletes, game)
+            parse_completed_inactive_roster(roster, side.team, athletes) if played
+            else parse_event_inactive_roster(roster, side.team, athletes, game)
             for side, roster in zip(sides, rosters, strict=True)
         ]
         if any(len(players) > MAX_INACTIVES_PER_TEAM for players in team_players):

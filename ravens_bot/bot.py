@@ -19,8 +19,10 @@ from .config import BotConfig, load_config, webhook_id
 from .dates import (
     MAX_SCHEDULE_DAYS,
     DateWindow,
+    WeekRequest,
     now_in_zone,
     parse_user_date,
+    parse_user_date_or_week,
     today_in_zone,
     upcoming_window,
 )
@@ -98,6 +100,11 @@ from .models import (
     SnapCountReport,
     Transaction,
 )
+from .official_inactives import (
+    OfficialInactivesClient,
+    OfficialInactivesError,
+    merge_official_inactives,
+)
 from .official_transactions import (
     OfficialTransactionsClient,
     OfficialTransactionsError,
@@ -167,6 +174,7 @@ class RavensBot(commands.Bot):
         self.injury_reports: InjuryReportClient | None = None
         self.artwork: ArtworkLoader | None = None
         self.official_transactions: OfficialTransactionsClient | None = None
+        self.official_inactives: OfficialInactivesClient | None = None
         self.snap_counts: SnapCountClient | None = None
         self.recaps: RecapClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
@@ -180,6 +188,7 @@ class RavensBot(commands.Bot):
         self.injury_reports = InjuryReportClient(self.session)
         self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
+        self.official_inactives = OfficialInactivesClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.recaps = RecapClient(self.session)
         self.announcement_state.load()
@@ -426,6 +435,25 @@ class RavensBot(commands.Bot):
                         target, [key], embeds, image, INACTIVE_CHART_FILENAME
                     )
 
+    async def _with_official_inactives(self, report: InactiveReport) -> InactiveReport:
+        """The report, filled out from the club's own post when ESPN is short.
+
+        ESPN is the source of record here, so the club page is only read when a
+        game has no list at all, and a page that does not parse costs nothing
+        but the log line.
+        """
+        if report.players or report.game.start_time is None:
+            return report
+        target_date = report.game.start_time.astimezone(self.config.time_zone).date()
+        try:
+            players = await _require_official_inactives(self).fetch_inactives(
+                target_date, report.game.week
+            )
+        except OfficialInactivesError as exc:
+            LOGGER.warning("Official inactives unavailable: %s", exc)
+            return report
+        return merge_official_inactives(report, players)
+
     async def _inactive_chart(self, report: InactiveReport) -> bytes | None:
         """The inactive list as a chart, or nothing when it cannot be drawn.
 
@@ -651,17 +679,31 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         name="inactives",
         description="Show Ravens game day inactives for a date, as a chart.",
     )
-    @app_commands.describe(date="Optional date: today or YYYY-MM-DD")
+    @app_commands.describe(
+        date="Optional: today, YYYY-MM-DD, a week such as week 5, or wild card"
+    )
     async def inactives(interaction: discord.Interaction, date: str | None = None) -> None:
-        target_date = await _parse_or_respond(interaction, date, bot.config)
-        if target_date is None:
+        try:
+            target = parse_user_date_or_week(date, bot.config.time_zone)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         try:
+            target_date = (
+                await _require_espn(bot).resolve_week_date(
+                    target,
+                    today_in_zone(bot.config.time_zone),
+                    bot.config.time_zone,
+                )
+                if isinstance(target, WeekRequest)
+                else target
+            )
             reports = await _require_espn(bot).fetch_inactives(target_date)
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
+        reports = [await bot._with_official_inactives(report) for report in reports]
         if not reports:
             await interaction.followup.send(
                 embeds=inactive_embeds(reports, target_date, bot.config.time_zone)
@@ -1195,6 +1237,12 @@ def _require_official_transactions(bot: RavensBot) -> OfficialTransactionsClient
     if bot.official_transactions is None:
         raise RuntimeError("Official transactions client is not initialized")
     return bot.official_transactions
+
+
+def _require_official_inactives(bot: RavensBot) -> OfficialInactivesClient:
+    if bot.official_inactives is None:
+        raise RuntimeError("Official inactives client is not initialized")
+    return bot.official_inactives
 
 
 def _require_snap_counts(bot: RavensBot) -> SnapCountClient:
