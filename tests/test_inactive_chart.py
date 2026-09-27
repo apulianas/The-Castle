@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import io
+from dataclasses import replace
 from datetime import date
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import discord
+import pytest
 from PIL import Image
 
-from ravens_bot.bot import RavensBot, _AnnouncementTarget
+from ravens_bot.bot import (
+    RavensBot,
+    _AnnouncementTarget,
+    _inactive_slot,
+    inactive_announcement_key,
+)
 from ravens_bot.config import BotConfig
 from ravens_bot.embeds import INACTIVE_CHART_FILENAME
 
@@ -25,6 +34,7 @@ from ravens_bot.models import (
     InactiveReport,
     TeamRef,
 )
+from ravens_bot.state import channel_key
 
 
 RAVENS = TeamRef("Baltimore Ravens", "33", "BAL", "bal")
@@ -123,10 +133,11 @@ class _Destination:
     async def send(
         self,
         *,
-        embeds: list[discord.Embed],
+        embed: discord.Embed,
         file: discord.File | None = None,
-    ) -> None:
-        self.posts.append((embeds, file))
+    ):
+        self.posts.append(([embed], file))
+        return SimpleNamespace(id=len(self.posts))
 
 
 def _bot(tmp_path) -> RavensBot:
@@ -177,3 +188,172 @@ def test_a_chart_that_cannot_be_drawn_still_posts_the_written_list(
     embeds, file = destination.posts[0]
     assert file is None
     assert [field.name for field in embeds[0].fields] == ["Ravens (1)", "CLE (1)"]
+
+
+def _delivery(tmp_path, webhook):
+    bot = _bot(tmp_path)
+    destination = MagicMock(
+        spec=discord.Webhook if webhook else discord.abc.Messageable
+    )
+    destination.send = AsyncMock(return_value=SimpleNamespace(id=987))
+    edit = AsyncMock()
+    destination.edit_message = edit
+    partial_message = MagicMock(return_value=SimpleNamespace(edit=edit))
+    bot.get_partial_messageable = lambda _: SimpleNamespace(
+        get_partial_message=partial_message
+    )
+    bot._inactive_chart = AsyncMock(return_value=b"png")
+    target = _AnnouncementTarget(
+        "webhook:123" if webhook else "123", "test target", destination
+    )
+    return bot, target, edit, partial_message
+
+
+def _post(bot, target, report):
+    asyncio.run(bot._post_new_inactives([target], [report], date(2025, 11, 23)))
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+def test_inactive_changes_edit_one_message_even_after_restart(tmp_path, webhook):
+    bot, target, edit, partial_message = _delivery(tmp_path, webhook)
+    partial = _report(PLAYERS[:1])
+    complete = _report(PLAYERS)
+    slot = _inactive_slot("401", target.key_id)
+    _post(bot, target, partial)
+    _post(bot, target, partial)
+    assert bot._inactive_chart.await_count == 1
+    assert target.destination.send.call_args.kwargs.get("wait") is (
+        True if webhook else None
+    )
+
+    restarted = _bot(tmp_path)
+    restarted.announcement_state.load()
+    restarted._inactive_chart = bot._inactive_chart
+    restarted.get_partial_messageable = bot.get_partial_messageable
+    bot = restarted
+    _post(bot, target, complete)
+    _post(bot, target, _report(tuple(reversed(PLAYERS))))
+    assert edit.await_count == 1
+    assert edit.call_args.kwargs["attachments"][0].filename == INACTIVE_CHART_FILENAME
+    assert edit.call_args.kwargs["embed"].image.url == (
+        f"attachment://{INACTIVE_CHART_FILENAME}"
+    )
+    if webhook:
+        assert edit.call_args.args == (987,)
+    else:
+        partial_message.assert_called_with(987)
+
+    # Corrections can return to an earlier list, not just introduce new players.
+    _post(bot, target, partial)
+    assert edit.await_count == 2
+    assert target.destination.send.await_count == 1
+    assert bot.announcement_state.is_current(slot, inactive_announcement_key(partial))
+    assert bot.announcement_state.message_id(slot) == 987
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reason", "Ankle"),
+    ("position", "RB"),
+    ("team", "CLE"),
+    ("athlete_id", "1234"),
+    ("is_ravens", False),
+])
+def test_player_detail_corrections_edit_the_inactive_post(tmp_path, field, value):
+    bot, target, edit, _ = _delivery(tmp_path, False)
+    _post(bot, target, _report(PLAYERS))
+    changed = _report((replace(PLAYERS[0], **{field: value}), PLAYERS[1]))
+    _post(bot, target, changed)
+    assert edit.await_count == 1
+    assert target.destination.send.await_count == 1
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+def test_inactive_edits_switch_between_chart_and_written_list(tmp_path, webhook):
+    bot, target, edit, _ = _delivery(tmp_path, webhook)
+    _post(bot, target, _report(PLAYERS[:1]))
+    bot._inactive_chart.return_value = None
+    _post(bot, target, _report(PLAYERS))
+    assert edit.call_args.kwargs["attachments"] == []
+    embed = edit.call_args.kwargs["embed"]
+    assert not embed.image.url
+    assert [field.name for field in embed.fields] == ["Ravens (1)", "CLE (1)"]
+
+    bot._inactive_chart.return_value = b"new png"
+    _post(bot, target, _report(PLAYERS[:1]))
+    assert len(edit.call_args.kwargs["attachments"]) == 1
+    assert target.destination.send.await_count == 1
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+def test_failed_inactive_delivery_is_retried_without_duplicate_posts(tmp_path, webhook):
+    bot, target, edit, _ = _delivery(tmp_path, webhook)
+    slot = _inactive_slot("401", target.key_id)
+    target.destination.send.side_effect = discord.DiscordException("send failed")
+    _post(bot, target, _report(PLAYERS[:1]))
+    assert bot.announcement_state.current_version(slot) is None
+    assert bot.announcement_state.message_id(slot) is None
+
+    target.destination.send.side_effect = None
+    _post(bot, target, _report(PLAYERS[:1]))
+    edit.side_effect = discord.Forbidden(
+        SimpleNamespace(status=403, reason="Forbidden"),
+        {"code": 50013, "message": "Missing Permissions"},
+    )
+    _post(bot, target, _report(PLAYERS))
+    assert bot.announcement_state.is_current(
+        slot, inactive_announcement_key(_report(PLAYERS[:1]))
+    )
+    edit.side_effect = None
+    _post(bot, target, _report(PLAYERS))
+    assert edit.await_count == 2
+    assert target.destination.send.await_count == 2
+    assert bot.announcement_state.is_current(
+        slot, inactive_announcement_key(_report(PLAYERS))
+    )
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+@pytest.mark.parametrize("code,posts", [(10008, 2), (10015, 1)])
+def test_inactive_post_replaced_only_when_message_deleted(tmp_path, webhook, code, posts):
+    bot, target, edit, _ = _delivery(tmp_path, webhook)
+    _post(bot, target, _report(PLAYERS[:1]))
+    edit.side_effect = discord.NotFound(
+        SimpleNamespace(status=404, reason="Not Found"),
+        {"code": code, "message": "Not found"},
+    )
+    target.destination.send.return_value = SimpleNamespace(id=988)
+    _post(bot, target, _report(PLAYERS))
+    assert target.destination.send.await_count == posts
+    slot = _inactive_slot("401", target.key_id)
+    assert bot.announcement_state.message_id(slot) == (988 if code == 10008 else 987)
+
+
+def test_inactive_posts_are_scoped_to_game_and_destination(tmp_path):
+    bot, target, edit, _ = _delivery(tmp_path, False)
+    report = _report(PLAYERS)
+    _post(bot, target, report)
+    other_target = replace(target, key_id="456")
+    _post(bot, other_target, report)
+    other_game = replace(report, game=replace(report.game, event_id="402"))
+    _post(bot, target, other_game)
+    assert target.destination.send.await_count == 3
+    assert edit.await_count == 0
+
+
+def test_legacy_inactive_posts_without_message_ids_are_not_duplicated(tmp_path):
+    bot, target, edit, _ = _delivery(tmp_path, False)
+    bot.announcement_state.mark(channel_key("inactives:401:Zay Flowers", target.key_id))
+    _post(bot, target, _report(PLAYERS))
+    assert target.destination.send.await_count == 0
+    assert edit.await_count == 0
+    assert bot._inactive_chart.await_count == 0
+
+
+def test_empty_inactive_feed_does_not_post_or_erase_existing_list(tmp_path):
+    bot, target, edit, _ = _delivery(tmp_path, False)
+    _post(bot, target, _report(()))
+    assert target.destination.send.await_count == 0
+    _post(bot, target, _report(PLAYERS))
+    _post(bot, target, _report(()))
+    assert target.destination.send.await_count == 1
+    assert edit.await_count == 0

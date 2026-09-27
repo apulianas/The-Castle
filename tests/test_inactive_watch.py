@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import discord
@@ -87,8 +88,9 @@ class _Destination:
     def __init__(self) -> None:
         self.posts: list[list[discord.Embed]] = []
 
-    async def send(self, *, embeds, file=None) -> None:
-        self.posts.append(embeds)
+    async def send(self, *, embed, file=None):
+        self.posts.append([embed])
+        return SimpleNamespace(id=len(self.posts))
 
 
 class _Espn:

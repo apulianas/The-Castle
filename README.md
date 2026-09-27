@@ -37,7 +37,10 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 - Game day inactives watched on their own clock: ESPN publishes the lists about
   90 minutes before kickoff, so the watcher looks every minute from 90 minutes
   out until a quarter hour past the scheduled start, and otherwise only reads
-  the day's schedule every five minutes.
+  the day's schedule every five minutes. Each game gets one post per channel or
+  webhook; list changes edit that post and replace its chart, even after a
+  restart. If the chart cannot be rendered, the same post uses a written list.
+  Older posts saved without message IDs are left alone to avoid duplicates.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
