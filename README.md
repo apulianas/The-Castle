@@ -7,7 +7,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 - Slash commands:
   - `/transactions [date]` — Ravens roster transactions for today or a `YYYY-MM-DD` date.
-  - `/inactives [date]` — game day inactive reports as a chart image when ESPN publishes them.
+  - `/inactives [date]` — game day inactive reports as a chart image. The date
+    can be `today`, a `YYYY-MM-DD` day, a week of the current league year such
+    as `week 5` or `wk5`, or a postseason round such as `wild card`.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
@@ -130,20 +132,37 @@ without constructing a client.
   footer summarising where the Ravens sit.
 - **Games** show kickoff, broadcast, venue, week, and both records, and use the
   opponent's logo, since the Ravens appear in every post.
-- **Inactives** use ESPN's event roster to find candidates, then require an
-  explicit inactive status on the entry or a game-day inactive designation in
-  the player's record. Neither `active: false` nor `didNotPlay` proves a player
-  is inactive: ESPN can mark the entire roster inactive, and dressed reserves
-  may not take a snap. Player statuses refresh every 45 seconds so a pregame
-  lookup cannot freeze an unpublished list. The event summary is a fallback
-  when the roster lookup produces no confirmed list or fails; that summary can
-  omit healthy scratches. They are drawn as a chart image in the injury report's style:
-  a panel per club in matchup order, away first, with the club's colors and
-  logo. Each row is a headshot, position, and name in one column, with the reason
-  alongside, and the table carries no headings because a name and a reason need
-  no labelling. A club with nothing published shows a "None listed" row. The
-  post's embed keeps the matchup, kickoff, and venue; when the chart cannot be
-  drawn the written list is posted instead.
+- **Inactives** are read from ESPN's event roster first, then the event
+  summary, then the club's own inactives page, and a week can be asked for
+  instead of a date.
+  - Before and during a game, the roster only offers candidates: an explicit
+    inactive status on the entry, or a game-day inactive designation in the
+    player's record, still has to confirm one. Neither `active: false` nor
+    `didNotPlay` proves a player is inactive, because ESPN can mark the entire
+    roster inactive and dressed reserves may not take a snap. Player statuses
+    refresh every 45 seconds so a pregame lookup cannot freeze an unpublished
+    list.
+  - Once a game has been played its roster is a frozen record of who dressed,
+    so `active: false` is the inactive list itself — but only on a roster that
+    also marks players `active: true`, which is what tells a published list
+    apart from the pregame state where every entry reads inactive. ESPN keeps
+    no historical reason for a past game, so those rows carry a name and
+    position without one.
+  - The event summary is the next fallback, when the roster lookup produces no
+    confirmed list or fails; that summary can omit healthy scratches, and a
+    finished game's summary may carry no list at all.
+  - Last comes the Ravens' own inactives page, read only for a game that still
+    has no list. It is a news article rather than a feed, so it is parsed
+    leniently and a layout change costs the fallback, not the answer.
+  - A week is dated from the season schedule of the current league year, where
+    January and February still belong to the previous autumn's season.
+  - They are drawn as a chart image in the injury report's style: a panel per
+    club in matchup order, away first, with the club's colors and logo. Each row
+    is a headshot, position, and name in one column, with the reason alongside,
+    and the table carries no headings because a name and a reason need no
+    labelling. A club with nothing published shows a "None listed" row. The
+    post's embed keeps the matchup, kickoff, and venue; when the chart cannot be
+    drawn the written list is posted instead.
 - **Injuries** use the official Ravens weekly chart, including both clubs,
   practice participation by day, and game status. The chart is rendered to an
   image sized for Discord with player headshots, team-colored headings, and a
