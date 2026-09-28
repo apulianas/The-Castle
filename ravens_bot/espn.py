@@ -2107,14 +2107,36 @@ class EspnClient:
             )
         return game
 
-    async def fetch_live_game(self, today: date) -> LiveGameReport | None:
-        """Today's Ravens game, preferring one in progress over one already final.
+    async def fetch_slate(self, today: date) -> list[Game]:
+        """Every league game on a date, whoever is playing.
+
+        The Ravens schedule answers the default live question, but a named team
+        needs the whole slate, including the game that has already gone final.
+        """
+        key = espn_dates(DateWindow(today, today))
+
+        async def load() -> list[Game]:
+            payload = await self._json(
+                f"{SITE_BASE}/scoreboard", {"dates": key, "limit": "100"}
+            )
+            return parse_scoreboard(payload)
+
+        games = await self._schedule_cache.get_or_fetch(f"slate:{key}", load)
+        return list(games)
+
+    async def fetch_live_game(
+        self, today: date, team: str | None = None
+    ) -> LiveGameReport | None:
+        """Today's game, the Ravens' by default and any club's when named.
 
         A double header is impossible, but a scoreboard query for a date can
         still return a game that has finished and one that has not started when
         the date rolls over mid-evening, so an in-progress game wins.
         """
-        games = await self.fetch_schedule(DateWindow(today, today))
+        if team:
+            games = match_team_games(await self.fetch_slate(today), team)
+        else:
+            games = await self.fetch_schedule(DateWindow(today, today))
         if not games:
             return None
         game = next(

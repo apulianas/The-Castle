@@ -17,6 +17,7 @@ from ravens_bot.chart import MAX_IMAGE_WIDTH, OUTPUT_SCALE, _font, _wrap_text
 from ravens_bot.config import BotConfig
 from ravens_bot.embeds import live_game_embed, no_live_game_embed
 from ravens_bot.espn import (
+    EspnApiError,
     EspnClient,
     parse_leaders,
     parse_live_game,
@@ -32,7 +33,10 @@ from ravens_bot.formatting import (
     format_team_stats,
 )
 from ravens_bot.models import (
+    FourthDownGameReport,
+    FourthDownPlay,
     Game,
+    GameSituation,
     LiveSituation,
     GameTeam,
     LiveGameReport,
@@ -72,6 +76,32 @@ def build_game(state: str = "in", completed: bool = False) -> Game:
         completed=completed,
         week="Week 12",
         venue="M&T Bank Stadium",
+    )
+
+
+def build_fourth_down(instance: int = 1, choice: str = "go") -> FourthDownPlay:
+    return FourthDownPlay(
+        team=RAVENS_TEAM,
+        instance=instance,
+        drive=instance,
+        situation=GameSituation(
+            possession=RAVENS_TEAM, defense=BROWNS_TEAM, down=4, distance=2,
+            yards_to_goal=40, period=3, clock="7:21", spot="CLE 40",
+            score_differential=3,
+        ),
+        choice=choice,
+        outcome="converted",
+        play_text=f"Lamar Jackson run for 5 yards on play {instance}",
+        drive_result="TD",
+    )
+
+
+def _stub_fourth_downs(monkeypatch, *plays: FourthDownPlay) -> None:
+    """The live command reads fourth downs too, from the same game summary."""
+    monkeypatch.setattr(
+        EspnClient,
+        "fetch_fourth_downs",
+        AsyncMock(return_value=FourthDownGameReport(build_game(), plays)),
     )
 
 
@@ -515,17 +545,61 @@ def test_no_live_game_embed_points_at_the_next_matchup() -> None:
     assert "/nextgame" in embed.description
 
 
+def test_no_live_game_embed_names_a_team_that_is_not_playing() -> None:
+    embed = no_live_game_embed(date(2025, 11, 25), "chiefs")
+
+    assert embed.title == "Live stats"
+    assert "chiefs" in embed.description
+    assert "Baltimore Ravens game today" not in embed.description
+
+
+def test_live_embed_lists_recent_fourth_downs_and_counts_the_rest() -> None:
+    report = parse_live_game(live_summary(), build_game())
+    plays = tuple(build_fourth_down(index) for index in range(1, 9))
+    fourth_downs = FourthDownGameReport(build_game(), plays)
+
+    embed = live_game_embed(
+        report, EASTERN, with_chart=True, fourth_downs=fourth_downs
+    )
+
+    field = embed.fields[-1]
+    assert field.name == "Fourth downs so far (last 6 of 8)"
+    lines = field.value.splitlines()
+    assert len(lines) == 6
+    assert lines[-1].startswith("BAL fourth down 8 — Q3 7:21 • 4th & 2 at the CLE 40")
+    assert lines[-1].endswith("Went for it — converted")
+    assert "fourth down 1" not in field.value
+
+
+def test_live_embed_leaves_fourth_downs_out_before_kickoff() -> None:
+    report = LiveGameReport(build_game(state="pre"))
+    fourth_downs = FourthDownGameReport(build_game(), (build_fourth_down(),))
+
+    embed = live_game_embed(report, EASTERN, fourth_downs=fourth_downs)
+
+    assert embed.fields == []
+
+
 class _StubClient(EspnClient):
     """The client with its two network calls replaced by inline payloads."""
 
-    def __init__(self, games: list[Game], summary: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        games: list[Game],
+        summary: dict[str, Any],
+        slate: list[Game] | None = None,
+    ) -> None:
         super().__init__(session=None)  # type: ignore[arg-type]
         self._games = games
         self._summary = summary
+        self._slate = slate if slate is not None else games
         self.requested: list[str] = []
 
     async def fetch_schedule(self, window: Any) -> list[Game]:
         return list(self._games)
+
+    async def fetch_slate(self, today: date) -> list[Game]:
+        return list(self._slate)
 
     async def fetch_game_summary(self, event_id: str) -> dict[str, Any]:
         self.requested.append(event_id)
@@ -558,6 +632,76 @@ def test_fetch_live_game_falls_back_to_a_finished_game() -> None:
 
     assert report is not None
     assert client.requested == ["1"]
+
+
+def test_fetch_live_game_follows_a_named_team_off_the_ravens_schedule() -> None:
+    ravens = replace(build_game(), event_id="1")
+    other = replace(build_game(state="in"), event_id="9")
+    client = _StubClient([ravens], live_summary(), slate=[ravens, other])
+
+    report = asyncio.run(client.fetch_live_game(date(2025, 11, 23), "browns"))
+
+    assert report is not None
+    assert client.requested == ["1"]
+    assert asyncio.run(client.fetch_live_game(date(2025, 11, 23), "chiefs")) is None
+
+
+def test_live_command_follows_a_named_team_and_details_its_last_fourth_down(
+    tmp_path, monkeypatch
+) -> None:
+    bot = RavensBot(BotConfig(
+        discord_token="token", discord_channel_ids=(123,), discord_webhook_urls=(),
+        poll_interval_seconds=300, time_zone=EASTERN,
+        state_file=str(tmp_path / "state.json"),
+    ))
+    report = parse_live_game(live_summary(), build_game())
+    fetch = AsyncMock(return_value=report)
+    monkeypatch.setattr(EspnClient, "fetch_live_game", fetch)
+    _stub_fourth_downs(monkeypatch, build_fourth_down(1), build_fourth_down(2))
+    bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
+    interaction = AsyncMock()
+
+    asyncio.run(_live_command(bot).callback(interaction, team="browns"))
+
+    assert fetch.await_args.args[-1] == "browns"
+    sent = [call.kwargs for call in interaction.followup.send.call_args_list]
+    assert len(sent) == 2
+    assert any(
+        field.name.startswith("Fourth downs so far") for field in sent[0]["embed"].fields
+    )
+    detail = sent[1]["embed"]
+    assert "BAL fourth down 2" in detail.description
+    assert [field.name for field in detail.fields][-1] == "What happened"
+    assert "play 2" in detail.fields[-1].value
+
+
+def test_live_command_keeps_the_score_when_fourth_downs_cannot_be_read(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    bot = RavensBot(BotConfig(
+        discord_token="token", discord_channel_ids=(123,), discord_webhook_urls=(),
+        poll_interval_seconds=300, time_zone=EASTERN,
+        state_file=str(tmp_path / "state.json"),
+    ))
+    report = parse_live_game(live_summary(), build_game())
+    monkeypatch.setattr(EspnClient, "fetch_live_game", AsyncMock(return_value=report))
+    monkeypatch.setattr(
+        EspnClient,
+        "fetch_fourth_downs",
+        AsyncMock(side_effect=EspnApiError("summary is down")),
+    )
+    bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
+    interaction = AsyncMock()
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_live_command(bot).callback(interaction))
+
+    sent = [call.kwargs for call in interaction.followup.send.call_args_list]
+    assert len(sent) == 1
+    assert all(
+        not field.name.startswith("Fourth downs") for field in sent[0]["embed"].fields
+    )
+    assert "Fourth downs unavailable" in caplog.text
 
 
 def test_live_chart_prioritizes_ravens_players_over_opponents_and_teams() -> None:
@@ -661,6 +805,7 @@ def test_live_command_only_attaches_available_in_game_stats(
         report = replace(report, game=build_game(state=state, completed=state == "post"))
     fetch = AsyncMock(return_value=report)
     monkeypatch.setattr(EspnClient, "fetch_live_game", fetch)
+    _stub_fourth_downs(monkeypatch)
     bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
     interaction = AsyncMock()
 
@@ -685,6 +830,7 @@ def test_live_command_logs_chart_failure_and_sends_player_first_text(
     ))
     report = parse_live_game(live_summary(), build_game())
     monkeypatch.setattr(EspnClient, "fetch_live_game", AsyncMock(return_value=report))
+    _stub_fourth_downs(monkeypatch)
     bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
 
     def render(*args):
@@ -848,6 +994,7 @@ def test_expanded_command_sends_every_page_or_complete_text(
     ))
     report = parse_live_game(full_summary(), build_game())
     monkeypatch.setattr(EspnClient, "fetch_live_game", AsyncMock(return_value=report))
+    _stub_fourth_downs(monkeypatch)
     bot.espn = EspnClient(session=None)  # type: ignore[arg-type]
     count = len(chart_pages(report))
 
@@ -861,8 +1008,10 @@ def test_expanded_command_sends_every_page_or_complete_text(
         monkeypatch.setattr("ravens_bot.bot.MAX_ATTACHMENT_BYTES", 1)
     interaction = AsyncMock()
     command = _live_command(bot)
-    assert command.parameters[0].name == "all_stats"
-    assert command.parameters[0].default is False
+    assert [parameter.name for parameter in command.parameters] == [
+        "team", "all_stats"
+    ]
+    assert command.parameters[1].default is False
     with caplog.at_level(logging.WARNING):
         asyncio.run(command.callback(interaction, all_stats=True))
     sent = [call.kwargs for call in interaction.followup.send.call_args_list]
