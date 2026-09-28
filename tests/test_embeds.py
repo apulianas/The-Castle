@@ -408,6 +408,7 @@ def test_help_embed_documents_every_command() -> None:
         "/schedule",
         "/snapcounts",
         "/fourthdown",
+        "/fourthdowns",
         "/fieldgoal",
         "/help",
     }

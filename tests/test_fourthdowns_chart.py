@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import io
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 from PIL import Image
+
+from ravens_bot.bot import RavensBot, _fourth_down_game
+from ravens_bot.config import BotConfig
+from ravens_bot.dates import WeekRequest
 
 from ravens_bot.embeds import fourth_down_chart_embed, fourth_down_play_embed
 from ravens_bot.espn import parse_fourth_downs
@@ -309,3 +318,58 @@ def test_an_instance_out_of_range_says_how_many_there_were() -> None:
 
     assert "1-3" in message
     assert "instance 9" in message
+
+
+def _bot(tmp_path, espn) -> RavensBot:
+    bot = RavensBot(
+        BotConfig(
+            discord_token="token",
+            discord_channel_ids=(123,),
+            discord_webhook_urls=(),
+            poll_interval_seconds=300,
+            time_zone=ZoneInfo("America/New_York"),
+            state_file=str(tmp_path / "state.json"),
+        )
+    )
+    bot.espn = espn
+    return bot
+
+
+def test_no_flags_take_the_game_being_played(tmp_path) -> None:
+    live = replace(GAME, state="in", completed=False, status="Q3 2:11")
+    espn = SimpleNamespace(
+        fetch_live_games=AsyncMock(return_value=[live]),
+        fetch_recent_games=AsyncMock(return_value=[]),
+    )
+
+    game = asyncio.run(_fourth_down_game(_bot(tmp_path, espn), None, None))
+
+    assert game is live
+    espn.fetch_recent_games.assert_not_awaited()
+
+
+def test_no_flags_fall_back_to_the_last_completed_game(tmp_path) -> None:
+    espn = SimpleNamespace(
+        fetch_live_games=AsyncMock(return_value=[]),
+        fetch_recent_games=AsyncMock(return_value=[GAME]),
+    )
+
+    game = asyncio.run(_fourth_down_game(_bot(tmp_path, espn), None, None))
+
+    assert game is GAME
+
+
+def test_a_week_is_taken_from_the_schedule_rather_than_the_scoreboard(tmp_path) -> None:
+    espn = SimpleNamespace(
+        fetch_week_game=AsyncMock(return_value=GAME),
+        fetch_live_games=AsyncMock(return_value=[]),
+        fetch_recent_games=AsyncMock(return_value=[]),
+    )
+
+    game = asyncio.run(
+        _fourth_down_game(_bot(tmp_path, espn), WeekRequest(5), None)
+    )
+
+    assert game is GAME
+    espn.fetch_live_games.assert_not_awaited()
+    assert espn.fetch_week_game.await_args.args[0] == WeekRequest(5)
