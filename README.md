@@ -13,7 +13,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/nextgame` — the next Ravens matchup.
-  - `/live [all_stats]` — live score, clock, possession, and a player-first stats graphic for today's game. Use `/live all_stats:true` for the full player box score.
+  - `/live [team] [all_stats]` — live score, clock, possession, and a player-first stats graphic for today's game, with the fourth downs played so far and the
+    latest one in full. Name any club to follow their game instead of the Ravens, and use `/live all_stats:true` for the full player box score.
   - `/recap [date]` — final score, offensive efficiency, passing/rushing leaders,
     and Ravens-perspective win-probability swings for the latest completed
     regular-season/playoff game, or a game on `YYYY-MM-DD` in `TIME_ZONE`.
@@ -188,7 +189,10 @@ without constructing a client.
   change on the injury report, so the update rides along in the move's post
   under an "Injury report" field. The photo is the player joining the roster,
   and a post about one person keeps the full-size headshot.
-- **Live stats** lead with the score, clock, quarter, possession, and down and
+- **Live stats** cover today's Ravens game by default and any club's game when
+  `team` names one, read off the day's league-wide scoreboard rather than the
+  Ravens schedule, preferring a game in progress over one already final. They
+  lead with the score, clock, quarter, possession, and down and
   distance, then show a graphic in the injury report's glass-panel style.
   Leading players per category come first, Ravens before their opponent, with
   headshots and full stat lines. A compact comparison of up to four team totals
@@ -202,6 +206,13 @@ without constructing a client.
   players. Team takeaways are the opponent's turnovers, not forced fumbles;
   missing stats are not treated as zero. ESPN may not publish all categories
   immediately; when the full player box score is absent, the post says so.
+  Fourth downs already played are listed under the stats, newest last, showing
+  the clock, the situation, and what the team did; only the last six fit, and
+  `/fourthdowns` still charts the rest. The most recent one follows as its own
+  post with the full call: every option's worth, what actually happened, and the
+  drive result. These come from the same game summary the stats do, so they cost
+  no extra request, and a summary that cannot be read drops them rather than the
+  score.
   If expanded graphics cannot be rendered, a text attachment preserves every
   available player line.
   A game that has not kicked off points at

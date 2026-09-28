@@ -773,6 +773,35 @@ def format_fourth_down_instance(play: FourthDownPlay) -> str:
     return f"{play.team.short_name} fourth down {play.instance}"
 
 
+def format_fourth_down_history(plays: Sequence[FourthDownPlay]) -> list[str]:
+    """One line per fourth down already played, in the order they were played.
+
+    The chart has room for a drive and a recommendation; a live embed does not,
+    so each line keeps only what an argument needs: who, when, where, and what
+    they did about it.
+    """
+    lines = []
+    for play in plays:
+        situation = play.situation
+        where = [situation.down_distance or "4th down"]
+        if situation.spot:
+            where.append(f"at the {situation.spot}")
+        moment = situation.clock_text
+        detail = " ".join(where)
+        if moment:
+            detail = f"{moment} • {detail}"
+        lines.append(f"{format_fourth_down_instance(play)} — {detail} — {play.actual}")
+    return lines
+
+
+def format_no_team_game_today(team: str, target_date: date) -> str:
+    """A named team with nothing on, which is most teams most days."""
+    return (
+        f"No game found for “{team}” on {format_full_date(target_date)}. "
+        "Name a team playing today, or omit the team for the Ravens."
+    )
+
+
 def format_no_fourth_down_game() -> str:
     return (
         "No game is being played, and no completed Ravens game could be read. "
