@@ -16,9 +16,15 @@ from .dates import DateWindow, WeekRequest, espn_dates, league_year
 from .espn_urls import player_url
 from .models import (
     AFC_NORTH_GROUP_ID,
+    FOURTH_DOWN_FIELD_GOAL,
+    FOURTH_DOWN_GO,
+    FOURTH_DOWN_NO_PLAY,
+    FOURTH_DOWN_PUNT,
     RAVENS_NAME,
     RAVENS_SLUG,
     RAVENS_TEAM_ID,
+    FourthDownGameReport,
+    FourthDownPlay,
     Game,
     GameSituation,
     GameTeam,
@@ -1242,6 +1248,206 @@ def parse_live_situation(summary: dict[str, Any], game: Game) -> LiveSituation |
     return result if result.has_detail else None
 
 
+# A fourth down ESPN records with one of these play types was never a decision:
+# nobody chose to take a timeout instead of punting.
+NON_DECISION_PLAY_TYPES = (
+    "timeout",
+    "end period",
+    "end of",
+    "two-minute",
+    "official",
+    "coin toss",
+)
+
+
+def _play_choice(play_type: str, text: str) -> str:
+    """Whether the fourth down was gone for, kicked, punted, or wiped out."""
+    haystack = f"{play_type} {text}".casefold()
+    if "punt" in haystack:
+        return FOURTH_DOWN_PUNT
+    if "field goal" in haystack:
+        return FOURTH_DOWN_FIELD_GOAL
+    if "penalty" in play_type.casefold():
+        return FOURTH_DOWN_NO_PLAY
+    return FOURTH_DOWN_GO
+
+
+def _kick_outcome(play_type: str, text: str) -> str:
+    haystack = f"{play_type} {text}".casefold()
+    if "blocked" in haystack:
+        return "blocked"
+    if "no good" in haystack or "missed" in haystack:
+        return "missed"
+    if "good" in haystack:
+        return "good"
+    return "attempted"
+
+
+def _converted(
+    play: dict[str, Any], game: Game, offense: TeamRef, distance: int | None
+) -> bool | None:
+    """Whether the attempt kept the ball, read from where the next snap is.
+
+    ESPN states the game state a play ended in, so a first down for the same
+    team — or a touchdown — is a conversion, and the ball in the other team's
+    hands is not. Yardage is the fallback for the rare play that ends the
+    period and so has no next snap to read.
+    """
+    if bool(play.get("scoringPlay")) and "touchdown" in _play_type_text(play).casefold():
+        return True
+    end = _as_dict(play.get("end"))
+    end_team = _possession_team(game, end.get("team"))
+    if end_team is not None and end_team.team_id != offense.team_id:
+        return False
+    if end_team is not None and _as_int(end.get("down")) == 1:
+        return True
+    yards = _as_int(play.get("statYardage"))
+    if yards is not None and distance is not None:
+        return yards >= distance
+    return None
+
+
+def _play_type_text(play: dict[str, Any]) -> str:
+    return _text(_as_dict(play.get("type")).get("text")) or ""
+
+
+def _go_outcome(
+    play: dict[str, Any], game: Game, offense: TeamRef, distance: int | None
+) -> str:
+    play_type = _play_type_text(play).casefold()
+    if bool(play.get("scoringPlay")) and "touchdown" in play_type:
+        return "touchdown"
+    converted = _converted(play, game, offense, distance)
+    if converted is None:
+        return "result unclear"
+    if not converted:
+        if "interception" in play_type:
+            return "intercepted"
+        if "fumble" in play_type:
+            return "lost fumble"
+        return "stopped"
+    return "converted"
+
+
+def _play_situation(
+    play: dict[str, Any], game: Game, offense: TeamRef
+) -> GameSituation | None:
+    """The fourth down as the decision model wants it, read off one play."""
+    start = _as_dict(play.get("start"))
+    if _as_int(start.get("down")) != 4:
+        return None
+    yards_to_goal, spot = _situation_yards_to_goal(start, offense)
+    clock = _text(_as_dict(play.get("clock")).get("displayValue"))
+    defense = next(
+        (
+            side.team
+            for side in game.teams
+            if side.team.team_id != offense.team_id
+        ),
+        None,
+    )
+    return GameSituation(
+        possession=offense,
+        defense=defense,
+        down=4,
+        distance=_as_int(start.get("distance")),
+        yards_to_goal=yards_to_goal,
+        period=_as_int(_as_dict(play.get("period")).get("number")),
+        clock=clock,
+        clock_seconds=parse_clock_seconds(clock),
+        spot=spot,
+        down_distance_text=_text(start.get("downDistanceText"))
+        or _text(start.get("shortDownDistanceText")),
+    )
+
+
+def _drive_result(drive: dict[str, Any]) -> str | None:
+    return _text(drive.get("displayResult")) or _text(drive.get("result"))
+
+
+def parse_fourth_downs(summary: dict[str, Any], game: Game) -> FourthDownGameReport:
+    """Every fourth down both clubs played, in the order they were played.
+
+    The score each down was faced at is the score the play before it left
+    behind, rather than the one ESPN stamps on the play itself: a fourth down
+    that ends in a touchdown carries the points it just scored, which is not
+    the scoreboard the coach was looking at.
+    """
+    drives = _as_dict(summary.get("drives"))
+    entries = [_as_dict(entry) for entry in _as_list(drives.get("previous"))]
+    current = _as_dict(drives.get("current"))
+    if current:
+        entries.append(current)
+
+    away_score = home_score = 0
+    counts: dict[str, int] = {}
+    plays: list[FourthDownPlay] = []
+    for number, drive in enumerate(entries, start=1):
+        for raw in _as_list(drive.get("plays")):
+            play = _as_dict(raw)
+            before = (away_score, home_score)
+            away_score = _as_int(play.get("awayScore")) or away_score
+            home_score = _as_int(play.get("homeScore")) or home_score
+            offense = _possession_team(game, _as_dict(play.get("start")).get("team"))
+            if offense is None:
+                offense = _possession_team(game, drive.get("team"))
+            if offense is None:
+                continue
+            situation = _play_situation(play, game, offense)
+            if situation is None:
+                continue
+            play_type = _play_type_text(play)
+            if any(
+                marker in play_type.casefold() for marker in NON_DECISION_PLAY_TYPES
+            ):
+                continue
+            text = _text(play.get("text")) or ""
+            choice = _play_choice(play_type, text)
+            if choice == FOURTH_DOWN_GO:
+                outcome: str | None = _go_outcome(
+                    play, game, offense, situation.distance
+                )
+            elif choice == FOURTH_DOWN_FIELD_GOAL:
+                outcome = _kick_outcome(play_type, text)
+            elif choice == FOURTH_DOWN_PUNT:
+                outcome = "blocked" if "blocked" in text.casefold() else None
+            else:
+                outcome = play_type or None
+            key = offense.team_id or offense.name
+            counts[key] = counts.get(key, 0) + 1
+            plays.append(
+                FourthDownPlay(
+                    team=offense,
+                    instance=counts[key],
+                    drive=number,
+                    situation=replace(
+                        situation,
+                        score_differential=_score_differential(game, offense, before),
+                    ),
+                    choice=choice,
+                    outcome=outcome,
+                    play_text=text or None,
+                    drive_description=_text(drive.get("description")),
+                    drive_result=_drive_result(drive),
+                )
+            )
+    return FourthDownGameReport(game=game, plays=tuple(plays))
+
+
+def _score_differential(
+    game: Game, offense: TeamRef, scores: tuple[int, int]
+) -> int | None:
+    """Points the team with the ball led by, from an away/home score pair."""
+    away, home = scores
+    if game.home is None or game.away is None:
+        return None
+    if offense.team_id == game.home.team.team_id:
+        return home - away
+    if offense.team_id == game.away.team.team_id:
+        return away - home
+    return None
+
+
 def _team_stat_pairs(entry: dict[str, Any]) -> tuple[tuple[str, str], ...]:
     pairs: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -1868,6 +2074,38 @@ class EspnClient:
         """A score, situation, and stats snapshot for one game."""
         summary = await self.fetch_game_summary(game.event_id)
         return parse_live_game(summary, game)
+
+    async def fetch_fourth_downs(self, game: Game) -> FourthDownGameReport:
+        """Every fourth down both teams played in one game."""
+        summary = await self.fetch_game_summary(game.event_id)
+        return parse_fourth_downs(summary, _refresh_game(game, summary))
+
+    async def fetch_week_game(self, request: WeekRequest, today: date) -> Game:
+        """The Ravens game from a week of the current league year."""
+        season = league_year(today)
+        try:
+            games = await self.fetch_season_schedule(
+                season, season_type=request.season_type
+            )
+        except EspnApiError as exc:
+            raise EspnApiError(
+                f"The {season} schedule could not be read, so {request.label}"
+                " cannot be looked up."
+            ) from exc
+        game = next(
+            (game for game in games if game.week_number == request.week_number), None
+        )
+        if game is None:
+            raise EspnApiError(
+                f"No Ravens game is scheduled for {request.label} of the"
+                f" {season} season."
+            )
+        if not game.has_started:
+            raise EspnApiError(
+                f"The Ravens have not played {request.label} of the"
+                f" {season} season yet."
+            )
+        return game
 
     async def fetch_live_game(self, today: date) -> LiveGameReport | None:
         """Today's Ravens game, preferring one in progress over one already final.

@@ -21,6 +21,8 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
     schedule is one command.
   - `/snapcounts [player] [weeks]` — snap counts for the last game, or the last 1-42 games.
   - `/fourthdown [team]` — whether the team with the ball in a live fourth down should go for it, kick, or punt, answering the last fourth down seen once the play is over.
+  - `/fourthdowns [week] [team] [instance]` — a chart of every fourth down both teams faced in a game, with drive, situation, recommendation, and what they
+    actually did; omit the flags for the live or last game, name a week for an earlier one, and give a team plus a row number for that down in full.
   - `/fieldgoal [yards] [team]` — how often a kick of that length is made, and what attempting it is worth; omit the yardage to use the current ball spot.
   - `/help` — command help.
 - Rich embeds: team logos, player headshots, and clickable links out to ESPN
@@ -318,6 +320,19 @@ is being played — and once every five minutes when none is, since there is
 nothing to record — so the recall works whether or not anyone asked at the time.
 The store is in memory only and a restart clears it: it is conversation, not a
 record.
+
+`/fourthdowns` is the argument after the game rather than during it. ESPN's
+game summary carries the drive and play feed, so every fourth down both clubs
+played is read back from it into a chart in the injury report's style: one
+section per team, one row per fourth down, with the drive it came on, the
+situation, the model's recommendation, and what the coach actually did. Rows are
+numbered per club from one, which is what `team` and `instance` name when
+someone wants a single down in full, with each option's win probability and the
+play ESPN recorded. With no flags it charts the game being played, or the last
+completed Ravens game; `week` — `5`, or a round such as `wild card` — charts a
+game from earlier in the season. The score each down was faced at is the score
+the play before it left behind, so a fourth down that ended in a touchdown is
+not judged against the points it went on to score.
 
 `/fieldgoal` reads the same kick curve on its own. Give it a distance — the
 number a person says out loud, as in a "fifty two yarder" — or leave it out and

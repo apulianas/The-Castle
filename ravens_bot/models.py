@@ -832,3 +832,73 @@ class LiveGameReport:
     @property
     def has_details(self) -> bool:
         return bool(self.teams or self.leaders)
+
+
+# What a team actually did with a fourth down, worded as the decision model
+# words its options so the two can be compared without translation.
+FOURTH_DOWN_GO = "go"
+FOURTH_DOWN_FIELD_GOAL = "field goal"
+FOURTH_DOWN_PUNT = "punt"
+# A fourth down ESPN recorded as something other than a decision, such as a
+# penalty that wiped the play out before anyone chose.
+FOURTH_DOWN_NO_PLAY = "no play"
+
+FOURTH_DOWN_CHOICE_LABELS = {
+    FOURTH_DOWN_GO: "Went for it",
+    FOURTH_DOWN_FIELD_GOAL: "Field goal",
+    FOURTH_DOWN_PUNT: "Punt",
+    FOURTH_DOWN_NO_PLAY: "No play",
+}
+
+
+@dataclass(frozen=True)
+class FourthDownPlay:
+    """A fourth down a team has already played, and what they did with it.
+
+    ``instance`` counts a club's own fourth downs from one, so a person can
+    point at the third one Baltimore faced without quoting a clock reading.
+    """
+
+    team: TeamRef
+    instance: int
+    drive: int
+    situation: GameSituation
+    choice: str = FOURTH_DOWN_NO_PLAY
+    outcome: str | None = None
+    play_text: str | None = None
+    drive_description: str | None = None
+    drive_result: str | None = None
+
+    @property
+    def choice_label(self) -> str:
+        return FOURTH_DOWN_CHOICE_LABELS.get(self.choice, "No play")
+
+    @property
+    def actual(self) -> str:
+        """The decision and how it turned out, short enough for a chart cell."""
+        if self.outcome:
+            return f"{self.choice_label} — {self.outcome}"
+        return self.choice_label
+
+
+@dataclass(frozen=True)
+class FourthDownGameReport:
+    """Every fourth down both teams played in one game, in the order played."""
+
+    game: Game
+    plays: tuple[FourthDownPlay, ...] = ()
+
+    @property
+    def has_plays(self) -> bool:
+        return bool(self.plays)
+
+    def for_team(self, team: TeamRef) -> tuple[FourthDownPlay, ...]:
+        return tuple(
+            play for play in self.plays if play.team.team_id == team.team_id
+        )
+
+    def instance(self, team: TeamRef, instance: int) -> FourthDownPlay | None:
+        return next(
+            (play for play in self.for_team(team) if play.instance == instance),
+            None,
+        )
