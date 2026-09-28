@@ -20,10 +20,12 @@ from .config import BotConfig, load_config, webhook_id
 from .dates import (
     MAX_SCHEDULE_DAYS,
     DateWindow,
+    WEEK_HELP,
     WeekRequest,
     now_in_zone,
     parse_user_date,
     parse_user_date_or_week,
+    parse_week,
     today_in_zone,
     upcoming_window,
 )
@@ -31,7 +33,9 @@ from .embeds import (
     INACTIVE_CHART_FILENAME,
     error_embed,
     field_goal_embed,
+    fourth_down_chart_embed,
     fourth_down_embed,
+    fourth_down_play_embed,
     help_embed,
     inactive_embeds,
     injury_embeds,
@@ -59,6 +63,14 @@ from .espn import (
     select_insight_game,
     team_names,
 )
+from .fourthdowns_report import (
+    FOURTH_DOWN_CHART_FILENAME,
+    MAX_FOURTH_DOWN_INSTANCE,
+    artwork_urls as fourth_down_artwork_urls,
+    find_team as find_fourth_down_team,
+    render_fourth_down_chart,
+    team_names as fourth_down_team_names,
+)
 from .inactives_report import artwork_urls, render_inactive_report
 from .live_report import (
     LIVE_CHART_FILENAME,
@@ -74,12 +86,16 @@ from .fourthdown import (
     field_goal_outlook,
 )
 from .formatting import (
+    format_fourth_down_needs_team,
     format_no_ball_spot,
+    format_no_fourth_down_game,
     format_no_field_goal_spot,
     format_no_live_game,
     format_no_snap_counts,
     format_no_snap_games,
+    format_no_fourth_downs,
     format_not_fourth_down,
+    format_unknown_fourth_down,
     format_unknown_snap_player,
     format_unknown_team,
 )
@@ -92,6 +108,7 @@ from .injury_report import (
     render_injury_report,
 )
 from .models import (
+    FourthDownGameReport,
     Game,
     InactiveReport,
     InjuryReport,
@@ -127,6 +144,9 @@ LOGGER = logging.getLogger(__name__)
 ScheduleDays = app_commands.Range[int, 1, MAX_SCHEDULE_DAYS]
 SnapWeeks = app_commands.Range[int, 1, MAX_SNAP_GAMES]
 KickYards = app_commands.Range[int, MIN_FIELD_GOAL_YARDS, LONGEST_ASKABLE_FIELD_GOAL]
+# More fourth downs than this in one game has never happened, so a larger number
+# is a typo rather than a row of the chart.
+FourthDownInstance = app_commands.Range[int, 1, MAX_FOURTH_DOWN_INSTANCE]
 # How often the scoreboard is read to record fourth downs, so the question can
 # still be answered once the play is over.
 TRACK_INTERVAL_SECONDS = 30
@@ -203,6 +223,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_recap_command(self))
         self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_fourthdown_command(self))
+        self.tree.add_command(_fourthdowns_command(self))
         self.tree.add_command(_fieldgoal_command(self))
         self.tree.add_command(_help_command())
         await self.tree.sync()
@@ -495,6 +516,27 @@ class RavensBot(commands.Bot):
         if len(image) > MAX_ATTACHMENT_BYTES:
             LOGGER.warning(
                 "Inactive chart is too large to post: %d bytes", len(image)
+            )
+            return None
+        return image
+
+    async def _fourth_down_chart(
+        self, report: FourthDownGameReport
+    ) -> bytes | None:
+        """The fourth downs as a chart, or nothing when it cannot be drawn."""
+        try:
+            artwork = (
+                await self.artwork.fetch(fourth_down_artwork_urls(report))
+                if self.artwork is not None
+                else {}
+            )
+            image = render_fourth_down_chart(report, artwork)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Fourth down chart could not be drawn: %s", exc)
+            return None
+        if len(image) > MAX_ATTACHMENT_BYTES:
+            LOGGER.warning(
+                "Fourth down chart is too large to post: %d bytes", len(image)
             )
             return None
         return image
@@ -1023,6 +1065,155 @@ def _fourthdown_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         )
 
     return fourthdown
+
+
+def _fourthdowns_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(
+        name="fourthdowns",
+        description="Chart every fourth down both teams faced in a game.",
+    )
+    @app_commands.describe(
+        week="Optional past week, such as 5 or wild card; omit for the current or last game",
+        team="Optional team, with instance, for one fourth down in full",
+        instance="Optional row number from that team's side of the chart",
+    )
+    async def fourthdowns(
+        interaction: discord.Interaction,
+        week: str | None = None,
+        team: str | None = None,
+        instance: FourthDownInstance | None = None,
+    ) -> None:
+        request: WeekRequest | None = None
+        if week is not None and week.strip():
+            request = parse_week(week)
+            if request is None:
+                await interaction.response.send_message(
+                    WEEK_HELP, ephemeral=True
+                )
+                return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            game = await _fourth_down_game(bot, request, team)
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        if game is None:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(format_no_fourth_down_game()),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            report = await _require_espn(bot).fetch_fourth_downs(game)
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+
+        if instance is not None:
+            await _send_fourth_down_instance(interaction, report, team, instance)
+            return
+        if not report.has_plays:
+            await interaction.followup.send(
+                embed=no_fourth_down_embed(format_no_fourth_downs(report.game), report.game),
+                ephemeral=True,
+            )
+            return
+
+        image = await bot._fourth_down_chart(report)
+        if image is None:
+            await interaction.followup.send(
+                embed=fourth_down_chart_embed(report, with_rows=True)
+            )
+            return
+        try:
+            await interaction.followup.send(
+                embed=fourth_down_chart_embed(report),
+                file=discord.File(
+                    io.BytesIO(image), filename=FOURTH_DOWN_CHART_FILENAME
+                ),
+            )
+        except discord.HTTPException as exc:
+            LOGGER.warning("Fourth down chart was rejected: %s", exc)
+            await interaction.followup.send(
+                embed=fourth_down_chart_embed(report, with_rows=True)
+            )
+
+    return fourthdowns
+
+
+async def _send_fourth_down_instance(
+    interaction: discord.Interaction,
+    report: FourthDownGameReport,
+    team: str | None,
+    instance: int,
+) -> None:
+    """One row of the chart in full, or why that row is not in it."""
+    if not team or not team.strip():
+        await interaction.followup.send(
+            embed=no_fourth_down_embed(
+                format_fourth_down_needs_team(fourth_down_team_names(report)),
+                report.game,
+            ),
+            ephemeral=True,
+        )
+        return
+    wanted = find_fourth_down_team(report, team)
+    if wanted is None:
+        await interaction.followup.send(
+            embed=no_fourth_down_embed(
+                format_unknown_team(team, fourth_down_team_names(report)),
+                report.game,
+            ),
+            ephemeral=True,
+        )
+        return
+    play = report.instance(wanted, instance)
+    if play is None:
+        await interaction.followup.send(
+            embed=no_fourth_down_embed(
+                format_unknown_fourth_down(
+                    report.game,
+                    wanted.short_name,
+                    instance,
+                    len(report.for_team(wanted)),
+                ),
+                report.game,
+            ),
+            ephemeral=True,
+        )
+        return
+    await interaction.followup.send(embed=fourth_down_play_embed(report, play))
+
+
+async def _fourth_down_game(
+    bot: RavensBot, week: WeekRequest | None, team: str | None
+) -> Game | None:
+    """The game a fourth down chart is about.
+
+    A named week is a past game and is taken from the schedule. Otherwise the
+    game being played now answers, and once nothing is live the last completed
+    Ravens game does, which is what "the last game" means to the person asking.
+    """
+    espn = _require_espn(bot)
+    if week is not None:
+        return await espn.fetch_week_game(week, today_in_zone(bot.config.time_zone))
+    try:
+        games = await _live_games(bot)
+    except EspnApiError as exc:
+        LOGGER.warning("Live scoreboard unavailable for fourth downs: %s", exc)
+        games = []
+    if team:
+        matches = match_team_games(games, team)
+        if matches:
+            return matches[0]
+    live = select_insight_game(
+        games, bot.config.secondary_team, now_in_zone(bot.config.time_zone)
+    )
+    if live is not None:
+        return live
+    played = await espn.fetch_recent_games(1, today_in_zone(bot.config.time_zone))
+    return played[-1] if played else None
 
 
 def _fieldgoal_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:

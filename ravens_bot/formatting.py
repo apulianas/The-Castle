@@ -16,6 +16,7 @@ from .fourthdown import (
 )
 from .models import (
     MAX_LINKED_PLAYERS,
+    FourthDownPlay,
     RAVENS_NAME,
     SNAP_UNITS,
     Game,
@@ -758,6 +759,57 @@ def format_no_live_game() -> str:
     return (
         "No NFL game is being played right now. Ask again during a game, or name "
         "a team that is playing."
+    )
+
+
+def format_fourth_down_chart_title(game: Game) -> str:
+    """The chart's headline: who played, and whether it is still being played."""
+    state = "so far" if game.in_progress else "final"
+    return f"Fourth downs • {format_fourth_down_matchup(game)} ({state})"
+
+
+def format_fourth_down_instance(play: FourthDownPlay) -> str:
+    """How a person names one row of the chart, e.g. "Ravens fourth down 3"."""
+    return f"{play.team.short_name} fourth down {play.instance}"
+
+
+def format_no_fourth_down_game() -> str:
+    return (
+        "No game is being played, and no completed Ravens game could be read. "
+        "Name a week to chart a game from earlier in the season."
+    )
+
+
+def format_fourth_down_needs_team(teams: Sequence[str]) -> str:
+    """An instance without a club names nobody, since both sides are numbered."""
+    named = " or ".join(teams) if teams else "a team"
+    return (
+        f"Both teams' fourth downs are numbered from one, so an instance needs "
+        f"a team as well: try {named}."
+    )
+
+
+def format_no_fourth_downs(game: Game) -> str:
+    return (
+        f"ESPN has published no fourth downs for {format_fourth_down_matchup(game)}"
+        " yet."
+    )
+
+
+def format_unknown_fourth_down(
+    game: Game, team: str, instance: int, available: int
+) -> str:
+    """Why a named row is not in the chart, with what was on offer instead."""
+    if available == 0:
+        return (
+            f"{team} faced no fourth downs in {format_fourth_down_matchup(game)}."
+        )
+    last = "1" if available == 1 else f"1-{available}"
+    return (
+        f"{team} faced {available} fourth "
+        f"{'down' if available == 1 else 'downs'} in "
+        f"{format_fourth_down_matchup(game)}, so instance {instance} is not one "
+        f"of them. Ask for {last}."
     )
 
 

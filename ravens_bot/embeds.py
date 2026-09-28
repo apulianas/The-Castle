@@ -29,6 +29,8 @@ from .formatting import (
     format_field_goal_call,
     format_field_goal_detail,
     format_fourth_down_call,
+    format_fourth_down_chart_title,
+    format_fourth_down_instance,
     format_fourth_down_matchup,
     format_fourth_down_option,
     format_fourth_down_situation,
@@ -73,11 +75,14 @@ from .formatting import (
 )
 from .dates import MAX_SCHEDULE_DAYS
 from .calibration import MODEL_LIMITS, WP_DESCRIPTION
-from .fourthdown import FieldGoalOutlook, FourthDownAdvice
+from .fourthdown import FieldGoalOutlook, FourthDownAdvice, advise
+from .fourthdowns_report import FOURTH_DOWN_CHART_FILENAME, chart_sections
 from .injury_report import INJURY_REPORT_URL, OfficialInjuryReport
 from .live_report import LIVE_CHART_FILENAME
 from .models import (
     AFC_NORTH_GROUP_ID,
+    FourthDownGameReport,
+    FourthDownPlay,
     OFFENSE,
     RAVENS_SLUG,
     SNAP_UNITS,
@@ -754,6 +759,104 @@ def fourth_down_embed(
     return embed
 
 
+def fourth_down_chart_embed(
+    report: FourthDownGameReport, with_rows: bool = False
+) -> discord.Embed:
+    """The caption over the chart of a game's fourth downs.
+
+    The chart itself carries the rows, so this says which game it is, how many
+    fourth downs each club faced, and how to ask about one of them.
+    """
+    game = report.game
+    lines = [format_fourth_down_matchup(game)]
+    scores = [
+        f"{side.team.short_name} {side.score}"
+        for side in game.teams
+        if side.score is not None
+    ]
+    if scores:
+        lines.append(" – ".join(scores))
+    counts = [
+        f"{side.team.short_name} {len(report.for_team(side.team))}"
+        for side in game.teams
+    ]
+    if counts:
+        lines.append(f"Fourth downs: {' • '.join(counts)}")
+    lines.append(
+        "Ask about one row with `/fourthdowns team:<team> instance:<number>`."
+    )
+    embed = _base_embed(
+        format_fourth_down_chart_title(game),
+        "\n".join(lines),
+        url=game_url(game.event_id),
+    )
+    logo = next(
+        (side.team.logo_url for side in game.teams if side.team.logo_url), None
+    )
+    embed.set_thumbnail(url=logo or team_logo_url(RAVENS_SLUG))
+    if with_rows:
+        # A chart that could not be drawn must not cost the answer, so the rows
+        # are written out instead.
+        for section in chart_sections(report):
+            embed.add_field(
+                name=section.title,
+                value=_limit_field(
+                    "\n".join(" • ".join(row) for row in section.rows)
+                ),
+                inline=False,
+            )
+    else:
+        embed.set_image(url=f"attachment://{FOURTH_DOWN_CHART_FILENAME}")
+    embed.set_footer(text=FOURTH_DOWN_WIN_PROBABILITY_FOOTER)
+    return embed
+
+
+def fourth_down_play_embed(
+    report: FourthDownGameReport, play: FourthDownPlay
+) -> discord.Embed:
+    """Everything behind one row of the chart: the call, and what happened."""
+    game = report.game
+    advice = advise(play.situation)
+    description = "\n".join(
+        [
+            format_fourth_down_instance(play),
+            format_fourth_down_situation(game, play.situation),
+        ]
+    )
+    embed = _base_embed(
+        f"{format_fourth_down_call(advice)} • {play.actual}",
+        description,
+        url=game_url(game.event_id),
+    )
+    for index, option in enumerate(advice.options):
+        embed.add_field(
+            name=option.label,
+            value=_limit_field(format_fourth_down_option(option, best=index == 0)),
+            inline=False,
+        )
+    if advice.reason and not advice.options:
+        embed.add_field(
+            name="No recommendation", value=_limit_field(advice.reason), inline=False
+        )
+    happened = [f"Drive {play.drive}: {play.actual}"]
+    if play.play_text:
+        happened.append(play.play_text)
+    if play.drive_result:
+        happened.append(f"Drive result: {play.drive_result}")
+    embed.add_field(
+        name="What happened", value=_limit_field("\n".join(happened)), inline=False
+    )
+    for caveat in advice.caveats:
+        embed.add_field(name="Worth knowing", value=_limit_field(caveat), inline=False)
+    embed.set_thumbnail(url=play.team.logo_url or team_logo_url(RAVENS_SLUG))
+    embed.set_footer(
+        text=FOURTH_DOWN_WIN_PROBABILITY_FOOTER
+        if advice.ranked_by_win_probability
+        else FOURTH_DOWN_FOOTER
+    )
+    return embed
+
+
 def field_goal_embed(
     outlook: FieldGoalOutlook, game: Game | None = None
 ) -> discord.Embed:
@@ -888,6 +991,17 @@ def help_embed() -> discord.Embed:
             "Defaults to the Ravens game, then the configured second team, then "
             "whatever else is being played. Once the play is over it answers the "
             "last fourth down it saw, saying how long ago that was."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="/fourthdowns [week] [team] [instance]",
+        value=(
+            "Every fourth down both teams faced in a game, as a chart of drive, "
+            "situation, recommendation, and what they actually did. Omit the "
+            "flags for the game being played, or the last completed one, and "
+            "name a week such as `5` or `wild card` for an earlier game. Give a "
+            "team and a row number from the chart for that one down in full."
         ),
         inline=False,
     )

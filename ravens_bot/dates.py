@@ -34,6 +34,10 @@ POSTSEASON_WEEKS: dict[str, int] = {
     "sb": 5,
 }
 _WEEK_RE = re.compile(r"^(?:week|wk)?\s*#?\s*(\d{1,2})$")
+WEEK_HELP = (
+    f"Week must be a number from 1 to {MAX_REGULAR_SEASON_WEEK}, "
+    "or a round such as wild card"
+)
 DATE_HELP = (
     "Date must be today, YYYY-MM-DD, a week such as week 5, "
     "or a round such as wild card"
