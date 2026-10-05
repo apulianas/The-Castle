@@ -19,7 +19,7 @@ import re
 import threading
 import unicodedata
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from statistics import median
 from typing import Any, Callable, Iterable, Sequence
@@ -28,7 +28,15 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .espn_urls import HEADSHOT_FEATURE_WIDTH, headshot_url
-from .models import InactivePlayer, PlayerRef, RAVENS_NAME
+from .models import (
+    RAVENS,
+    RAVENS_NAME,
+    InactivePlayer,
+    PlayerRef,
+    Transaction,
+    normalize_name,
+)
+from .roster_moves import extract_players, transaction_action
 
 
 LOGGER = logging.getLogger(__name__)
@@ -43,7 +51,9 @@ GAME_FEED_LIMIT = 40
 # Each graphic is read once; a handful covers a week's reports and a game day.
 OCR_CACHE_SIZE = 16
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-INJURY_POST = re.compile(r"injury report|game status", re.IGNORECASE)
+INJURY_POST = re.compile(
+    r"injury report|game status|practice estimation", re.IGNORECASE
+)
 INACTIVES_POST = re.compile(r"\binactives\b", re.IGNORECASE)
 BLANK_CELL = "-"
 # How the website writes a player without a game designation.
@@ -53,8 +63,24 @@ POSITIONS = frozenset(
     {
         "QB", "RB", "FB", "WR", "TE", "T", "G", "C", "OT", "OG", "OL", "DL",
         "DE", "DT", "NT", "LB", "ILB", "OLB", "MLB", "CB", "S", "SAF", "FS",
-        "SS", "DB", "K", "P", "LS",
+        "SS", "DB", "K", "P", "LS", "LT", "RT", "LG", "RG", "OC", "EDGE",
     }
+)
+# Positions the club sometimes writes out instead of abbreviating.
+_POSITION_WORDS = {
+    "quarterback": "QB", "running back": "RB", "fullback": "FB",
+    "wide receiver": "WR", "tight end": "TE", "left tackle": "LT",
+    "right tackle": "RT", "tackle": "T", "left guard": "LG", "right guard": "RG",
+    "guard": "G", "center": "C", "defensive tackle": "DT", "defensive end": "DE",
+    "nose tackle": "NT", "outside linebacker": "OLB", "inside linebacker": "ILB",
+    "linebacker": "LB", "cornerback": "CB", "safety": "S", "kicker": "K",
+    "punter": "P", "long snapper": "LS",
+}
+_POSITION_WORD = re.compile(
+    r"^(?P<word>"
+    + "|".join(sorted(map(re.escape, _POSITION_WORDS), key=len, reverse=True))
+    + r")\s+(?=[A-Z])",
+    re.IGNORECASE,
 )
 _SUFFIXES = ("JR", "SR", "II", "III", "IV", "V")
 _DAYS = {
@@ -436,28 +462,42 @@ _GAME_STATUSES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"\bdoubtful to return\b", "Doubtful to return"),
         (r"\bquestionable to return\b", "Questionable to return"),
         (r"\bbeing evaluated\b", "Being evaluated"),
-        (r"\bhas (?:returned|been cleared)(?: to (?:the )?game)?\s*[.!]*$|\bis back in the game\b|\bis cleared to return\b", "Returned"),
+        (r"\bhas (?:now )?(?:returned|been cleared)(?: to (?:the )?game)?\s*[.!]*$|\bis back in the game\b|\bis cleared to return\b", "Returned"),
     )
 )
 _GAME_INJURY = re.compile(
-    r"^\s*(?:(?P<position>[A-Z]{1,3})\s+)?"
-    r"(?P<name>[A-Z][\w.'-]+(?:\s+[A-Z][\w.'-]+){1,3})"
+    r"^\s*(?:(?P<position>[A-Z]{1,4})\s+)?"
+    r"(?P<name>[A-Z][\w.'’-]+(?:\s+[A-Z][\w.'’-]+){0,3})"
     r"\s*(?:\((?P<injury>[^)]{1,40})\))?"
     r"\s+(?:is|has|will|was)\b"
 )
 
 
 def parse_game_injury(post: BlueskyPost) -> GameInjuryUpdate | None:
-    """An in-game injury update, when that is all a post says."""
+    """An in-game injury update, when that is all a post says.
+
+    A follow-up can name the player by surname alone ("Hamilton has now
+    returned to the game."); ``game_injuries`` resolves that against the
+    game's earlier lines.
+    """
     text = " ".join(post.text.split())
-    match = _GAME_INJURY.match(text)
-    if match is None or len(text) > 200:
+    if len(text) > 200:
         return None
-    position = match.group("position")
-    if position is not None and position not in POSITIONS:
+    position: str | None = None
+    body = text
+    spelled = _POSITION_WORD.match(text)
+    if spelled is not None:
+        position = _POSITION_WORDS[spelled.group("word").lower()]
+        body = text[spelled.end():]
+    match = _GAME_INJURY.match(body)
+    if match is None:
         return None
+    if match.group("position") is not None:
+        if position is not None or match.group("position") not in POSITIONS:
+            return None
+        position = match.group("position")
     status = next(
-        (label for pattern, label in _GAME_STATUSES if pattern.search(text[match.end("name"):])),
+        (label for pattern, label in _GAME_STATUSES if pattern.search(body[match.end("name"):])),
         None,
     )
     if status is None:
@@ -476,15 +516,133 @@ def parse_game_injury(post: BlueskyPost) -> GameInjuryUpdate | None:
 def game_injuries(
     posts: Iterable[BlueskyPost], since: datetime
 ) -> list[GameInjuryUpdate]:
-    """In-game injury updates posted since ``since``, oldest first."""
-    updates = [
-        update
-        for post in posts
-        if post.created_at >= since
-        for update in (parse_game_injury(post),)
-        if update is not None
+    """In-game injury updates posted since ``since``, oldest first.
+
+    A line naming only a surname takes the player from the game's earlier
+    line about them, and is dropped when there is none to say who it means.
+    """
+    parsed = sorted(
+        (
+            update
+            for post in posts
+            if post.created_at >= since
+            for update in (parse_game_injury(post),)
+            if update is not None
+        ),
+        key=lambda update: update.post.created_at,
+    )
+    updates: list[GameInjuryUpdate] = []
+    for update in parsed:
+        if " " not in update.name:
+            earlier = next(
+                (
+                    previous
+                    for previous in reversed(updates)
+                    if previous.name.split()[-1].lower() == update.name.lower()
+                ),
+                None,
+            )
+            if earlier is None:
+                continue
+            update = replace(
+                update,
+                name=earlier.name,
+                position=update.position or earlier.position,
+                injury=update.injury or earlier.injury,
+            )
+        updates.append(update)
+    return updates
+
+
+ROSTER_MOVE_ID_PREFIX = "bluesky:"
+_ROSTER_VERBS = (
+    "signed", "re-signed", "placed", "waived", "released", "activated",
+    "elevated", "claimed", "traded", "acquired", "designated", "reinstated",
+    "promoted", "terminated", "restored", "added",
+)
+# "We have placed …", "We have also activated …", "The Ravens activated …":
+# the club's voice, which the move log writes as a bare verb.
+_CLUB_VOICE = re.compile(
+    r"\b(?:We(?:\s+have|['’]ve)?|The\s+Ravens(?:\s+have)?)\s+(?:also\s+)?"
+    rf"(?P<verb>{'|'.join(_ROSTER_VERBS)})\b",
+    re.IGNORECASE,
+)
+_URL = re.compile(r"https?://\S+")
+
+
+def parse_roster_move(post: BlueskyPost, time_zone: ZoneInfo) -> Transaction | None:
+    """A roster move the club announced, written the way its move log reads.
+
+    "We have placed C A on Injured Reserve. We have also activated G B …"
+    becomes "Placed C A on Injured Reserve. Activated G B …", so the move is
+    laid out and illustrated like any other.
+    """
+    text = " ".join(_URL.sub("", post.text).split())
+    opening = _CLUB_VOICE.match(text)
+    if opening is None:
+        return None
+    description = _CLUB_VOICE.sub(
+        lambda match: match.group("verb").capitalize(), text
+    ).strip()
+    players = extract_players(description)
+    if not players:
+        return None
+    return Transaction(
+        transaction_id=f"{ROSTER_MOVE_ID_PREFIX}{post.uri.rsplit('/', 1)[-1]}",
+        date=post.created_at.astimezone(time_zone).date(),
+        description=description,
+        type_text=transaction_action(description),
+        athlete=players[0].name,
+        players=players,
+        team=RAVENS,
+    )
+
+
+def roster_moves_on(
+    posts: Iterable[BlueskyPost], day: date, time_zone: ZoneInfo
+) -> list[Transaction]:
+    """The club's roster moves announced on ``day``, oldest first."""
+    moves = [
+        move
+        for post in sorted(posts, key=lambda post: post.created_at)
+        if post.created_at.astimezone(time_zone).date() == day
+        for move in (parse_roster_move(post, time_zone),)
+        if move is not None
     ]
-    return sorted(updates, key=lambda update: update.post.created_at)
+    return moves
+
+
+def is_roster_move_post(transaction: Transaction) -> bool:
+    return transaction.transaction_id.startswith(ROSTER_MOVE_ID_PREFIX)
+
+
+def player_keys(transaction: Transaction) -> frozenset[str]:
+    return frozenset(
+        key for key in (normalize_name(player.name) for player in transaction.players) if key
+    )
+
+
+def merge_roster_moves(
+    transactions: list[Transaction], moves: list[Transaction]
+) -> list[Transaction]:
+    """Add the club's posts for moves the other feeds do not list yet.
+
+    The club's post and ESPN's entry for the same move are worded differently,
+    so they are matched by the players they name on the same day. Once ESPN
+    lists every player a post names, ESPN's richer entry is the one kept; the
+    bot's announcement state stops it repeating a post already made.
+    """
+    listed: dict[date, set[str]] = {}
+    for item in transactions:
+        listed.setdefault(item.date, set()).update(player_keys(item))
+    return [
+        *transactions,
+        *(
+            move
+            for move in moves
+            if not player_keys(move) <= listed.get(move.date, set())
+        ),
+    ]
 
 
 _ENGINE: Any = None
@@ -598,3 +756,9 @@ class BlueskyClient:
     async def fetch_game_injuries(self, since: datetime) -> list[GameInjuryUpdate]:
         """The club's in-game injury lines posted since kickoff, oldest first."""
         return game_injuries(await self.fetch_posts(GAME_FEED_LIMIT), since)
+
+    async def fetch_roster_moves(
+        self, day: date, time_zone: ZoneInfo
+    ) -> list[Transaction]:
+        """The roster moves the club announced on ``day``."""
+        return roster_moves_on(await self.fetch_posts(), day, time_zone)

@@ -73,7 +73,7 @@ from .formatting import (
     format_venue,
     short_team_name,
 )
-from .bluesky import GameInjuryUpdate
+from .bluesky import GameInjuryUpdate, is_roster_move_post
 from .dates import MAX_SCHEDULE_DAYS
 from .calibration import MODEL_LIMITS, WP_DESCRIPTION
 from .fourthdown import FieldGoalOutlook, FourthDownAdvice, advise
@@ -162,9 +162,19 @@ def _base_embed(
     return embed
 
 
-def _footer(*parts: str | None) -> str:
+def _footer(*parts: str | None, source: str = DATA_SOURCE) -> str:
     """A footer of whatever metadata applies, always crediting the source."""
-    return " • ".join([*(part for part in parts if part), DATA_SOURCE])
+    return " • ".join([*(part for part in parts if part), source])
+
+
+def _moves_source(transactions: Sequence[Transaction]) -> str:
+    """Credit the club's Bluesky for moves read from it, ESPN for the rest."""
+    from_bluesky = [is_roster_move_post(item) for item in transactions]
+    if from_bluesky and all(from_bluesky):
+        return GAME_INJURY_SOURCE
+    if any(from_bluesky):
+        return f"{DATA_SOURCE}; Baltimore Ravens via Bluesky"
+    return DATA_SOURCE
 
 
 def _set_game_art(embed: discord.Embed, game: Game) -> None:
@@ -382,10 +392,13 @@ def transaction_embeds(
 
     if len(transactions) > MAX_EMBED_FIELDS:
         embed.set_footer(
-            text=_footer(f"Showing {MAX_EMBED_FIELDS} of {len(transactions)} moves")
+            text=_footer(
+                f"Showing {MAX_EMBED_FIELDS} of {len(transactions)} moves",
+                source=_moves_source(transactions),
+            )
         )
     else:
-        embed.set_footer(text=_footer())
+        embed.set_footer(text=_footer(source=_moves_source(transactions)))
     return [embed]
 
 
@@ -401,7 +414,9 @@ def _single_transaction_embed(
             embed, format_roster_cut_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE
         )
     _set_transaction_art(embed, [transaction])
-    embed.set_footer(text=_footer(format_long_date(target_date)))
+    embed.set_footer(
+        text=_footer(format_long_date(target_date), source=_moves_source([transaction]))
+    )
     return embed
 
 
@@ -466,7 +481,7 @@ def roster_news_post(
     else:
         _set_player_art(embed, news.art_players, feature=news.is_one_player)
     hidden = f"Showing {shown} of {len(ordered)} updates" if shown < len(ordered) else None
-    embed.set_footer(text=_footer(hidden))
+    embed.set_footer(text=_footer(hidden, source=_moves_source([transaction])))
     return [embed], tuple(ordered[:shown])
 
 

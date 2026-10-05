@@ -14,8 +14,11 @@ from ravens_bot.bluesky import (
     INJURY_POST,
     NameMatcher,
     game_injuries,
+    merge_roster_moves,
     parse_feed,
     parse_game_injury,
+    parse_roster_move,
+    roster_moves_on,
     parse_inactives_graphic,
     parse_injury_graphic,
     posts_on,
@@ -32,8 +35,10 @@ from ravens_bot.models import (
     GameTeam,
     InactivePlayer,
     InactiveReport,
+    InjuryReport,
     PlayerRef,
     TeamRef,
+    Transaction,
 )
 from ravens_bot.state import AnnouncementState
 
@@ -553,3 +558,173 @@ def test_a_bluesky_outage_during_a_game_posts_nothing(tmp_path) -> None:
     asyncio.run(bot._post_game_injuries(GAME))
 
     assert destination.sent == []
+
+
+def test_spelled_out_and_line_positions_are_read() -> None:
+    center = parse_game_injury(_post("Center Jovaughn Gwynn (ankle) is questionable to return."))
+    tackle = parse_game_injury(_post("LT Ronnie Stanley (toe) is questionable to return."))
+    receiver = parse_game_injury(_post("Wide receiver Zay Flowers (hamstring) has been ruled out."))
+
+    assert (center.position, center.name) == ("C", "Jovaughn Gwynn")
+    assert (tackle.position, tackle.name) == ("LT", "Ronnie Stanley")
+    assert (receiver.position, receiver.name, receiver.status) == ("WR", "Zay Flowers", "Out")
+
+
+def test_a_surname_follow_up_takes_the_player_from_the_earlier_line() -> None:
+    posts = [
+        _post("S Kyle Hamilton is being evaluated for a concussion.", 30),
+        _post("Hamilton has now returned to the game.", 32),
+        _post("Andrews has now returned to the game.", 40),
+    ]
+
+    updates = game_injuries(posts, KICKOFF)
+
+    assert [(u.position, u.name, u.status) for u in updates] == [
+        ("S", "Kyle Hamilton", "Being evaluated"),
+        ("S", "Kyle Hamilton", "Returned"),
+    ]
+
+
+def test_walkthrough_day_graphics_count_as_injury_reports() -> None:
+    assert INJURY_POST.search("We held a walkthrough on Friday, the report is a practice estimation.")
+
+
+def _move_post(text: str, rkey: str = "m1", when: datetime | None = None) -> BlueskyPost:
+    return BlueskyPost(
+        uri=f"at://did:plc:x/app.bsky.feed.post/{rkey}",
+        text=text,
+        created_at=when or datetime(2026, 10, 3, 20, 1, tzinfo=timezone.utc),
+        image_urls=(),
+    )
+
+
+def test_club_roster_moves_read_like_the_move_log() -> None:
+    move = parse_roster_move(
+        _move_post(
+            "We have placed C Jovaughn Gwyn and C Ethan Pocic on Injured Reserve.\n\n"
+            "We have also activated G Kyle Hergel (standard elevation) from the practice squad."
+        ),
+        EASTERN,
+    )
+
+    assert move.transaction_id == "bluesky:m1"
+    assert move.date == date(2026, 10, 3)
+    assert move.description == (
+        "Placed C Jovaughn Gwyn and C Ethan Pocic on Injured Reserve. "
+        "Activated G Kyle Hergel (standard elevation) from the practice squad."
+    )
+    assert [p.display_name for p in move.players] == [
+        "C Jovaughn Gwyn", "C Ethan Pocic", "G Kyle Hergel",
+    ]
+
+
+def test_other_wording_and_links_are_handled() -> None:
+    elevation = parse_roster_move(
+        _move_post("The Ravens activated (standard practice elevation) S K'Von Wallace for tomorrow's game."),
+        EASTERN,
+    )
+    signing = parse_roster_move(
+        _move_post("We have signed S K'Von Wallace to the 53-man roster.\n\nhttps://www.baltimoreravens.com/news/x"),
+        EASTERN,
+    )
+
+    assert elevation.description.startswith("Activated (standard practice elevation) S K'Von Wallace")
+    assert signing.description == "Signed S K'Von Wallace to the 53-man roster."
+    for text in ("We're up 24-10 heading to the 4th.", "We have a new episode of Wired tonight!"):
+        assert parse_roster_move(_move_post(text), EASTERN) is None
+
+
+def test_only_the_day_s_moves_are_returned() -> None:
+    posts = [
+        _move_post("We have signed WR Chris Moore to the Practice Squad.", "a"),
+        _move_post(
+            "We have waived LB Carl Jones Jr.", "b",
+            datetime(2026, 10, 2, 20, tzinfo=timezone.utc),
+        ),
+    ]
+
+    assert [m.transaction_id for m in roster_moves_on(posts, date(2026, 10, 3), EASTERN)] == ["bluesky:a"]
+
+
+def _espn(description: str, *players: PlayerRef, day: date = date(2026, 10, 3)) -> Transaction:
+    return Transaction("espn-1", day, description, players=players)
+
+
+def test_a_club_post_espn_already_lists_is_left_out() -> None:
+    move = parse_roster_move(_move_post("We have placed C Ethan Pocic on Injured Reserve."), EASTERN)
+    espn = _espn("Placed C Ethan Pocic on injured reserve.", PlayerRef("Ethan Pocic", position="C"))
+
+    assert merge_roster_moves([espn], [move]) == [espn]
+    assert merge_roster_moves([], [move]) == [move]
+
+
+def test_a_partly_listed_club_post_is_still_added() -> None:
+    move = parse_roster_move(
+        _move_post("We have placed C Jovaughn Gwyn and C Ethan Pocic on Injured Reserve."), EASTERN
+    )
+    espn = _espn("Placed C Ethan Pocic on injured reserve.", PlayerRef("Ethan Pocic", position="C"))
+
+    assert merge_roster_moves([espn], [move]) == [espn, move]
+
+
+def test_espn_s_copy_of_a_posted_club_move_is_not_posted_again(tmp_path) -> None:
+    bot, destination = _game_bot(_GameFeed(), tmp_path)
+    target = _AnnouncementTarget("1", "channel 1", destination)
+    move = parse_roster_move(_move_post("We have placed C Ethan Pocic on Injured Reserve."), EASTERN)
+    espn = _espn("Placed C Ethan Pocic on injured reserve.", PlayerRef("Ethan Pocic", position="C"))
+    nothing = InjuryReport(())
+
+    asyncio.run(bot._post_new_roster_news([target], [move], nothing, date(2026, 10, 3)))
+    asyncio.run(bot._post_new_roster_news([target], [espn], nothing, date(2026, 10, 3)))
+    asyncio.run(bot._post_new_roster_news([target], [espn], nothing, date(2026, 10, 3)))
+
+    assert len(destination.sent) == 1
+    assert destination.sent[0][0].footer.text.endswith("Baltimore Ravens via Bluesky")
+
+
+def test_two_espn_moves_for_one_player_are_both_posted(tmp_path) -> None:
+    bot, destination = _game_bot(_GameFeed(), tmp_path)
+    target = _AnnouncementTarget("1", "channel 1", destination)
+    moore = PlayerRef("Chris Moore", position="WR")
+    released = _espn("Released WR Chris Moore.", moore)
+    signed = Transaction("espn-2", date(2026, 10, 3), "Signed WR Chris Moore to the practice squad.", players=(moore,))
+
+    asyncio.run(bot._post_new_roster_news([target], [released], InjuryReport(()), date(2026, 10, 3)))
+    asyncio.run(bot._post_new_roster_news([target], [released, signed], InjuryReport(()), date(2026, 10, 3)))
+
+    assert len(destination.sent) == 2
+    assert destination.sent[0][0].footer.text.endswith("Data: ESPN")
+
+
+def test_practice_squad_elevations_are_roster_moves() -> None:
+    single = parse_roster_move(
+        _move_post("The Ravens activated (standard practice elevation) S K\u2019Von Wallace for tomorrow\u2019s game against Dallas."),
+        EASTERN,
+    )
+    pair = parse_roster_move(
+        _move_post("We have activated (standard practice squad elevations) LB Carl Jones and WR Chris Moore for tomorrow\u2019s game."),
+        EASTERN,
+    )
+
+    assert single.type_text == "Activated"
+    assert [p.display_name for p in single.players] == ["S K\u2019Von Wallace"]
+    assert [p.display_name for p in pair.players] == ["LB Carl Jones", "WR Chris Moore"]
+    assert "standard practice squad elevations" in pair.description
+
+
+def test_the_club_s_log_copy_of_a_posted_elevation_is_not_posted_again(tmp_path) -> None:
+    bot, destination = _game_bot(_GameFeed(), tmp_path)
+    target = _AnnouncementTarget("1", "channel 1", destination)
+    move = parse_roster_move(
+        _move_post("We have activated G Kyle Hergel (standard elevation) from the practice squad."), EASTERN
+    )
+    logged = Transaction(
+        "ravens-official:2026-10-03:abc", date(2026, 10, 3),
+        "Activated G Kyle Hergel from the practice squad (standard elevation).",
+        players=(PlayerRef("Kyle Hergel", position="G"),),
+    )
+
+    asyncio.run(bot._post_new_roster_news([target], [move], InjuryReport(()), date(2026, 10, 3)))
+    asyncio.run(bot._post_new_roster_news([target], [logged], InjuryReport(()), date(2026, 10, 3)))
+
+    assert len(destination.sent) == 1
