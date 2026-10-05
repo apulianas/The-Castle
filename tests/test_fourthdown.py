@@ -7,6 +7,7 @@ from ravens_bot.fourthdown import (
     GO,
     MAX_FIELD_GOAL_YARDS,
     PUNT,
+    WIN_PROBABILITY_DECIMALS,
     advise,
     conversion_rate,
     expected_points,
@@ -162,6 +163,17 @@ def test_first_half_call_carries_no_fourth_quarter_caveat() -> None:
     assert advice.caveats == ()
 
 
+def test_a_decided_game_breaks_win_probability_ties_on_points() -> None:
+    # Up fourteen with three minutes left every option is a certain win, and
+    # punting from the opponent's twenty-two must not win on rounding noise.
+    advice = advise(
+        situation(6, 22, period=4, clock="3:24", score_differential=14)
+    )
+
+    assert advice.best is not None and advice.best.kind == FIELD_GOAL
+    assert advice.is_close
+
+
 def test_trailing_late_goes_for_it_since_nothing_else_can_win() -> None:
     advice = advise(
         situation(3, 3, period=4, clock="1:00", score_differential=-8)
@@ -253,6 +265,5 @@ def test_clock_boundaries_keep_finite_bounded_outcomes(period: int, clock: str) 
     assert advice.best is not None
     assert all(option.win_probability is not None and 0 < option.win_probability < 1
                for option in advice.options)
-    assert [option.win_probability for option in advice.options] == sorted(
-        (option.win_probability for option in advice.options), reverse=True
-    )
+    ranked = [round(option.win_probability, WIN_PROBABILITY_DECIMALS) for option in advice.options]
+    assert ranked == sorted(ranked, reverse=True)

@@ -378,20 +378,21 @@ def _situation_yards_to_goal(
     """Yards to the goal line, plus the spot as ESPN words it.
 
     ESPN publishes the spot three ways and they do not always all appear:
-    ``yardsToEndzone`` says outright what is wanted, ``possessionText`` names the
-    half of the field, and ``yardLine`` is counted from the offence's own goal
-    line. They are read in that order of directness, and a ``yardLine`` that
-    contradicts the named spot is discarded rather than averaged in.
+    ``possessionText`` names the half of the field, ``yardsToEndzone`` says
+    outright what is wanted, and ``yardLine`` is counted from the offence's own
+    goal line. The named spot is read first because it is the only one ESPN
+    gets right every time: on play-by-play, ``yardsToEndzone`` and ``yardLine``
+    are often measured for the wrong team, so a punt from a club's own 19 comes
+    through as 19 yards from the end zone. The other two are only fallbacks.
     """
     spot = _text(situation.get("possessionText"))
     from_spot = _yards_to_goal_from_spot(spot, offense) if spot else None
+    if from_spot is not None:
+        return from_spot, spot
 
     direct = _as_int(situation.get("yardsToEndzone"))
     if direct is not None and 0 <= direct <= 100:
         return direct, spot
-
-    if from_spot is not None:
-        return from_spot, spot
 
     yard_line = _as_int(situation.get("yardLine"))
     if yard_line is not None and 0 <= yard_line <= 100:

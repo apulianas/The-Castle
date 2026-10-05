@@ -69,6 +69,8 @@ CLOSE_CALL_POINTS = 0.15
 # And beneath this gap in win probability, which is the same idea in the other
 # currency: a percentage point either way is not a recommendation.
 CLOSE_CALL_WIN_PROBABILITY = 0.01
+# The resolution win probability is ranked at; ties below it go to points.
+WIN_PROBABILITY_DECIMALS = 3
 # What each option takes off the clock, in seconds, snap to whistle.
 GO_SECONDS = 6.0
 FIELD_GOAL_SECONDS = 5.0
@@ -404,14 +406,18 @@ def advise(situation: GameSituation) -> FourthDownAdvice:
         _punt_option(yards_to_goal, scoreboard),
     ]
     # A kick out of range has no win probability either: it keeps the minus
-    # infinity that stops it winning a ranking it should never win.
+    # infinity that stops it winning a ranking it should never win. Win
+    # probability is ranked only to a tenth of a percent, finer than which it
+    # is noise: once a game is decided every option sits at the model's cap,
+    # and expected points is what should separate them, not rounding.
     ranked_by_win_probability = scoreboard is not None
     if ranked_by_win_probability:
         options.sort(
             key=lambda option: (
-                option.win_probability
+                round(option.win_probability, WIN_PROBABILITY_DECIMALS)
                 if option.win_probability is not None
-                else float("-inf")
+                else float("-inf"),
+                option.expected_points,
             ),
             reverse=True,
         )

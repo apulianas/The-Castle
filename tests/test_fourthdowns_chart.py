@@ -55,6 +55,16 @@ GAME = Game(
 )
 
 
+def _spot(team: str, yards_to_goal: int) -> str:
+    """The ball spot as ESPN names it, for the offence identified by ``team``."""
+    own, other = ("BAL", "CIN") if team == RAVENS.team_id else ("CIN", "BAL")
+    if yards_to_goal == 50:
+        return "50"
+    if yards_to_goal > 50:
+        return f"{own} {100 - yards_to_goal}"
+    return f"{other} {yards_to_goal}"
+
+
 def _play(
     team: str,
     down: int,
@@ -77,7 +87,7 @@ def _play(
             "yardsToEndzone": yards_to_goal,
             "team": {"id": team},
             "downDistanceText": f"{down}th & {distance}",
-            "possessionText": "BAL 45",
+            "possessionText": _spot(team, yards_to_goal),
         },
         "end": end or {},
         "period": {"number": period},
@@ -198,6 +208,19 @@ def test_every_fourth_down_is_read_back_in_the_order_it_was_played() -> None:
 
 def test_a_timeout_on_fourth_down_is_not_a_decision() -> None:
     assert all(play.choice != "no play" for play in _report().plays)
+
+
+def test_the_named_spot_wins_over_espns_yards_to_endzone() -> None:
+    # ESPN sends yardsToEndzone for the wrong team on some plays: this is a
+    # Ravens punt from their own 19 that it said was 19 yards from the goal.
+    play = _play("33", 4, 3, 19, "Punt", "Eckley punts 51 yards")
+    play["start"]["possessionText"] = "BAL 19"
+    summary = {"drives": {"previous": [{"team": {"id": "33"}, "plays": [play]}]}}
+
+    (fourth,) = parse_fourth_downs(summary, GAME).plays
+
+    assert fourth.situation.yards_to_goal == 81
+    assert not recommendation_text(fourth).startswith("Field goal")
     assert all("Timeout" not in (play.play_text or "") for play in _report().plays)
 
 
