@@ -556,14 +556,14 @@ def test_format_fourth_down_situation_names_the_teams_and_the_score() -> None:
 
 
 def test_format_fourth_down_call_hedges_a_close_one() -> None:
-    advice = advise(build_situation(distance=2, yards_to_goal=10))
+    advice = advise(build_situation(distance=10, yards_to_goal=15))
 
     assert advice.is_close
     assert format_fourth_down_call(advice).startswith("Too close to call")
 
 
 def test_format_fourth_down_lists_the_call_then_every_option() -> None:
-    advice = advise(build_situation(distance=6, yards_to_goal=10))
+    advice = advise(build_situation(distance=8, yards_to_goal=20))
 
     lines = format_fourth_down(build_game(), advice).splitlines()
 

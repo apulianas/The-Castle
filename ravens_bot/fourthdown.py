@@ -76,6 +76,10 @@ GO_SECONDS = 6.0
 FIELD_GOAL_SECONDS = 5.0
 # A punt is a longer play than either, and the return costs more still.
 PUNT_SECONDS = 12.0
+# Where the receiving team typically starts after a kickoff, as its own yard
+# line: the dynamic kickoff's touchback is the thirty-five, and returns that
+# stop short of it pull the average back to about here.
+KICKOFF_RECEIVING_START = 30
 CONVERSION_RATES = MODEL.curves["conversion"].points
 GOAL_CONVERSION_RATES = MODEL.curves["goal_conversion"].points
 FIELD_GOAL_RATES = MODEL.curves["field_goal"].points
@@ -185,12 +189,23 @@ class Scoreboard:
     def scoring(self, points: float) -> float:
         """Our chance of winning having just scored, with the kickoff to come.
 
-        The kickoff is not priced separately. The fixed touchdown/PAT value
-        and no-ball state are heuristics, not learned transitions or net kickoff
-        values. Late scoring and conversion strategy remain limitations.
+        The other team receives, so the score is carried to the spot a kickoff
+        typically leaves them at and priced as their possession. Leaving the
+        ball with nobody overstated every score by several points of win
+        probability, most of all late, where the drive that answers it is the
+        whole game. The fixed touchdown/PAT value and kickoff spot are
+        heuristics, not learned transitions; returns and onside kicks are not
+        modelled, and late conversion strategy remains a limitation.
         """
-        return win_probability(
-            self.score_differential + points, self.seconds_remaining
+        return self.with_score(points).handing_over(
+            100 - KICKOFF_RECEIVING_START
+        )
+
+    def with_score(self, points: float) -> "Scoreboard":
+        return Scoreboard(
+            score_differential=self.score_differential + points,
+            seconds_remaining=self.seconds_remaining,
+            half_seconds_remaining=self.half_seconds_remaining,
         )
 
 
