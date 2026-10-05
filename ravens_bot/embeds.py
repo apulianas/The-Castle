@@ -589,7 +589,10 @@ def official_injury_embed(report: OfficialInjuryReport) -> discord.Embed:
             "or cover different days."
         )
     embed.set_image(url="attachment://ravens-injury-report.png")
-    embed.set_footer(text=OFFICIAL_INJURY_DATA_SOURCE)
+    footer = OFFICIAL_INJURY_DATA_SOURCE
+    if report.graphic_url:
+        footer += " (Ravens list read from the club's Bluesky graphic)"
+    embed.set_footer(text=footer)
     return embed
 
 

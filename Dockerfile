@@ -6,7 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# RapidOCR depends on the GUI build of OpenCV, which needs libGL; the headless
+# build does the same image work without it.
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip uninstall -y opencv-python \
+    && pip install --no-cache-dir "opencv-python-headless<6"
 
 COPY ravens_bot ./ravens_bot
 
