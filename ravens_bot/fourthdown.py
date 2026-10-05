@@ -69,11 +69,17 @@ CLOSE_CALL_POINTS = 0.15
 # And beneath this gap in win probability, which is the same idea in the other
 # currency: a percentage point either way is not a recommendation.
 CLOSE_CALL_WIN_PROBABILITY = 0.01
+# The resolution win probability is ranked at; ties below it go to points.
+WIN_PROBABILITY_DECIMALS = 3
 # What each option takes off the clock, in seconds, snap to whistle.
 GO_SECONDS = 6.0
 FIELD_GOAL_SECONDS = 5.0
 # A punt is a longer play than either, and the return costs more still.
 PUNT_SECONDS = 12.0
+# Where the receiving team typically starts after a kickoff, as its own yard
+# line: the dynamic kickoff's touchback is the thirty-five, and returns that
+# stop short of it pull the average back to about here.
+KICKOFF_RECEIVING_START = 30
 CONVERSION_RATES = MODEL.curves["conversion"].points
 GOAL_CONVERSION_RATES = MODEL.curves["goal_conversion"].points
 FIELD_GOAL_RATES = MODEL.curves["field_goal"].points
@@ -183,12 +189,23 @@ class Scoreboard:
     def scoring(self, points: float) -> float:
         """Our chance of winning having just scored, with the kickoff to come.
 
-        The kickoff is not priced separately. The fixed touchdown/PAT value
-        and no-ball state are heuristics, not learned transitions or net kickoff
-        values. Late scoring and conversion strategy remain limitations.
+        The other team receives, so the score is carried to the spot a kickoff
+        typically leaves them at and priced as their possession. Leaving the
+        ball with nobody overstated every score by several points of win
+        probability, most of all late, where the drive that answers it is the
+        whole game. The fixed touchdown/PAT value and kickoff spot are
+        heuristics, not learned transitions; returns and onside kicks are not
+        modelled, and late conversion strategy remains a limitation.
         """
-        return win_probability(
-            self.score_differential + points, self.seconds_remaining
+        return self.with_score(points).handing_over(
+            100 - KICKOFF_RECEIVING_START
+        )
+
+    def with_score(self, points: float) -> "Scoreboard":
+        return Scoreboard(
+            score_differential=self.score_differential + points,
+            seconds_remaining=self.seconds_remaining,
+            half_seconds_remaining=self.half_seconds_remaining,
         )
 
 
@@ -404,14 +421,18 @@ def advise(situation: GameSituation) -> FourthDownAdvice:
         _punt_option(yards_to_goal, scoreboard),
     ]
     # A kick out of range has no win probability either: it keeps the minus
-    # infinity that stops it winning a ranking it should never win.
+    # infinity that stops it winning a ranking it should never win. Win
+    # probability is ranked only to a tenth of a percent, finer than which it
+    # is noise: once a game is decided every option sits at the model's cap,
+    # and expected points is what should separate them, not rounding.
     ranked_by_win_probability = scoreboard is not None
     if ranked_by_win_probability:
         options.sort(
             key=lambda option: (
-                option.win_probability
+                round(option.win_probability, WIN_PROBABILITY_DECIMALS)
                 if option.win_probability is not None
-                else float("-inf")
+                else float("-inf"),
+                option.expected_points,
             ),
             reverse=True,
         )

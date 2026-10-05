@@ -461,7 +461,9 @@ Three limits are stated in the embed footer rather than hidden:
 - Nobody publishes timeouts on the scoreboard route this reads, so two minutes
   with three timeouts and two minutes with none are the same game here.
 - Play duration, touchdown/PAT value, post-score kickoff treatment and outcome
-  transitions remain heuristics. The points curve is **not** a net kickoff
+  transitions remain heuristics. After a score the other team is given the
+  ball at its own 30, a fixed typical kickoff spot rather than a learned one.
+  The points curve is **not** a net kickoff
   valuation. End-half drive timing, timeouts, conversion strategy and OT rules
   are not calibrated. Existing zero-clock and overtime approximations remain;
   they should not be mistaken for rule-complete late-game strategy.

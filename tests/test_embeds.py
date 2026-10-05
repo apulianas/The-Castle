@@ -615,12 +615,14 @@ def build_situation(down: int = 4, distance: int = 3, yards_to_goal: int = 10) -
 
 def test_fourth_down_embed_states_the_call_and_prices_every_option() -> None:
     game = build_game()
-    advice = advise(build_situation())
+    advice = advise(
+        replace(build_situation(distance=8), down_distance_text="4th & 8")
+    )
 
     embed = fourth_down_embed(game, advice)
 
     assert embed.title == "Field goal"
-    assert "4th & 3" in embed.description
+    assert "4th & 8" in embed.description
     assert field_names(embed) == ["Field goal", "Go for it", "Punt"]
     assert all("win probability" in field.value for field in embed.fields)
     assert embed.thumbnail.url == RAVENS_TEAM.logo

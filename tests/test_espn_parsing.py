@@ -1127,16 +1127,31 @@ def test_parse_situation_falls_back_to_the_yard_line_without_a_spot() -> None:
     assert situation is not None and situation.yards_to_goal == 65
 
 
-def test_parse_situation_trusts_yards_to_endzone_when_espn_sends_it() -> None:
+def test_parse_situation_uses_yards_to_endzone_without_a_spot() -> None:
+    payload = {
+        "events": [
+            _live_event(
+                {"down": 4, "distance": 2, "yardsToEndzone": 41, "yardLine": 12, "possession": "33"}
+            )
+        ]
+    }
+
+    situation = parse_scoreboard(payload)[0].situation
+
+    assert situation is not None and situation.yards_to_goal == 41
+
+
+def test_parse_situation_trusts_the_spot_over_a_contradicting_yards_to_endzone() -> None:
+    # As ESPN sent it for a Ravens punt from their own 19 against Tennessee.
     payload = {
         "events": [
             _live_event(
                 {
                     "down": 4,
-                    "distance": 2,
-                    "yardsToEndzone": 41,
-                    "yardLine": 12,
-                    "possessionText": "CIN 41",
+                    "distance": 3,
+                    "yardsToEndzone": 19,
+                    "yardLine": 19,
+                    "possessionText": "BAL 19",
                     "possession": "33",
                 }
             )
@@ -1145,7 +1160,7 @@ def test_parse_situation_trusts_yards_to_endzone_when_espn_sends_it() -> None:
 
     situation = parse_scoreboard(payload)[0].situation
 
-    assert situation is not None and situation.yards_to_goal == 41
+    assert situation is not None and situation.yards_to_goal == 81
 
 
 def test_parse_situation_is_absent_without_one_in_the_payload() -> None:

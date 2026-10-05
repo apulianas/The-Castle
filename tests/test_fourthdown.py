@@ -7,6 +7,8 @@ from ravens_bot.fourthdown import (
     GO,
     MAX_FIELD_GOAL_YARDS,
     PUNT,
+    WIN_PROBABILITY_DECIMALS,
+    Scoreboard,
     advise,
     conversion_rate,
     expected_points,
@@ -15,6 +17,7 @@ from ravens_bot.fourthdown import (
     punt_result,
 )
 from ravens_bot.models import GameSituation, TeamRef
+from ravens_bot.winprob import win_probability
 
 
 RAVENS = TeamRef(name="Baltimore Ravens", team_id="33", abbreviation="BAL", slug="bal")
@@ -55,8 +58,12 @@ def test_fourth_and_long_from_deep_punts() -> None:
     assert best_kind(15, 80) == PUNT
 
 
-def test_fourth_and_three_in_range_kicks() -> None:
-    assert best_kind(3, 10) == FIELD_GOAL
+def test_fourth_and_long_in_range_kicks() -> None:
+    assert best_kind(8, 20) == FIELD_GOAL
+
+
+def test_fourth_and_short_at_the_ten_goes_for_it() -> None:
+    assert best_kind(3, 10) == GO
 
 
 def test_fourth_and_goal_from_the_two_goes_for_it() -> None:
@@ -162,6 +169,35 @@ def test_first_half_call_carries_no_fourth_quarter_caveat() -> None:
     assert advice.caveats == ()
 
 
+def test_a_score_hands_the_opponent_the_ball_rather_than_nobody() -> None:
+    board = Scoreboard(score_differential=0, seconds_remaining=83)
+
+    # Up three with the other team about to receive is not a no-ball lead.
+    assert board.scoring(3) == pytest.approx(board.with_score(3).handing_over(70))
+    assert board.scoring(3) < win_probability(3, 83)
+
+
+def test_a_long_kick_down_four_does_not_beat_going_for_it() -> None:
+    # Dallas at Baltimore, 2026: fourth and six from the 41, down four in the
+    # third. nfl4th called it a strong go; the 59-yard kick was blocked.
+    advice = advise(
+        situation(6, 41, period=3, clock="6:07", score_differential=-4)
+    )
+
+    assert advice.best is not None and advice.best.kind == GO
+
+
+def test_a_decided_game_breaks_win_probability_ties_on_points() -> None:
+    # Up fourteen with three minutes left every option is a certain win, and
+    # punting from the opponent's twenty-two must not win on rounding noise.
+    advice = advise(
+        situation(6, 22, period=4, clock="3:24", score_differential=14)
+    )
+
+    assert advice.best is not None and advice.best.kind == FIELD_GOAL
+    assert advice.is_close
+
+
 def test_trailing_late_goes_for_it_since_nothing_else_can_win() -> None:
     advice = advise(
         situation(3, 3, period=4, clock="1:00", score_differential=-8)
@@ -253,6 +289,5 @@ def test_clock_boundaries_keep_finite_bounded_outcomes(period: int, clock: str) 
     assert advice.best is not None
     assert all(option.win_probability is not None and 0 < option.win_probability < 1
                for option in advice.options)
-    assert [option.win_probability for option in advice.options] == sorted(
-        (option.win_probability for option in advice.options), reverse=True
-    )
+    ranked = [round(option.win_probability, WIN_PROBABILITY_DECIMALS) for option in advice.options]
+    assert ranked == sorted(ranked, reverse=True)
