@@ -15,7 +15,15 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from .bluesky import BlueskyClient, BlueskyError, GameInjuryUpdate, NameMatcher
+from .bluesky import (
+    BlueskyClient,
+    BlueskyError,
+    GameInjuryUpdate,
+    NameMatcher,
+    is_roster_move_post,
+    merge_roster_moves,
+    player_keys,
+)
 from .chart import ArtworkLoader
 from .config import BotConfig, load_config, webhook_id
 from .dates import (
@@ -60,6 +68,7 @@ from .embeds import (
 from .espn import (
     EspnApiError,
     EspnClient,
+    apply_roster,
     combine_roster_news,
     match_team_games,
     select_insight_game,
@@ -178,6 +187,7 @@ MAX_TEAM_SUGGESTIONS = 8
 # Announcement keys for injury posts, shared by the first-run check.
 INJURY_KEY_PREFIX = "injury:"
 GAME_INJURY_KEY_PREFIX = "game-injury:"
+MOVED_PLAYER_KEY_PREFIX = "moved-player:"
 
 
 @dataclass(frozen=True)
@@ -299,6 +309,7 @@ class RavensBot(commands.Bot):
             LOGGER.warning("Practice-squad elevation polling skipped: %s", exc)
         else:
             transactions = merge_standard_elevations(transactions, elevations)
+        transactions = await self._with_bluesky_moves(transactions, target_date)
         await self._post_new_roster_news(
             targets,
             transactions,
@@ -348,6 +359,28 @@ class RavensBot(commands.Bot):
             LOGGER.warning("Injury report matchup could not be resolved: %s", exc)
             return report
         return add_matchup(report, games)
+
+    async def _with_bluesky_moves(
+        self, transactions: list[Transaction], day: date
+    ) -> list[Transaction]:
+        """Add the club's own roster move posts that the other feeds lack yet."""
+        bluesky = getattr(self, "bluesky", None)
+        if bluesky is None:
+            return transactions
+        try:
+            moves = await bluesky.fetch_roster_moves(day, self.config.time_zone)
+        except BlueskyError as exc:
+            LOGGER.warning("Bluesky roster moves unavailable: %s", exc)
+            return transactions
+        if not moves:
+            return transactions
+        try:
+            roster = await _require_espn(self).fetch_roster()
+        except EspnApiError:
+            roster = {}
+        if roster:
+            moves = [apply_roster(move, roster) for move in moves]
+        return merge_roster_moves(transactions, moves)
 
     async def _graphic_name_candidates(
         self, report: OfficialInjuryReport | None = None
@@ -453,6 +486,7 @@ class RavensBot(commands.Bot):
                     transaction
                     for transaction in transactions
                     if self._unseen(target, transaction_announcement_key(transaction))
+                    and not self._already_moved(target, transaction)
                 ],
                 unseen_updates,
             )
@@ -463,6 +497,7 @@ class RavensBot(commands.Bot):
                     target,
                     [
                         transaction_key,
+                        *moved_player_keys(news.transaction),
                         *(injury_announcement_key(update) for update in carried),
                     ],
                     embeds,
@@ -640,6 +675,33 @@ class RavensBot(commands.Bot):
 
     def _unseen(self, target: _AnnouncementTarget, key: str) -> bool:
         return self.announcement_state.unseen(channel_key(key, target.key_id))
+
+    def _already_moved(self, target: _AnnouncementTarget, transaction: Transaction) -> bool:
+        """Whether the other source already posted this move to the target.
+
+        The club's post and ESPN's entry describe the same move in different
+        words, so they are matched by player and day. Only the other source
+        counts: ESPN files a release and the practice squad signing that follows
+        as two moves, and both are news. A move found to be a repeat is recorded
+        so it is not weighed again.
+        """
+        names = player_keys(transaction)
+        if not names:
+            return False
+        other = "espn" if is_roster_move_post(transaction) else "bluesky"
+        days = (transaction.date, transaction.date - timedelta(days=1))
+        if not all(
+            any(
+                not self._unseen(target, _moved_player_key(other, day, name))
+                for day in days
+            )
+            for name in names
+        ):
+            return False
+        self.announcement_state.mark(
+            channel_key(transaction_announcement_key(transaction), target.key_id)
+        )
+        return True
 
     async def _announce(
         self,
@@ -857,6 +919,7 @@ def _transactions_command(bot: RavensBot) -> app_commands.Command[Any, ..., None
             LOGGER.warning("Practice-squad elevations unavailable: %s", exc)
         else:
             items = merge_standard_elevations(items, elevations)
+        items = await bot._with_bluesky_moves(items, target_date)
         await interaction.followup.send(embeds=transaction_embeds(items, target_date))
 
     return transactions
@@ -1611,6 +1674,19 @@ def injury_announcement_key(update: InjuryUpdate) -> str:
 
 def game_injury_key(update: GameInjuryUpdate) -> str:
     return f"{GAME_INJURY_KEY_PREFIX}{update.post.uri}"
+
+
+def _moved_player_key(source: str, day: date, name: str) -> str:
+    return f"{MOVED_PLAYER_KEY_PREFIX}{source}:{day.isoformat()}:{name}"
+
+
+def moved_player_keys(transaction: Transaction) -> list[str]:
+    """Who a posted move covered, by source, so the other source's copy is skipped."""
+    source = "bluesky" if is_roster_move_post(transaction) else "espn"
+    return [
+        _moved_player_key(source, transaction.date, name)
+        for name in sorted(player_keys(transaction))
+    ]
 
 
 def _official_injury_slot(report_date: date, target: int | str) -> str:

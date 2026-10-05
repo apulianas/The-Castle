@@ -61,6 +61,15 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
     appear (checked every 30 seconds), one embed per update with the player's
     headshot, status, and a link to the post. Only posts since kickoff count,
     and each is posted once per channel or webhook, even across restarts.
+    Spelled-out positions ("Center …") and surname-only follow-ups
+    ("Hamilton has now returned to the game.") are understood.
+  - Roster moves: posts such as "We have placed C Jovaughn Gwyn on Injured
+    Reserve." are announced like any other move, usually well before ESPN or
+    the club's transaction log lists them. The same move from ESPN later is
+    matched by player and day and not posted again, while ESPN's separate
+    moves for one player (a release, then a practice squad signing) still are.
+  - Walkthrough weeks, when the graphic is captioned "the report is a
+    practice estimation", are read like any other injury report.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
