@@ -694,3 +694,37 @@ def test_two_espn_moves_for_one_player_are_both_posted(tmp_path) -> None:
 
     assert len(destination.sent) == 2
     assert destination.sent[0][0].footer.text.endswith("Data: ESPN")
+
+
+def test_practice_squad_elevations_are_roster_moves() -> None:
+    single = parse_roster_move(
+        _move_post("The Ravens activated (standard practice elevation) S K\u2019Von Wallace for tomorrow\u2019s game against Dallas."),
+        EASTERN,
+    )
+    pair = parse_roster_move(
+        _move_post("We have activated (standard practice squad elevations) LB Carl Jones and WR Chris Moore for tomorrow\u2019s game."),
+        EASTERN,
+    )
+
+    assert single.type_text == "Activated"
+    assert [p.display_name for p in single.players] == ["S K\u2019Von Wallace"]
+    assert [p.display_name for p in pair.players] == ["LB Carl Jones", "WR Chris Moore"]
+    assert "standard practice squad elevations" in pair.description
+
+
+def test_the_club_s_log_copy_of_a_posted_elevation_is_not_posted_again(tmp_path) -> None:
+    bot, destination = _game_bot(_GameFeed(), tmp_path)
+    target = _AnnouncementTarget("1", "channel 1", destination)
+    move = parse_roster_move(
+        _move_post("We have activated G Kyle Hergel (standard elevation) from the practice squad."), EASTERN
+    )
+    logged = Transaction(
+        "ravens-official:2026-10-03:abc", date(2026, 10, 3),
+        "Activated G Kyle Hergel from the practice squad (standard elevation).",
+        players=(PlayerRef("Kyle Hergel", position="G"),),
+    )
+
+    asyncio.run(bot._post_new_roster_news([target], [move], InjuryReport(()), date(2026, 10, 3)))
+    asyncio.run(bot._post_new_roster_news([target], [logged], InjuryReport(()), date(2026, 10, 3)))
+
+    assert len(destination.sent) == 1
