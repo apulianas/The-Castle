@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -13,13 +13,15 @@ from ravens_bot.bluesky import (
     GraphicInjuryTable,
     INJURY_POST,
     NameMatcher,
+    game_injuries,
     parse_feed,
+    parse_game_injury,
     parse_inactives_graphic,
     parse_injury_graphic,
     posts_on,
 )
-from ravens_bot.bot import RavensBot
-from ravens_bot.embeds import official_injury_embed
+from ravens_bot.bot import RavensBot, _AnnouncementTarget
+from ravens_bot.embeds import game_injury_embed, official_injury_embed
 from ravens_bot.injury_report import (
     InjuryTable,
     OfficialInjuryReport,
@@ -33,6 +35,7 @@ from ravens_bot.models import (
     PlayerRef,
     TeamRef,
 )
+from ravens_bot.state import AnnouncementState
 
 
 DATA = Path(__file__).parent / "data"
@@ -183,7 +186,7 @@ class _Client(BlueskyClient):
         self.results = results
         self.reads: list[str] = []
 
-    async def fetch_posts(self):
+    async def fetch_posts(self, limit=100):
         return self.posts
 
     async def read_image(self, url):
@@ -431,3 +434,122 @@ def test_a_bluesky_outage_leaves_espn_s_answer_alone(caplog) -> None:
 
     assert asyncio.run(bot._with_graphic_inactives(report, date(2026, 10, 4))) is report
     assert "Bluesky inactives graphic unavailable" in caplog.text
+
+KICKOFF = datetime(2026, 10, 4, 17, tzinfo=timezone.utc)
+
+
+def _post(text: str, minutes: int = 30, rkey: str | None = None) -> BlueskyPost:
+    return BlueskyPost(
+        uri=f"at://did:plc:x/app.bsky.feed.post/{rkey or abs(hash(text))}",
+        text=text,
+        created_at=KICKOFF + timedelta(minutes=minutes),
+        image_urls=(),
+    )
+
+
+def test_in_game_lines_read_player_injury_and_status() -> None:
+    cases = {
+        "TE Durham Smythe (Achilles) has been ruled out.": ("TE", "Durham Smythe", "Achilles", "Out"),
+        "QB Lamar Jackson (ankle) is questionable to return.": ("QB", "Lamar Jackson", "Ankle", "Questionable to return"),
+        "Marlon Humphrey (calf) is questionable to return.": (None, "Marlon Humphrey", "Calf", "Questionable to return"),
+        "WR Zay Flowers (knee) is doubtful to return.": ("WR", "Zay Flowers", "Knee", "Doubtful to return"),
+        "T Ronnie Stanley is being evaluated for a concussion.": ("T", "Ronnie Stanley", None, "Being evaluated"),
+        "CB Marlon Humphrey has returned to the game.": ("CB", "Marlon Humphrey", None, "Returned"),
+        "DT Calais Campbell (shoulder) will not return.": ("DT", "Calais Campbell", "Shoulder", "Out"),
+    }
+    for text, expected in cases.items():
+        update = parse_game_injury(_post(text))
+        assert update is not None, text
+        assert (update.position, update.name, update.injury, update.status) == expected
+
+
+def test_other_posts_are_not_injury_lines() -> None:
+    for text in (
+        "Game status vs. Titans",
+        "We have placed C Jovaughn Gwyn and C Ethan Pocic on Injured Reserve.",
+        "Derrick Henry has returned a kick 98 yards for a touchdown!",
+        "TYLER LOOP 64-YARD FIELD GOAL",
+        "Inactives vs. Titans",
+        "Lamar Jackson is ready to roll.",
+    ):
+        assert parse_game_injury(_post(text)) is None, text
+
+
+def test_only_lines_since_kickoff_count_oldest_first() -> None:
+    posts = [
+        _post("CB Marlon Humphrey (calf) has been ruled out.", 90),
+        _post("CB Marlon Humphrey (calf) is questionable to return.", 60),
+        _post("TE Durham Smythe (Achilles) has been ruled out.", -60 * 24 * 7),
+    ]
+
+    updates = game_injuries(posts, KICKOFF)
+
+    assert [update.status for update in updates] == ["Questionable to return", "Out"]
+
+
+def test_in_game_embed_has_headshot_status_and_link() -> None:
+    update = parse_game_injury(_post("Marlon Humphrey (calf) is questionable to return.", rkey="abc"))
+    player = NameMatcher(ROSTER).find(update.name)
+
+    embed = game_injury_embed(update, player, GAME)
+
+    assert embed.title == "CB Marlon Humphrey (Calf): Questionable to return"
+    assert embed.description == "Marlon Humphrey (calf) is questionable to return."
+    assert embed.url == "https://bsky.app/profile/ravensbot.bsky.social/post/abc"
+    assert "3040506" in embed.thumbnail.url
+    assert embed.footer.text.startswith("In-game update vs. Tennessee Titans")
+
+
+class _Destination:
+    def __init__(self) -> None:
+        self.sent: list[list] = []
+
+    async def send(self, embeds):
+        self.sent.append(embeds)
+
+
+class _GameFeed:
+    def __init__(self, posts=(), error: Exception | None = None) -> None:
+        self.posts = list(posts)
+        self.error = error
+
+    async def fetch_game_injuries(self, since):
+        if self.error:
+            raise self.error
+        return game_injuries(self.posts, since)
+
+
+def _game_bot(feed, tmp_path):
+    bot = _bot(feed)
+    bot.config = type("C", (), {"time_zone": EASTERN, "has_announcement_targets": True})()
+    bot.announcement_state = AnnouncementState(str(tmp_path / "state.json"))
+    destination = _Destination()
+
+    async def targets():
+        return [_AnnouncementTarget("1", "channel 1", destination)]
+
+    bot._announcement_targets = targets  # type: ignore[method-assign]
+    return bot, destination
+
+
+def test_each_in_game_line_is_posted_once(tmp_path) -> None:
+    feed = _GameFeed([_post("CB Marlon Humphrey (calf) is questionable to return.", 60, "a")])
+    bot, destination = _game_bot(feed, tmp_path)
+
+    asyncio.run(bot._post_game_injuries(GAME))
+    asyncio.run(bot._post_game_injuries(GAME))
+    feed.posts.append(_post("CB Marlon Humphrey (calf) has been ruled out.", 90, "b"))
+    asyncio.run(bot._post_game_injuries(GAME))
+
+    assert [embeds[0].title for embeds in destination.sent] == [
+        "CB Marlon Humphrey (Calf): Questionable to return",
+        "CB Marlon Humphrey (Calf): Out",
+    ]
+
+
+def test_a_bluesky_outage_during_a_game_posts_nothing(tmp_path) -> None:
+    bot, destination = _game_bot(_GameFeed(error=BlueskyError("down")), tmp_path)
+
+    asyncio.run(bot._post_game_injuries(GAME))
+
+    assert destination.sent == []

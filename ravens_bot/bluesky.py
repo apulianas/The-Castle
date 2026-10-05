@@ -37,6 +37,9 @@ BLUESKY_FEED_URL = "https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed
 BLUESKY_PROFILE_URL = "https://bsky.app/profile/{handle}/post/{rkey}"
 # The API's largest page. A game day alone can run to dozens of posts.
 FEED_LIMIT = 100
+# Polled every half minute during a game, so only the latest posts are needed;
+# the club posts a dozen or so during a quarter at most.
+GAME_FEED_LIMIT = 40
 # Each graphic is read once; a handful covers a week's reports and a game day.
 OCR_CACHE_SIZE = 16
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -411,6 +414,79 @@ def posts_on(
     ]
 
 
+@dataclass(frozen=True)
+class GameInjuryUpdate:
+    """One in-game injury line the club posted, such as "is questionable to return"."""
+
+    name: str
+    position: str | None
+    injury: str | None
+    status: str
+    text: str
+    post: BlueskyPost
+
+
+# The club's in-game wording, most specific first; each maps to a short status.
+_GAME_STATUSES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), label)
+    for pattern, label in (
+        (r"\b(?:has been |is )?ruled out\b", "Out"),
+        (r"\bwill not return\b|\bwon'?t return\b|\bout for the (?:rest of the )?game\b", "Out"),
+        (r"\bnot expected to return\b", "Not expected to return"),
+        (r"\bdoubtful to return\b", "Doubtful to return"),
+        (r"\bquestionable to return\b", "Questionable to return"),
+        (r"\bbeing evaluated\b", "Being evaluated"),
+        (r"\bhas (?:returned|been cleared)(?: to (?:the )?game)?\s*[.!]*$|\bis back in the game\b|\bis cleared to return\b", "Returned"),
+    )
+)
+_GAME_INJURY = re.compile(
+    r"^\s*(?:(?P<position>[A-Z]{1,3})\s+)?"
+    r"(?P<name>[A-Z][\w.'-]+(?:\s+[A-Z][\w.'-]+){1,3})"
+    r"\s*(?:\((?P<injury>[^)]{1,40})\))?"
+    r"\s+(?:is|has|will|was)\b"
+)
+
+
+def parse_game_injury(post: BlueskyPost) -> GameInjuryUpdate | None:
+    """An in-game injury update, when that is all a post says."""
+    text = " ".join(post.text.split())
+    match = _GAME_INJURY.match(text)
+    if match is None or len(text) > 200:
+        return None
+    position = match.group("position")
+    if position is not None and position not in POSITIONS:
+        return None
+    status = next(
+        (label for pattern, label in _GAME_STATUSES if pattern.search(text[match.end("name"):])),
+        None,
+    )
+    if status is None:
+        return None
+    injury = match.group("injury")
+    return GameInjuryUpdate(
+        name=match.group("name"),
+        position=position,
+        injury=injury.strip().capitalize() if injury else None,
+        status=status,
+        text=text,
+        post=post,
+    )
+
+
+def game_injuries(
+    posts: Iterable[BlueskyPost], since: datetime
+) -> list[GameInjuryUpdate]:
+    """In-game injury updates posted since ``since``, oldest first."""
+    updates = [
+        update
+        for post in posts
+        if post.created_at >= since
+        for update in (parse_game_injury(post),)
+        if update is not None
+    ]
+    return sorted(updates, key=lambda update: update.post.created_at)
+
+
 _ENGINE: Any = None
 _ENGINE_LOCK = threading.Lock()
 
@@ -442,13 +518,13 @@ class BlueskyClient:
         self._recognize = recognize
         self._ocr_cache: OrderedDict[str, OcrResult] = OrderedDict()
 
-    async def fetch_posts(self) -> list[BlueskyPost]:
+    async def fetch_posts(self, limit: int = FEED_LIMIT) -> list[BlueskyPost]:
         try:
             async with self._session.get(
                 BLUESKY_FEED_URL,
                 params={
                     "actor": self._handle,
-                    "limit": str(FEED_LIMIT),
+                    "limit": str(limit),
                     "filter": "posts_no_replies",
                 },
                 headers={"User-Agent": "The-Castle Ravens Discord bot"},
@@ -518,3 +594,7 @@ class BlueskyClient:
                 if found:
                     return found
         return ()
+
+    async def fetch_game_injuries(self, since: datetime) -> list[GameInjuryUpdate]:
+        """The club's in-game injury lines posted since kickoff, oldest first."""
+        return game_injuries(await self.fetch_posts(GAME_FEED_LIMIT), since)

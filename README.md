@@ -56,6 +56,11 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
     catches up. The embed footer notes when the graphic was used.
   - Inactives: the graphic fills in the Ravens' names only while ESPN has none;
     ESPN's list, with reasons, is used as soon as it appears.
+  - In-game injuries: while a Ravens game is live, the club's text posts such
+    as "CB Marlon Humphrey (calf) has been ruled out." are posted as they
+    appear (checked every 30 seconds), one embed per update with the player's
+    headshot, status, and a link to the post. Only posts since kickoff count,
+    and each is posted once per channel or webhook, even across restarts.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.

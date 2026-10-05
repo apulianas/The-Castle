@@ -15,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from .bluesky import BlueskyClient, BlueskyError
+from .bluesky import BlueskyClient, BlueskyError, GameInjuryUpdate, NameMatcher
 from .chart import ArtworkLoader
 from .config import BotConfig, load_config, webhook_id
 from .dates import (
@@ -37,6 +37,7 @@ from .embeds import (
     fourth_down_chart_embed,
     fourth_down_embed,
     fourth_down_play_embed,
+    game_injury_embed,
     help_embed,
     inactive_embeds,
     injury_embeds,
@@ -176,6 +177,7 @@ MAX_PLAYER_SUGGESTIONS = 5
 MAX_TEAM_SUGGESTIONS = 8
 # Announcement keys for injury posts, shared by the first-run check.
 INJURY_KEY_PREFIX = "injury:"
+GAME_INJURY_KEY_PREFIX = "game-injury:"
 
 
 @dataclass(frozen=True)
@@ -788,6 +790,46 @@ class RavensBot(commands.Bot):
             return
         self.fourth_downs.remember(games)
         self._idle_track_ticks = 0 if games else IDLE_TRACK_TICKS
+        for game in games:
+            if game.ravens is not None:
+                await self._post_game_injuries(game)
+
+    async def _post_game_injuries(self, game: Game) -> None:
+        """Post each in-game injury line the club puts on Bluesky, once per target.
+
+        The club posts these within a minute or two, well ahead of ESPN's
+        injury feed. Only lines since kickoff count, so a restart mid-game
+        catches up on the ones it missed without reaching back to last week.
+        """
+        bluesky = getattr(self, "bluesky", None)
+        if (
+            bluesky is None
+            or game.start_time is None
+            or not self.config.has_announcement_targets
+        ):
+            return
+        try:
+            updates = await bluesky.fetch_game_injuries(game.start_time)
+        except BlueskyError as exc:
+            LOGGER.debug("In-game injury updates skipped: %s", exc)
+            return
+        if not updates:
+            return
+        targets = await self._announcement_targets()
+        pending = [
+            update
+            for update in updates
+            if any(self._unseen(target, game_injury_key(update)) for target in targets)
+        ]
+        if not pending:
+            return
+        matcher = NameMatcher(await self._graphic_name_candidates())
+        for update in pending:
+            key = game_injury_key(update)
+            embed = game_injury_embed(update, matcher.find(update.name), game)
+            for target in targets:
+                if self._unseen(target, key):
+                    await self._announce(target, [key], [embed])
 
     @track_fourth_downs.before_loop
     async def before_track_fourth_downs(self) -> None:
@@ -1565,6 +1607,10 @@ def transaction_announcement_key(transaction: Transaction) -> str:
 
 def injury_announcement_key(update: InjuryUpdate) -> str:
     return f"{INJURY_KEY_PREFIX}{update.announcement_id}"
+
+
+def game_injury_key(update: GameInjuryUpdate) -> str:
+    return f"{GAME_INJURY_KEY_PREFIX}{update.post.uri}"
 
 
 def _official_injury_slot(report_date: date, target: int | str) -> str:

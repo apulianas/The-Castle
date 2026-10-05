@@ -73,6 +73,7 @@ from .formatting import (
     format_venue,
     short_team_name,
 )
+from .bluesky import GameInjuryUpdate
 from .dates import MAX_SCHEDULE_DAYS
 from .calibration import MODEL_LIMITS, WP_DESCRIPTION
 from .fourthdown import FieldGoalOutlook, FourthDownAdvice, advise
@@ -123,6 +124,7 @@ LIVE_FOOTER_RESERVE = 160
 ROSTER_FOOTER_RESERVE = 200
 DATA_SOURCE = "Data: ESPN"
 OFFICIAL_INJURY_DATA_SOURCE = "Data: Baltimore Ravens"
+GAME_INJURY_SOURCE = "Source: Baltimore Ravens via Bluesky"
 SNAP_DATA_SOURCE = "Data: Pro Football Reference via nflverse"
 # Every number behind a fourth down call is a league average, so the footer says
 # so rather than letting the recommendation read as a scouted opinion. Which of
@@ -544,6 +546,28 @@ def _set_injury_art(embed: discord.Embed, updates: Sequence[InjuryUpdate]) -> No
             embed.set_thumbnail(url=photo)
             return
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
+
+
+def game_injury_embed(
+    update: GameInjuryUpdate, player: PlayerRef | None, game: Game | None = None
+) -> discord.Embed:
+    """One in-game injury line, titled by player and status like an injury post.
+
+    The club's own sentence is the body, so nothing it said is lost to the
+    shorter status in the title.
+    """
+    position = update.position or (player.position if player is not None else None)
+    name = player.name if player is not None else update.name
+    who = f"{position} {name}" if position else name
+    injury = f" ({update.injury})" if update.injury else ""
+    embed = _base_embed(f"{who}{injury}: {update.status}", update.text, url=update.post.url)
+    photo = player.photo_url() if player is not None else None
+    embed.set_thumbnail(url=photo or team_logo_url(RAVENS_SLUG))
+    opponent = game.opponent if game is not None else None
+    context = f"In-game update vs. {opponent.team.name}" if opponent is not None else "In-game update"
+    embed.set_footer(text=f"{context} • {GAME_INJURY_SOURCE}")
+    embed.timestamp = update.post.created_at
+    return embed
 
 
 def injury_embeds(report: InjuryReport) -> list[discord.Embed]:
