@@ -43,6 +43,24 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   webhook; list changes edit that post and replace its chart, even after a
   restart. If the chart cannot be rendered, the same post uses a written list.
   Older posts saved without message IDs are left alone to avoid duplicates.
+- Faster Ravens lists from the club's graphics. [@ravensbot.bsky.social](https://bsky.app/profile/ravensbot.bsky.social)
+  mirrors the team's X account, where the practice report, Friday game
+  statuses, and inactives are posted as images before the website or ESPN
+  updates. The bot reads that day's graphic with RapidOCR (once per image, off
+  the event loop) and matches each line to the ESPN roster, since OCR keeps the
+  letters but not the spaces. The graphic only covers the Ravens, so the
+  opponent still comes from the official report and ESPN:
+  - Injury report: the Ravens table is taken from the graphic only while it has
+    more practice days than the website, and is laid out under the website's
+    columns. The website's own table takes over, editing the same post, once it
+    catches up. The embed footer notes when the graphic was used.
+  - Inactives: the graphic fills in the Ravens' names only while ESPN has none;
+    ESPN's list, with reasons, is used as soon as it appears.
+  - In-game injuries: while a Ravens game is live, the club's text posts such
+    as "CB Marlon Humphrey (calf) has been ruled out." are posted as they
+    appear (checked every 30 seconds), one embed per update with the player's
+    headshot, status, and a link to the post. Only posts since kickoff count,
+    and each is posted once per channel or webhook, even across restarts.
 - Trades announced with each side of the deal — who and what the Ravens got,
   who and what they gave up, and which club they dealt with.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.

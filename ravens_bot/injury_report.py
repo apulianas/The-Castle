@@ -44,10 +44,12 @@ from .chart import (
     render_chart,
     team_color as _team_color,
 )
+from .bluesky import GraphicInjuryTable
 from .models import Game, RAVENS_NAME, TeamRef
 
 
 INJURY_REPORT_URL = "https://www.baltimoreravens.com/team/injury-report/"
+_BLANK_CELLS = frozenset({"", "-", "(-)"})
 
 
 class InjuryReportError(RuntimeError):
@@ -84,6 +86,8 @@ class OfficialInjuryReport:
     tables: tuple[InjuryTable, ...]
     path: str | None = None
     matchup: InjuryMatchup | None = None
+    # Set when the Ravens' table was read from their Bluesky graphic.
+    graphic_url: str | None = None
 
     @property
     def title(self) -> str:
@@ -301,6 +305,97 @@ class InjuryReportClient:
             for table in report.tables
             for url in (*table.headshots, _table_logo_url(report, table))
         )
+
+
+def merge_graphic_table(
+    report: OfficialInjuryReport | None, graphic: GraphicInjuryTable | None
+) -> OfficialInjuryReport | None:
+    """The report with the Ravens' table taken from their graphic when newer.
+
+    The graphic goes up before the website updates, but carries only the
+    Ravens, so the opponent's table always comes from the website. Once the
+    website has as many practice days for the Ravens, its own table is kept,
+    with the player photos and spellings it publishes.
+    """
+    if graphic is None:
+        return report
+    graphic_week = _week_number(graphic.week)
+    official_week = _week_number(report.week) if report is not None else None
+    if report is not None:
+        if graphic_week is None or official_week is None:
+            if report.week.casefold() != graphic.week.casefold():
+                return report
+        elif official_week > graphic_week:
+            return report
+    if report is None or official_week != graphic_week:
+        # The website is still on last week; the Ravens are all there is yet.
+        return OfficialInjuryReport(
+            week=graphic.week,
+            tables=(_graphic_table(graphic, graphic.headers),),
+            graphic_url=graphic.post_url,
+        )
+    index = next(
+        (i for i, table in enumerate(report.tables) if table.team == RAVENS_NAME),
+        None,
+    )
+    current = report.tables[index] if index is not None else None
+    if current is not None and _practice_days(current) >= _graphic_practice_days(
+        graphic
+    ):
+        return report
+    template = current or (report.tables[0] if report.tables else None)
+    table = _graphic_table(graphic, template.headers if template else graphic.headers)
+    if index is None:
+        tables = (table, *report.tables)
+    else:
+        tables = (*report.tables[:index], table, *report.tables[index + 1:])
+    return replace(report, tables=tables, graphic_url=graphic.post_url)
+
+
+def _graphic_table(
+    graphic: GraphicInjuryTable, headers: tuple[str, ...]
+) -> InjuryTable:
+    """The graphic's rows laid out under the website's column headings."""
+    positions = {header: i for i, header in enumerate(graphic.headers)}
+    rows = tuple(
+        tuple(
+            row[positions[header]] if header in positions else "-"
+            for header in headers
+        )
+        for row in graphic.rows
+    )
+    return InjuryTable(
+        team=RAVENS_NAME,
+        headers=headers,
+        rows=rows,
+        headshots=graphic.headshots,
+    )
+
+
+def _practice_days(table: InjuryTable) -> int:
+    return _days_with_data(table.headers, table.rows)
+
+
+def _graphic_practice_days(graphic: GraphicInjuryTable) -> int:
+    return _days_with_data(graphic.headers, graphic.rows)
+
+
+def _days_with_data(
+    headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...]
+) -> int:
+    try:
+        first = headers.index("Injury") + 1
+        last = headers.index("Game Status")
+    except ValueError:
+        return 0
+    return sum(
+        1
+        for column in range(first, last)
+        if any(
+            column < len(row) and row[column].strip() not in _BLANK_CELLS
+            for row in rows
+        )
+    )
 
 
 def add_matchup(

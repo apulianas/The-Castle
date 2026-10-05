@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from .bluesky import BlueskyClient, BlueskyError, GameInjuryUpdate, NameMatcher
 from .chart import ArtworkLoader
 from .config import BotConfig, load_config, webhook_id
 from .dates import (
@@ -36,6 +37,7 @@ from .embeds import (
     fourth_down_chart_embed,
     fourth_down_embed,
     fourth_down_play_embed,
+    game_injury_embed,
     help_embed,
     inactive_embeds,
     injury_embeds,
@@ -104,6 +106,7 @@ from .injury_report import (
     InjuryReportError,
     OfficialInjuryReport,
     add_matchup,
+    merge_graphic_table,
     practice_report_date,
     render_injury_report,
 )
@@ -114,6 +117,7 @@ from .models import (
     InjuryReport,
     InjuryUpdate,
     PlayerRef,
+    RAVENS_NAME,
     SNAP_UNITS,
     SnapCountReport,
     Transaction,
@@ -173,6 +177,7 @@ MAX_PLAYER_SUGGESTIONS = 5
 MAX_TEAM_SUGGESTIONS = 8
 # Announcement keys for injury posts, shared by the first-run check.
 INJURY_KEY_PREFIX = "injury:"
+GAME_INJURY_KEY_PREFIX = "game-injury:"
 
 
 @dataclass(frozen=True)
@@ -196,6 +201,7 @@ class RavensBot(commands.Bot):
         self.artwork: ArtworkLoader | None = None
         self.official_transactions: OfficialTransactionsClient | None = None
         self.official_inactives: OfficialInactivesClient | None = None
+        self.bluesky: BlueskyClient | None = None
         self.snap_counts: SnapCountClient | None = None
         self.recaps: RecapClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
@@ -210,6 +216,7 @@ class RavensBot(commands.Bot):
         self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
         self.official_inactives = OfficialInactivesClient(self.session)
+        self.bluesky = BlueskyClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.recaps = RecapClient(self.session)
         self.announcement_state.load()
@@ -255,10 +262,14 @@ class RavensBot(commands.Bot):
         target_date = today_in_zone(self.config.time_zone)
         scheduled_report_date = False
         try:
-            official_report = await _require_injury_reports(self).fetch()
+            official_report: OfficialInjuryReport | None = await _require_injury_reports(
+                self
+            ).fetch()
         except InjuryReportError as exc:
-            LOGGER.warning("Official injury report polling skipped: %s", exc)
-        else:
+            LOGGER.warning("Official injury report unavailable: %s", exc)
+            official_report = None
+        official_report = await self._with_graphic_injuries(official_report, target_date)
+        if official_report is not None:
             official_report = await self._add_official_injury_matchup(official_report)
             report_date = practice_report_date(official_report, self.config.time_zone)
             scheduled_report_date = report_date == target_date
@@ -337,6 +348,69 @@ class RavensBot(commands.Bot):
             LOGGER.warning("Injury report matchup could not be resolved: %s", exc)
             return report
         return add_matchup(report, games)
+
+    async def _graphic_name_candidates(
+        self, report: OfficialInjuryReport | None = None
+    ) -> list[PlayerRef]:
+        """Who a Ravens graphic can name: the roster, then the website's list.
+
+        Players placed on reserve can leave ESPN's roster while still on the
+        week's report, so the website's own names cover them.
+        """
+        players: list[PlayerRef] = []
+        try:
+            players.extend((await _require_espn(self).fetch_roster()).values())
+        except EspnApiError as exc:
+            LOGGER.warning("Roster unavailable for reading Ravens graphics: %s", exc)
+        if report is not None:
+            for table in report.tables:
+                if table.team != RAVENS_NAME:
+                    continue
+                for row in table.rows:
+                    if row and row[0] not in {"", "-"}:
+                        position = row[1] if len(row) > 1 else None
+                        players.append(PlayerRef(name=row[0], position=position))
+        return players
+
+    async def _with_graphic_injuries(
+        self, report: OfficialInjuryReport | None, day: date
+    ) -> OfficialInjuryReport | None:
+        """The report with the Ravens' side from today's Bluesky graphic, if newer."""
+        if self.bluesky is None:
+            return report
+        try:
+            graphic = await self.bluesky.fetch_injury_table(
+                day,
+                self.config.time_zone,
+                await self._graphic_name_candidates(report),
+            )
+        except BlueskyError as exc:
+            LOGGER.warning("Ravens Bluesky injury graphic unavailable: %s", exc)
+            return report
+        return merge_graphic_table(report, graphic)
+
+    async def _with_graphic_inactives(
+        self, report: InactiveReport, day: date
+    ) -> InactiveReport:
+        """The Ravens' names from their Bluesky graphic while ESPN has none.
+
+        The graphic only lists the Ravens, so the opponent stays ESPN's, and
+        once ESPN carries the Ravens too its list (with reasons) is used.
+        """
+        if self.bluesky is None:
+            return report
+        if not any(side.team.is_ravens for side in report.game.teams):
+            return report
+        if any(player.is_ravens for player in report.players):
+            return report
+        try:
+            players = await self.bluesky.fetch_inactives(
+                day, self.config.time_zone, await self._graphic_name_candidates()
+            )
+        except BlueskyError as exc:
+            LOGGER.warning("Ravens Bluesky inactives graphic unavailable: %s", exc)
+            return report
+        return merge_official_inactives(report, players)
 
     async def _render_official_injury_report(
         self, report: OfficialInjuryReport
@@ -686,6 +760,10 @@ class RavensBot(commands.Bot):
         except EspnApiError as exc:
             LOGGER.warning("Inactive lists could not be fetched: %s", exc)
             return
+        reports = [
+            await self._with_graphic_inactives(report, target_date)
+            for report in reports
+        ]
         await self._post_new_inactives(targets, reports, target_date)
 
     @watch_inactives.before_loop
@@ -712,6 +790,46 @@ class RavensBot(commands.Bot):
             return
         self.fourth_downs.remember(games)
         self._idle_track_ticks = 0 if games else IDLE_TRACK_TICKS
+        for game in games:
+            if game.ravens is not None:
+                await self._post_game_injuries(game)
+
+    async def _post_game_injuries(self, game: Game) -> None:
+        """Post each in-game injury line the club puts on Bluesky, once per target.
+
+        The club posts these within a minute or two, well ahead of ESPN's
+        injury feed. Only lines since kickoff count, so a restart mid-game
+        catches up on the ones it missed without reaching back to last week.
+        """
+        bluesky = getattr(self, "bluesky", None)
+        if (
+            bluesky is None
+            or game.start_time is None
+            or not self.config.has_announcement_targets
+        ):
+            return
+        try:
+            updates = await bluesky.fetch_game_injuries(game.start_time)
+        except BlueskyError as exc:
+            LOGGER.debug("In-game injury updates skipped: %s", exc)
+            return
+        if not updates:
+            return
+        targets = await self._announcement_targets()
+        pending = [
+            update
+            for update in updates
+            if any(self._unseen(target, game_injury_key(update)) for target in targets)
+        ]
+        if not pending:
+            return
+        matcher = NameMatcher(await self._graphic_name_candidates())
+        for update in pending:
+            key = game_injury_key(update)
+            embed = game_injury_embed(update, matcher.find(update.name), game)
+            for target in targets:
+                if self._unseen(target, key):
+                    await self._announce(target, [key], [embed])
 
     @track_fourth_downs.before_loop
     async def before_track_fourth_downs(self) -> None:
@@ -773,7 +891,12 @@ def _inactives_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        reports = [await bot._with_official_inactives(report) for report in reports]
+        reports = [
+            await bot._with_official_inactives(
+                await bot._with_graphic_inactives(report, target_date)
+            )
+            for report in reports
+        ]
         if not reports:
             await interaction.followup.send(
                 embeds=inactive_embeds(reports, target_date, bot.config.time_zone)
@@ -817,9 +940,17 @@ def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     async def injuries(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            report = await _require_injury_reports(bot).fetch()
+            report: OfficialInjuryReport | None = await _require_injury_reports(
+                bot
+            ).fetch()
+            error: InjuryReportError | None = None
         except InjuryReportError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            report, error = None, exc
+        report = await bot._with_graphic_injuries(
+            report, today_in_zone(bot.config.time_zone)
+        )
+        if report is None:
+            await interaction.followup.send(embed=error_embed(str(error)), ephemeral=True)
             return
         report, image = await bot._prepare_official_injury_report(report)
         await interaction.followup.send(
@@ -1476,6 +1607,10 @@ def transaction_announcement_key(transaction: Transaction) -> str:
 
 def injury_announcement_key(update: InjuryUpdate) -> str:
     return f"{INJURY_KEY_PREFIX}{update.announcement_id}"
+
+
+def game_injury_key(update: GameInjuryUpdate) -> str:
+    return f"{GAME_INJURY_KEY_PREFIX}{update.post.uri}"
 
 
 def _official_injury_slot(report_date: date, target: int | str) -> str:
