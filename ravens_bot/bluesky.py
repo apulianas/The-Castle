@@ -573,7 +573,9 @@ _CLUB_VOICE = re.compile(
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://\S+")
-_TRADE_ASSET = re.compile(r"\b(?:acquired?|traded?|received?|for)\s+", re.IGNORECASE)
+_TRADE_ASSET = re.compile(
+    r"(?:\b(?:acquired?|traded?|received?|for|and|plus)|,)\s+", re.IGNORECASE
+)
 
 
 def _trade_post_players(description: str) -> tuple[PlayerRef, ...]:

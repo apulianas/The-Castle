@@ -707,6 +707,8 @@ def test_trade_discussion_is_not_an_announcement(text: str) -> None:
 @pytest.mark.parametrize("text", [
     "We have acquired Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
     "We have agreed in principle to a trade with the Carolina Panthers for Diontae Johnson, pending a physical.",
+    "We have acquired a 2027 fifth-round pick and Diontae Johnson from the Carolina Panthers in exchange for a 2027 third-round pick.",
+    "We have acquired a 2027 fifth-round pick, Diontae Johnson from the Carolina Panthers in exchange for a 2027 third-round pick.",
 ])
 def test_a_trade_without_player_codes_is_announced_only_once(tmp_path, text: str) -> None:
     bot, destination = _game_bot(_GameFeed(), tmp_path)
