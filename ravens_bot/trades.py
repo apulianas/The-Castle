@@ -347,7 +347,7 @@ def _assets(text: str, players: tuple[PlayerRef, ...]) -> str:
     remaining = text
     for player in players:
         if player.position:
-            pattern = rf"\b{re.escape(player.position)}s?\s+{re.escape(player.name)}"
+            pattern = rf"\b(?:{re.escape(player.position)}s?\s+)?{re.escape(player.name)}"
         else:
             pattern = re.escape(player.name)
         remaining = re.sub(pattern, "", remaining, count=1)

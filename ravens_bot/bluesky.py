@@ -36,7 +36,7 @@ from .models import (
     Transaction,
     normalize_name,
 )
-from .roster_moves import extract_players, transaction_action
+from .roster_moves import extract_named_players, extract_players, transaction_action
 from .trades import parse_trade
 
 
@@ -573,6 +573,29 @@ _CLUB_VOICE = re.compile(
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://\S+")
+_TRADE_ASSET = re.compile(r"\b(?:acquired?|traded?|received?|for)\s+", re.IGNORECASE)
+
+
+def _trade_post_players(description: str) -> tuple[PlayerRef, ...]:
+    """Recover names without codes so later move-log copies still deduplicate."""
+    players = list(extract_players(description))
+    seen = {normalize_name(player.name) for player in players}
+    for match in _TRADE_ASSET.finditer(description):
+        asset = description[match.end():]
+        position = _POSITION_WORD.match(asset)
+        if position is not None:
+            code = _POSITION_WORDS[position.group("word").lower()]
+            candidates = extract_players(f"{code} {asset[position.end():]}")
+        elif asset.split(" ", 1)[0].removesuffix("s") in POSITIONS:
+            continue
+        else:
+            candidates = extract_named_players(asset)
+        for player in candidates:
+            key = normalize_name(player.name)
+            if key not in seen:
+                seen.add(key)
+                players.append(player)
+    return tuple(players)
 
 
 def parse_roster_move(post: BlueskyPost, time_zone: ZoneInfo) -> Transaction | None:
@@ -591,7 +614,10 @@ def parse_roster_move(post: BlueskyPost, time_zone: ZoneInfo) -> Transaction | N
     ).strip()
     players = extract_players(description)
     agreement = re.match(_TRADE_AGREEMENT, description, re.IGNORECASE) is not None
-    if not players and not agreement and parse_trade(description) is None:
+    trade = parse_trade(description)
+    if agreement or trade is not None:
+        players = _trade_post_players(description)
+    if not players and not agreement and trade is None:
         return None
     return Transaction(
         transaction_id=f"{ROSTER_MOVE_ID_PREFIX}{post.uri.rsplit('/', 1)[-1]}",

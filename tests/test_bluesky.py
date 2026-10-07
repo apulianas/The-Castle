@@ -28,6 +28,7 @@ from ravens_bot.bluesky import (
 )
 from ravens_bot.bot import RavensBot, _AnnouncementTarget
 from ravens_bot.embeds import game_injury_embed, official_injury_embed, transaction_embeds
+from ravens_bot.espn import apply_roster
 from ravens_bot.injury_report import (
     InjuryTable,
     OfficialInjuryReport,
@@ -637,6 +638,16 @@ def test_other_wording_and_links_are_handled() -> None:
         assert parse_roster_move(_move_post(text), EASTERN) is None
 
 
+def test_roster_enrichment_keeps_the_announcement_url() -> None:
+    post = _move_post("We have signed WR Chris Moore.")
+    move = parse_roster_move(post, EASTERN)
+    enriched = apply_roster(move, {"chris moore": ROSTER[7]})
+
+    assert enriched.player.athlete_id == ROSTER[7].athlete_id
+    assert enriched.source_url == post.url
+    assert transaction_embeds([enriched], enriched.date)[0].url == post.url
+
+
 @pytest.mark.parametrize("text", [
     "We have traded LB Roquan Smith to the Chicago Bears for a 2027 second-round pick.",
     "We have acquired WR Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
@@ -707,9 +718,32 @@ def test_a_trade_without_player_codes_is_announced_only_once(tmp_path, text: str
         asyncio.run(bot._post_new_roster_news(
             [target], moves, InjuryReport(()), date(2026, 10, 3)
         ))
+    espn = _espn(
+        "Acquired WR Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+        PlayerRef("Diontae Johnson", position="WR"),
+    )
+    assert merge_roster_moves([espn], moves) == [espn]
+    asyncio.run(bot._post_new_roster_news(
+        [target], [espn], InjuryReport(()), date(2026, 10, 3)
+    ))
 
     assert len(destination.sent) == 1
     assert destination.sent[0][0].url == post.url
+
+
+def test_an_enriched_positionless_trade_does_not_repeat_the_player_as_an_asset() -> None:
+    move = parse_roster_move(_move_post(
+        "We have acquired Diontae Johnson from the Carolina Panthers "
+        "in exchange for WR Chris Moore and a 2027 fifth-round pick."
+    ), EASTERN)
+    enriched = apply_roster(move, {
+        "diontae johnson": PlayerRef("Diontae Johnson", "123", "WR")
+    })
+
+    assert [player.name for player in enriched.trade.incoming.players] == ["Diontae Johnson"]
+    assert enriched.trade.incoming.assets == ""
+    assert [player.name for player in enriched.trade.outgoing.players] == ["Chris Moore"]
+    assert enriched.source_url == move.source_url
 
 
 def test_only_the_day_s_moves_are_returned() -> None:
