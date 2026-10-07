@@ -85,6 +85,13 @@ class AnnouncementState:
     def current_version(self, slot: str) -> str | None:
         return self._current.get(slot)
 
+    def current_entries(self, prefix: str, target: int | str) -> dict[str, str]:
+        suffix = f"{CHANNEL_KEY_SEPARATOR}{target}"
+        return {
+            key: value for key, value in self._current.items()
+            if key.startswith(prefix) and key.endswith(suffix)
+        }
+
     def message_id(self, slot: str) -> int | None:
         value = self._current.get(f"{slot}:message-id")
         if value is None:

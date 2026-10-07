@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import discord
@@ -69,10 +70,11 @@ class FakeDestination:
         self.fails = fails
         self.posts: list[list[discord.Embed]] = []
 
-    async def send(self, embeds: list[discord.Embed]) -> None:
+    async def send(self, embeds: list[discord.Embed]) -> SimpleNamespace:
         if self.fails:
             raise discord.DiscordException("channel is unavailable")
         self.posts.append(embeds)
+        return SimpleNamespace(id=len(self.posts))
 
 
 def build_target(fails: bool = False) -> _AnnouncementTarget:
