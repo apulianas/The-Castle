@@ -5,6 +5,8 @@ import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -515,6 +517,7 @@ class _Destination:
 
     async def send(self, embeds):
         self.sent.append(embeds)
+        return SimpleNamespace(id=len(self.sent))
 
 
 class _GameFeed:
@@ -533,6 +536,10 @@ def _game_bot(feed, tmp_path):
     bot.config = type("C", (), {"time_zone": EASTERN, "has_announcement_targets": True})()
     bot.announcement_state = AnnouncementState(str(tmp_path / "state.json"))
     destination = _Destination()
+    destination.edit = AsyncMock()
+    bot.get_partial_messageable = lambda _: SimpleNamespace(
+        get_partial_message=lambda _: SimpleNamespace(edit=destination.edit)
+    )
 
     async def targets():
         return [_AnnouncementTarget("1", "channel 1", destination)]
@@ -724,7 +731,10 @@ def test_a_trade_without_player_codes_is_announced_only_once(tmp_path, text: str
         "Acquired WR Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
         PlayerRef("Diontae Johnson", position="WR"),
     )
-    assert merge_roster_moves([espn], moves) == [espn]
+    merged = merge_roster_moves([espn], moves)
+    assert len(merged) == 1
+    # An early report that includes an extra pick must not lose that detail.
+    assert merged == (moves if "pick and" in text or "pick, Diontae" in text else [espn])
     asyncio.run(bot._post_new_roster_news(
         [target], [espn], InjuryReport(()), date(2026, 10, 3)
     ))

@@ -71,7 +71,13 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   - Walkthrough weeks, when the graphic is captioned "the report is a
     practice estimation", are read like any other injury report.
 - Trades announced with each side of the deal — who and what the Ravens got,
-  who and what they gave up, and which club they dealt with.
+  who and what they gave up, and which club they dealt with. Reports are matched
+  by the deal, not the source's wording or complete player list. Richer reports
+  from either source edit the original channel or webhook post without a new
+  notification, including after a restart. Thinner repeat reports do not replace
+  known terms. Trade agreements and pick-only deals are matched too. Known legacy
+  posts without saved message IDs are left alone; failed edits are logged and
+  retried, never replaced with a new notification.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.

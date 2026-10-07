@@ -127,9 +127,11 @@ from .models import (
     InjuryUpdate,
     PlayerRef,
     RAVENS_NAME,
+    RosterNews,
     SNAP_UNITS,
     SnapCountReport,
     Transaction,
+    same_player,
 )
 from .official_inactives import (
     OfficialInactivesClient,
@@ -151,6 +153,15 @@ from .snapcounts import (
 from .recall import FourthDownMemory, RememberedSituation
 from .recap import RecapClient, RecapError, find_recap_game
 from .state import AnnouncementState, channel_key
+from .trade_news import (
+    announcement_trade,
+    decode_news,
+    encode_news,
+    prefer_trade,
+    retain_trade_context,
+    same_trade,
+    trade_version,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -485,12 +496,14 @@ class RavensBot(commands.Bot):
                 [
                     transaction
                     for transaction in transactions
-                    if self._unseen(target, transaction_announcement_key(transaction))
-                    and not self._already_moved(target, transaction)
+                    if self._pending_roster_transaction(target, transaction)
                 ],
                 unseen_updates,
             )
             for news in moves:
+                if announcement_trade(news.transaction) is not None:
+                    await self._announce_trade(target, news, target_date)
+                    continue
                 embeds, carried = roster_news_post(news, target_date)
                 transaction_key = transaction_announcement_key(news.transaction)
                 await self._announce(
@@ -702,6 +715,95 @@ class RavensBot(commands.Bot):
             channel_key(transaction_announcement_key(transaction), target.key_id)
         )
         return True
+
+    def _pending_roster_transaction(
+        self, target: _AnnouncementTarget, transaction: Transaction
+    ) -> bool:
+        if announcement_trade(transaction) is not None:
+            if (
+                not self._unseen(target, transaction_announcement_key(transaction))
+                and not self.announcement_state.current_entries("trade-post:", target.key_id)
+            ):
+                return False
+            return self._unseen(target, trade_version(transaction))
+        return (
+            self._unseen(target, transaction_announcement_key(transaction))
+            and not self._already_moved(target, transaction)
+        )
+
+    async def _announce_trade(
+        self, target: _AnnouncementTarget, news: RosterNews, target_date: date
+    ) -> None:
+        transaction = news.transaction
+        key = transaction_announcement_key(transaction)
+        version = trade_version(transaction)
+        records: list[tuple[str, RosterNews]] = []
+        for slot, raw in self.announcement_state.current_entries("trade-post:", target.key_id).items():
+            try:
+                records.append((slot, decode_news(raw)))
+            except (ValueError, TypeError, KeyError) as exc:
+                LOGGER.warning("Invalid saved trade post %s; leaving it alone: %s", slot, exc)
+                return
+        exact = [
+            record for record in records
+            if record[1].transaction.transaction_id == transaction.transaction_id
+        ]
+        matches = exact or [
+            record for record in records if same_trade(transaction, record[1].transaction)
+        ]
+        if len(matches) > 1:
+            LOGGER.warning("Ambiguous saved trade posts for %s; not posting to %s", key, target.label)
+            return
+        keys = [key, version]
+        if matches:
+            slot, previous = matches[0]
+            if prefer_trade(transaction, previous.transaction):
+                selected = retain_trade_context(transaction, previous.transaction)
+            else:
+                selected = retain_trade_context(previous.transaction, transaction)
+            if selected == previous.transaction:
+                for item in keys:
+                    self.announcement_state.mark(channel_key(item, target.key_id))
+                return
+            injuries = tuple(
+                update for update in previous.injuries
+                if not any(same_player(update.player, new.player) for new in news.injuries)
+            ) + news.injuries
+            news = RosterNews(selected, injuries)
+        else:
+            # Old releases did not save IDs; suppress known posts rather than duplicate them.
+            if not self._unseen(target, key) or (
+                not records and self._already_moved(target, transaction)
+            ):
+                self.announcement_state.mark(channel_key(version, target.key_id))
+                return
+            slot = channel_key(f"trade-post:{transaction.transaction_id}", target.key_id)
+        message_id = self.announcement_state.message_id(slot)
+        if matches and message_id is None:
+            LOGGER.warning("Trade post %s has no message ID; not duplicating it", slot)
+            return
+        embeds, _ = roster_news_post(news, target_date)
+        try:
+            if message_id is not None:
+                if isinstance(target.destination, discord.Webhook):
+                    await target.destination.edit_message(
+                        message_id, embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                else:
+                    channel = self.get_partial_messageable(int(target.key_id))
+                    await channel.get_partial_message(message_id).edit(
+                        embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
+                    )
+            else:
+                kwargs = {"wait": True} if isinstance(target.destination, discord.Webhook) else {}
+                message = await target.destination.send(embeds=embeds, **kwargs)
+                message_id = message.id
+        except discord.DiscordException as exc:
+            LOGGER.warning("Could not post or edit trade in %s: %s", target.label, exc)
+            return
+        self.announcement_state.mark_message(slot, encode_news(news), message_id)
+        for item in (*keys, *(injury_announcement_key(update) for update in news.injuries)):
+            self.announcement_state.mark(channel_key(item, target.key_id))
 
     async def _announce(
         self,

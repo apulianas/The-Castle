@@ -38,6 +38,7 @@ from .models import (
 )
 from .roster_moves import extract_named_players, extract_players, transaction_action
 from .trades import parse_trade
+from .trade_news import announcement_trade, prefer_trade, retain_trade_context, same_trade
 
 
 LOGGER = logging.getLogger(__name__)
@@ -662,22 +663,37 @@ def merge_roster_moves(
 ) -> list[Transaction]:
     """Add the club's posts for moves the other feeds do not list yet.
 
-    The club's post and ESPN's entry for the same move are worded differently,
-    so they are matched by the players they name on the same day. Once ESPN
-    lists every player a post names, ESPN's richer entry is the one kept; the
-    bot's announcement state stops it repeating a post already made.
+    Trades are matched by deal and keep the richer report, irrespective of
+    source. Other moves retain their player/day matching against the move log.
     """
     listed: dict[date, set[str]] = {}
     for item in transactions:
-        listed.setdefault(item.date, set()).update(player_keys(item))
-    return [
+        if announcement_trade(item) is None:
+            listed.setdefault(item.date, set()).update(player_keys(item))
+    combined = [
         *transactions,
         *(
             move
             for move in moves
-            if not player_keys(move) or not player_keys(move) <= listed.get(move.date, set())
+            if announcement_trade(move) is not None
+            or not player_keys(move)
+            or not player_keys(move) <= listed.get(move.date, set())
         ),
     ]
+    result: list[Transaction] = []
+    for item in combined:
+        matches = [
+            index for index, previous in enumerate(result) if same_trade(item, previous)
+        ]
+        if len(matches) == 1:
+            index = matches[0]
+            if prefer_trade(item, result[index]):
+                result[index] = retain_trade_context(item, result[index])
+            else:
+                result[index] = retain_trade_context(result[index], item)
+        else:
+            result.append(item)
+    return result
 
 
 _ENGINE: Any = None
