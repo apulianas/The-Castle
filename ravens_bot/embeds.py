@@ -250,13 +250,8 @@ def _set_transaction_art(
 
 
 def _subject_url(transaction: Transaction) -> str:
-    """Where a move's title points: the club's own log of that year's moves.
-
-    The move being posted is the one the Ravens published, so the title opens
-    the page it was read from rather than another outlet's version of it. The
-    players named in the prose still carry their own links.
-    """
-    return transaction_log_url(transaction.date.year)
+    """Open the announcement itself, falling back to the club's move log."""
+    return transaction.source_url or transaction_log_url(transaction.date.year)
 
 
 def _trade_players(transaction: Transaction) -> tuple[PlayerRef, ...]:
@@ -329,7 +324,9 @@ def _trade_embed(transaction: Transaction, target_date: date) -> discord.Embed:
     )
     _add_field_blocks(embed, _trade_blocks(transaction), reserve=ROSTER_FOOTER_RESERVE)
     _set_trade_art(embed, transaction)
-    embed.set_footer(text=_footer(format_long_date(target_date)))
+    embed.set_footer(
+        text=_footer(format_long_date(target_date), source=_moves_source([transaction]))
+    )
     return embed
 
 

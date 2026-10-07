@@ -131,8 +131,10 @@ without constructing a client.
   a day that pairs an activation with a move to injured reserve is about the
   arrival. A mass roster cut skips link markup entirely, because twenty links
   would crowd the wording out of the field's character budget. A move's title
-  links to the club's own transaction log for that year, the page the news is
-  published on, rather than to another outlet's copy of it.
+  links to the Bluesky post when that post supplied the move, otherwise to the
+  club's transaction log for that year. Bluesky trade announcements also count,
+  including agreements in principle and deals without position-coded players.
+  Agreements keep their announced wording, including any pending conditions.
 - **Cut down day** gets its own layout, because ESPN files a club's cuts as one
   run-on sentence naming thirty players. A move that sends out more players than
   a post can picture is listed by unit instead — quarterbacks, running backs,

@@ -143,6 +143,7 @@ class Transaction:
     athlete: str | None = None
     players: tuple[PlayerRef, ...] = ()
     team: TeamRef | None = None
+    source_url: str | None = None
 
     @property
     def player(self) -> PlayerRef | None:

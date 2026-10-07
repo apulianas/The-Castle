@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from ravens_bot.bluesky import (
     BlueskyClient,
@@ -24,7 +27,8 @@ from ravens_bot.bluesky import (
     posts_on,
 )
 from ravens_bot.bot import RavensBot, _AnnouncementTarget
-from ravens_bot.embeds import game_injury_embed, official_injury_embed
+from ravens_bot.embeds import game_injury_embed, official_injury_embed, transaction_embeds
+from ravens_bot.espn import apply_roster
 from ravens_bot.injury_report import (
     InjuryTable,
     OfficialInjuryReport,
@@ -634,6 +638,116 @@ def test_other_wording_and_links_are_handled() -> None:
         assert parse_roster_move(_move_post(text), EASTERN) is None
 
 
+def test_roster_enrichment_keeps_the_announcement_url() -> None:
+    post = _move_post("We have signed WR Chris Moore.")
+    move = parse_roster_move(post, EASTERN)
+    enriched = apply_roster(move, {"chris moore": ROSTER[7]})
+
+    assert enriched.player.athlete_id == ROSTER[7].athlete_id
+    assert enriched.source_url == post.url
+    assert transaction_embeds([enriched], enriched.date)[0].url == post.url
+
+
+@pytest.mark.parametrize("text", [
+    "We have traded LB Roquan Smith to the Chicago Bears for a 2027 second-round pick.",
+    "We have acquired WR Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+    "We have received WR Diontae Johnson in a trade with the Carolina Panthers.",
+    "We have acquired Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+    "We have acquired wide receiver Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+    "We have traded a 2027 fifth-round pick to the Carolina Panthers for a 2027 sixth-round pick.",
+])
+def test_bluesky_trades_link_to_the_post_and_credit_the_source(text: str) -> None:
+    post = replace(_move_post(text), handle="club.example")
+    move = parse_roster_move(post, EASTERN)
+
+    assert move is not None
+    assert move.trade is not None
+    assert move.source_url == post.url
+    assert merge_roster_moves([], [move]) == [move]
+    embed = transaction_embeds([move], move.date)[0]
+    assert embed.url == "https://bsky.app/profile/club.example/post/m1"
+    assert embed.footer.text.endswith("Baltimore Ravens via Bluesky")
+    assert "Ravens receive" in [field.name for field in embed.fields]
+
+
+@pytest.mark.parametrize("announcement", [
+    "We have agreed to terms on a trade with the Carolina Panthers for WR Diontae Johnson",
+    "We've agreed in principle to a trade with the Carolina Panthers for Diontae Johnson",
+    "The Ravens have agreed to a trade with the Carolina Panthers for a 2027 fifth-round pick",
+    "We have agreed to trade WR Chris Moore to the Carolina Panthers for a 2027 fifth-round pick",
+    "We have agreed to acquire WR Diontae Johnson from the Carolina Panthers",
+])
+def test_trade_agreements_preserve_the_announced_terms(announcement: str) -> None:
+    terms = ", pending a physical."
+    move = parse_roster_move(_move_post(f"{announcement}{terms}"), EASTERN)
+
+    assert move is not None
+    assert move.type_text == "Trade agreement"
+    assert move.description.endswith(terms)
+    assert merge_roster_moves([], [move]) == [move]
+    unrelated = _espn("Signed WR Chris Moore.", PlayerRef("Chris Moore", position="WR"))
+    if not move.players:
+        assert merge_roster_moves([unrelated], [move]) == [unrelated, move]
+    embed = transaction_embeds([move], move.date)[0]
+    assert terms in embed.description
+    assert embed.url == _move_post("").url
+
+
+@pytest.mark.parametrize("text", [
+    "We could trade WR Chris Moore to the Chicago Bears.",
+    "We have not traded WR Chris Moore to the Chicago Bears.",
+    "We have agreed to host a trade discussion on tonight's show.",
+    "We have received your trade suggestions.",
+    "Trade rumors: The Ravens have acquired WR Chris Moore.",
+])
+def test_trade_discussion_is_not_an_announcement(text: str) -> None:
+    assert parse_roster_move(_move_post(text), EASTERN) is None
+
+
+@pytest.mark.parametrize("text", [
+    "We have acquired Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+    "We have agreed in principle to a trade with the Carolina Panthers for Diontae Johnson, pending a physical.",
+    "We have acquired a 2027 fifth-round pick and Diontae Johnson from the Carolina Panthers in exchange for a 2027 third-round pick.",
+    "We have acquired a 2027 fifth-round pick, Diontae Johnson from the Carolina Panthers in exchange for a 2027 third-round pick.",
+])
+def test_a_trade_without_player_codes_is_announced_only_once(tmp_path, text: str) -> None:
+    bot, destination = _game_bot(_GameFeed(), tmp_path)
+    target = _AnnouncementTarget("1", "channel 1", destination)
+    post = _move_post(text)
+    moves = merge_roster_moves([], roster_moves_on([post], date(2026, 10, 3), EASTERN))
+
+    for _ in range(2):
+        asyncio.run(bot._post_new_roster_news(
+            [target], moves, InjuryReport(()), date(2026, 10, 3)
+        ))
+    espn = _espn(
+        "Acquired WR Diontae Johnson from the Carolina Panthers in exchange for a 2027 fifth-round pick.",
+        PlayerRef("Diontae Johnson", position="WR"),
+    )
+    assert merge_roster_moves([espn], moves) == [espn]
+    asyncio.run(bot._post_new_roster_news(
+        [target], [espn], InjuryReport(()), date(2026, 10, 3)
+    ))
+
+    assert len(destination.sent) == 1
+    assert destination.sent[0][0].url == post.url
+
+
+def test_an_enriched_positionless_trade_does_not_repeat_the_player_as_an_asset() -> None:
+    move = parse_roster_move(_move_post(
+        "We have acquired Diontae Johnson from the Carolina Panthers "
+        "in exchange for WR Chris Moore and a 2027 fifth-round pick."
+    ), EASTERN)
+    enriched = apply_roster(move, {
+        "diontae johnson": PlayerRef("Diontae Johnson", "123", "WR")
+    })
+
+    assert [player.name for player in enriched.trade.incoming.players] == ["Diontae Johnson"]
+    assert enriched.trade.incoming.assets == ""
+    assert [player.name for player in enriched.trade.outgoing.players] == ["Chris Moore"]
+    assert enriched.source_url == move.source_url
+
+
 def test_only_the_day_s_moves_are_returned() -> None:
     posts = [
         _move_post("We have signed WR Chris Moore to the Practice Squad.", "a"),
@@ -680,6 +794,7 @@ def test_espn_s_copy_of_a_posted_club_move_is_not_posted_again(tmp_path) -> None
 
     assert len(destination.sent) == 1
     assert destination.sent[0][0].footer.text.endswith("Baltimore Ravens via Bluesky")
+    assert destination.sent[0][0].url == _move_post("").url
 
 
 def test_two_espn_moves_for_one_player_are_both_posted(tmp_path) -> None:

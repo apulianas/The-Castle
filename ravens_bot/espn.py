@@ -777,15 +777,7 @@ def apply_roster(
 def replace_players(
     transaction: Transaction, players: tuple[PlayerRef, ...]
 ) -> Transaction:
-    return Transaction(
-        transaction_id=transaction.transaction_id,
-        date=transaction.date,
-        description=transaction.description,
-        type_text=transaction.type_text,
-        athlete=transaction.athlete,
-        players=players,
-        team=transaction.team,
-    )
+    return replace(transaction, players=players)
 
 
 def _athlete_id(value: Any) -> str | None:

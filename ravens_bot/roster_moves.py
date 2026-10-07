@@ -163,6 +163,24 @@ def transaction_action(description: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def extract_named_players(text: str) -> tuple[PlayerRef, ...]:
+    """Read a trade asset's leading names when no position code introduces them."""
+    players: list[PlayerRef] = []
+    cursor = 0
+    while match := _NAME_RE.match(text, cursor):
+        name = match.group(0)
+        cursor = match.end()
+        if _ends_in_generational_suffix(name) and text[cursor : cursor + 1] == ".":
+            name += "."
+            cursor += 1
+        players.append(PlayerRef(name=name))
+        separator = _SEPARATOR_RE.match(text, cursor)
+        if separator is None:
+            break
+        cursor = separator.end()
+    return tuple(players)
+
+
 @dataclass(frozen=True)
 class PlayerMove:
     """One player, and what the description says happened to them."""
