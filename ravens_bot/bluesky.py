@@ -37,6 +37,7 @@ from .models import (
     normalize_name,
 )
 from .roster_moves import extract_players, transaction_action
+from .trades import parse_trade
 
 
 LOGGER = logging.getLogger(__name__)
@@ -557,14 +558,18 @@ def game_injuries(
 ROSTER_MOVE_ID_PREFIX = "bluesky:"
 _ROSTER_VERBS = (
     "signed", "re-signed", "placed", "waived", "released", "activated",
-    "elevated", "claimed", "traded", "acquired", "designated", "reinstated",
+    "elevated", "claimed", "traded", "acquired", "received", "designated", "reinstated",
     "promoted", "terminated", "restored", "added",
+)
+_TRADE_AGREEMENT = (
+    r"agreed(?:\s+in\s+principle)?(?:\s+to\s+terms)?\s+(?:on|to)\s+"
+    r"(?:a\s+trade|trade|acquire)\b"
 )
 # "We have placed …", "We have also activated …", "The Ravens activated …":
 # the club's voice, which the move log writes as a bare verb.
 _CLUB_VOICE = re.compile(
     r"\b(?:We(?:\s+have|['’]ve)?|The\s+Ravens(?:\s+have)?)\s+(?:also\s+)?"
-    rf"(?P<verb>{'|'.join(_ROSTER_VERBS)})\b",
+    rf"(?P<verb>{'|'.join(_ROSTER_VERBS)}|{_TRADE_AGREEMENT})\b",
     re.IGNORECASE,
 )
 _URL = re.compile(r"https?://\S+")
@@ -585,16 +590,18 @@ def parse_roster_move(post: BlueskyPost, time_zone: ZoneInfo) -> Transaction | N
         lambda match: match.group("verb").capitalize(), text
     ).strip()
     players = extract_players(description)
-    if not players:
+    agreement = re.match(_TRADE_AGREEMENT, description, re.IGNORECASE) is not None
+    if not players and not agreement and parse_trade(description) is None:
         return None
     return Transaction(
         transaction_id=f"{ROSTER_MOVE_ID_PREFIX}{post.uri.rsplit('/', 1)[-1]}",
         date=post.created_at.astimezone(time_zone).date(),
         description=description,
-        type_text=transaction_action(description),
-        athlete=players[0].name,
+        type_text="Trade agreement" if agreement else transaction_action(description),
+        athlete=players[0].name if players else None,
         players=players,
         team=RAVENS,
+        source_url=post.url,
     )
 
 
@@ -640,7 +647,7 @@ def merge_roster_moves(
         *(
             move
             for move in moves
-            if not player_keys(move) <= listed.get(move.date, set())
+            if not player_keys(move) or not player_keys(move) <= listed.get(move.date, set())
         ),
     ]
 
