@@ -30,6 +30,7 @@ from .formatting import (
     format_field_goal_detail,
     format_fourth_down_call,
     format_fourth_down_chart_title,
+    format_fourth_down_history,
     format_fourth_down_instance,
     format_fourth_down_matchup,
     format_fourth_down_option,
@@ -37,6 +38,7 @@ from .formatting import (
     format_recalled_fourth_down,
     format_no_game,
     format_no_game_today,
+    format_no_team_game_today,
     format_no_live_stats,
     format_no_inactives,
     format_no_injuries,
@@ -119,6 +121,9 @@ MAX_EMBED_CHARS = 6000
 SNAP_FOOTER_RESERVE = 120
 # The live footer also carries a timestamp, so it reserves a little more.
 LIVE_FOOTER_RESERVE = 160
+# A live embed has room for the fourth downs an argument is about, not for a
+# whole game of them; the rest stay in `/fourthdowns`.
+LIVE_FOURTH_DOWNS_SHOWN = 6
 # A roster move's footer carries the report's update stamp as well as a count of
 # anything the embed could not fit.
 ROSTER_FOOTER_RESERVE = 200
@@ -988,11 +993,13 @@ def help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="/live [all_stats]",
+        name="/live [team] [all_stats]",
         value=(
             "Live score, clock, possession, and down and distance for today's "
             "game, with a player-first stats graphic and compact team totals. "
-            "Shows the final box score once the game ends."
+            "Shows the final box score once the game ends. Name any team to "
+            "follow their game instead of the Ravens. Fourth downs already "
+            "played are listed, and the latest one comes with the full call."
             " Set all_stats to true for every published player line, including "
             "defense (sacks, interceptions, and fumbles/recoveries), across multiple images."
         ),
@@ -1331,8 +1338,16 @@ def player_snap_totals_embed(
     return embed
 
 
-def no_live_game_embed(target_date: date) -> discord.Embed:
-    embed = _base_embed("Ravens live stats", format_no_game_today(target_date))
+def no_live_game_embed(
+    target_date: date, team: str | None = None
+) -> discord.Embed:
+    title = "Ravens live stats" if not team else "Live stats"
+    message = (
+        format_no_team_game_today(team, target_date)
+        if team
+        else format_no_game_today(target_date)
+    )
+    embed = _base_embed(title, message)
     embed.set_thumbnail(url=team_logo_url(RAVENS_SLUG))
     embed.set_footer(text=DATA_SOURCE)
     return embed
@@ -1355,6 +1370,21 @@ def _add_live_fields(embed: discord.Embed, report: LiveGameReport) -> None:
     _add_field_blocks(embed, blocks, LIVE_FOOTER_RESERVE)
 
 
+def _add_fourth_down_field(
+    embed: discord.Embed, report: FourthDownGameReport | None
+) -> None:
+    """The fourth downs already played, so the live view carries the argument."""
+    if report is None or not report.has_plays:
+        return
+    plays = report.plays[-LIVE_FOURTH_DOWNS_SHOWN:]
+    lines = format_fourth_down_history(plays)
+    hidden = len(report.plays) - len(plays)
+    name = "Fourth downs so far"
+    if hidden:
+        name = f"{name} (last {len(plays)} of {len(report.plays)})"
+    embed.add_field(name=name, value=_limit_field("\n".join(lines)), inline=False)
+
+
 def live_game_embed(
     report: LiveGameReport,
     time_zone: ZoneInfo,
@@ -1362,6 +1392,7 @@ def live_game_embed(
     *,
     with_chart: bool = False,
     all_stats: bool = False,
+    fourth_downs: FourthDownGameReport | None = None,
 ) -> discord.Embed:
     """A live snapshot, or the closest thing ESPN publishes for this game.
 
@@ -1401,6 +1432,7 @@ def live_game_embed(
             embed.set_image(url=f"attachment://{LIVE_CHART_FILENAME}")
         else:
             _add_live_fields(embed, report)
+        _add_fourth_down_field(embed, fourth_downs)
 
     moment = as_of or datetime.now(timezone.utc)
     stamp = format_time_of_day(moment, time_zone)

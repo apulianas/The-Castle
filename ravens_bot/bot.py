@@ -1629,22 +1629,28 @@ async def _recent_snap_reports(bot: RavensBot, weeks: int) -> list[SnapCountRepo
 
 def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
     @app_commands.command(
-        name="live", description="Show live in-game stats for the Ravens."
+        name="live", description="Show live in-game stats for a game being played."
     )
     @app_commands.describe(
-        all_stats="Show all player stats, including defense and special teams, in multiple graphics"
+        team="Optional team; omit for today's Ravens game",
+        all_stats="Show all player stats, including defense and special teams, in multiple graphics",
     )
-    async def live(interaction: discord.Interaction, all_stats: bool = False) -> None:
+    async def live(
+        interaction: discord.Interaction,
+        team: str | None = None,
+        all_stats: bool = False,
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
         today = today_in_zone(bot.config.time_zone)
         try:
-            report = await _require_espn(bot).fetch_live_game(today)
+            report = await _require_espn(bot).fetch_live_game(today, team)
         except EspnApiError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
         if report is None:
-            await interaction.followup.send(embed=no_live_game_embed(today))
+            await interaction.followup.send(embed=no_live_game_embed(today, team))
             return
+        fourth_downs = await _live_fourth_downs(bot, report.game)
         if all_stats and (report.has_details or report.players) and (
             report.game.state != "pre" or report.game.completed
         ):
@@ -1662,7 +1668,10 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
                 images = ()
             moment = datetime.now(bot.config.time_zone)
             if not images:
-                embed = live_game_embed(report, bot.config.time_zone, all_stats=True)
+                embed = live_game_embed(
+                    report, bot.config.time_zone, all_stats=True,
+                    fourth_downs=fourth_downs,
+                )
                 embed.description = (
                     f"{embed.description}\nFull stats attached as text; graphic unavailable."
                 )
@@ -1678,6 +1687,7 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
                 embed = live_game_embed(
                     report, bot.config.time_zone, as_of=moment,
                     with_chart=True, all_stats=True,
+                    fourth_downs=fourth_downs if index == 1 else None,
                 )
                 embed.set_footer(
                     text=f"Page {index}/{len(images)} \u2022 {embed.footer.text}"
@@ -1687,6 +1697,7 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
                     file=discord.File(io.BytesIO(image), filename=LIVE_CHART_FILENAME),
                     ephemeral=True,
                 )
+            await _send_latest_fourth_down(interaction, fourth_downs, ephemeral=True)
             return
         image = None
         if report.has_details and (report.game.state != "pre" or report.game.completed):
@@ -1705,7 +1716,8 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
                 )
                 image = None
         embed = live_game_embed(
-            report, bot.config.time_zone, with_chart=image is not None
+            report, bot.config.time_zone, with_chart=image is not None,
+            fourth_downs=fourth_downs,
         )
         if image is not None:
             await interaction.followup.send(
@@ -1714,8 +1726,40 @@ def _live_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
             )
         else:
             await interaction.followup.send(embed=embed)
+        await _send_latest_fourth_down(interaction, fourth_downs)
 
     return live
+
+
+async def _live_fourth_downs(
+    bot: RavensBot, game: Game
+) -> FourthDownGameReport | None:
+    """The fourth downs a game has already played, for the live view.
+
+    These come from the same summary the live stats were read from, so they
+    cost no extra request, and a game that has not kicked off has none. A
+    failure here must not cost the score, so it is logged and dropped.
+    """
+    if game.state == "pre" and not game.completed:
+        return None
+    try:
+        return await _require_espn(bot).fetch_fourth_downs(game)
+    except EspnApiError as exc:
+        LOGGER.warning("Fourth downs unavailable for the live view: %s", exc)
+        return None
+
+
+async def _send_latest_fourth_down(
+    interaction: discord.Interaction,
+    report: FourthDownGameReport | None,
+    ephemeral: bool = False,
+) -> None:
+    """The most recent fourth down in full, which is the one being argued about."""
+    if report is None or not report.has_plays:
+        return
+    await interaction.followup.send(
+        embed=fourth_down_play_embed(report, report.plays[-1]), ephemeral=ephemeral
+    )
 
 
 def _help_command() -> app_commands.Command[Any, ..., None]:
