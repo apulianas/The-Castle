@@ -37,6 +37,7 @@ from .models import (
     normalize_name,
 )
 from .roster_moves import extract_named_players, extract_players, transaction_action
+from .roster_updates import prefer_roster_move, same_roster_move
 from .trades import parse_trade
 from .trade_news import announcement_trade, prefer_trade, retain_trade_context, same_trade
 
@@ -663,31 +664,26 @@ def merge_roster_moves(
 ) -> list[Transaction]:
     """Add the club's posts for moves the other feeds do not list yet.
 
-    Trades are matched by deal and keep the richer report, irrespective of
-    source. Other moves retain their player/day matching against the move log.
+    Trades are matched by deal; other moves by player, action, and day.
+    Both keep richer reports without hiding a separate move for the same player.
     """
-    listed: dict[date, set[str]] = {}
-    for item in transactions:
-        if announcement_trade(item) is None:
-            listed.setdefault(item.date, set()).update(player_keys(item))
-    combined = [
-        *transactions,
-        *(
-            move
-            for move in moves
-            if announcement_trade(move) is not None
-            or not player_keys(move)
-            or not player_keys(move) <= listed.get(move.date, set())
-        ),
-    ]
+    combined = [*transactions, *moves]
     result: list[Transaction] = []
     for item in combined:
+        trade = announcement_trade(item) is not None
         matches = [
-            index for index, previous in enumerate(result) if same_trade(item, previous)
+            index for index, previous in enumerate(result)
+            if (
+                same_trade(item, previous) if trade else
+                announcement_trade(previous) is None and same_roster_move(item, previous)
+            )
         ]
         if len(matches) == 1:
             index = matches[0]
-            if prefer_trade(item, result[index]):
+            if not trade:
+                if prefer_roster_move(item, result[index]):
+                    result[index] = item
+            elif prefer_trade(item, result[index]):
                 result[index] = retain_trade_context(item, result[index])
             else:
                 result[index] = retain_trade_context(result[index], item)

@@ -61,13 +61,17 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
     appear (checked every 30 seconds), one embed per update with the player's
     headshot, status, and a link to the post. Only posts since kickoff count,
     and each is posted once per channel or webhook, even across restarts.
+    New in-game status updates intentionally remain separate notifications;
+    corrections to the same source post edit its existing Discord message.
     Spelled-out positions ("Center …") and surname-only follow-ups
     ("Hamilton has now returned to the game.") are understood.
   - Roster moves: posts such as "We have placed C Jovaughn Gwyn on Injured
     Reserve." are announced like any other move, usually well before ESPN or
     the club's transaction log lists them. The same move from ESPN later is
-    matched by player and day and not posted again, while ESPN's separate
-    moves for one player (a release, then a practice squad signing) still are.
+    matched by player, action, roster destination, and day. Added details edit
+    the original message instead of posting again, including after a restart.
+    Separate moves for one player (a release, then a practice squad signing)
+    still get separate posts, even when they come from different sources.
   - Walkthrough weeks, when the graphic is captioned "the report is a
     practice estimation", are read like any other injury report.
 - Trades announced with each side of the deal — who and what the Ravens got,
@@ -79,8 +83,13 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
   posts without saved message IDs are left alone; failed edits are logged and
   retried, never replaced with a new notification.
 - Duplicate announcement prevention across container restarts using `/data/state.json`.
+  State writes replace the file atomically to avoid truncated history on an
+  interrupted write.
 - Discord channel and webhook announcement targets.
 - Docker Compose setup for home-server hosting.
+
+Slash-command replies are on-demand snapshots, not background subscriptions;
+running a command again intentionally produces a new reply.
 
 ## Postgame recaps and data freshness
 
@@ -194,6 +203,8 @@ without constructing a client.
   - Last comes the Ravens' own inactives page, read only for a game that still
     has no list. It is a news article rather than a feed, so it is parsed
     leniently and a layout change costs the fallback, not the answer.
+    Week numbers must match exactly, and a trustworthy publication date must
+    match the requested day so a prior season's article is not reused.
   - A week is dated from the season schedule of the current league year, where
     January and February still belong to the previous autumn's season.
   - They are drawn as a chart image in the injury report's style: a panel per
@@ -217,12 +228,19 @@ without constructing a client.
   can still edit an existing previous day's report; stale reports do not create
   new posts. Deleted messages are replaced when the chart next changes. Posts
   created by older bot versions cannot be edited automatically because their
-  message IDs were not saved.
+  message IDs were not saved. Chart-rendering failures are logged and retried
+  rather than stopping the background poller.
 - **Roster moves that come with injury news** are one post, not two. A player
   activated off injured reserve shows up as a transaction *and* as a status
   change on the injury report, so the update rides along in the move's post
   under an "Injury report" field. The photo is the player joining the roster,
   and a post about one person keeps the full-size headshot.
+  Injury context arriving after the move edits that same post, including trades.
+  Standalone routine ESPN injury changes never generate additional posts.
+  Roster edits work for both channels and webhooks; failed edits are retried
+  without sending a replacement notification. Legacy posts without saved
+  message IDs are left alone. An unavailable ESPN transaction or injury feed
+  does not block roster announcements available from the other sources.
 - **Live stats** lead with the score, clock, quarter, possession, and down and
   distance, then show a graphic in the injury report's glass-panel style.
   Leading players per category come first, Ravens before their opponent, with

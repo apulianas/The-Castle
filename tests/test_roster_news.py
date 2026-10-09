@@ -529,7 +529,7 @@ def test_polling_again_repeats_neither_half_of_a_combined_post(tmp_path) -> None
     assert len(posts) == 1
 
 
-def test_an_injury_update_without_a_new_move_posts_for_one_player(
+def test_an_injury_update_does_not_duplicate_a_legacy_move(
     tmp_path,
 ) -> None:
     target = build_target()
@@ -543,7 +543,7 @@ def test_an_injury_update_without_a_new_move_posts_for_one_player(
 
     posts = poll(bot, target, [transaction], InjuryReport((build_update(LIKELY),)))
 
-    assert titles(posts) == ["TE Isaiah Likely — Active"]
+    assert posts == []
 
 
 def test_a_scheduled_report_day_suppresses_updates_until_the_chart_posts(
@@ -559,7 +559,6 @@ def test_a_scheduled_report_day_suppresses_updates_until_the_chart_posts(
             [],
             InjuryReport((update,)),
             TARGET_DATE,
-            scheduled_report_date=True,
         )
     )
 
@@ -568,7 +567,7 @@ def test_a_scheduled_report_day_suppresses_updates_until_the_chart_posts(
 
 
 @pytest.mark.parametrize("version", ["posted", "official-injury:week-2:partial"])
-def test_a_chart_establishes_the_baseline_then_later_updates_post_individually(
+def test_routine_injury_changes_stay_in_the_chart(
     tmp_path,
     version,
 ) -> None:
@@ -585,7 +584,6 @@ def test_a_chart_establishes_the_baseline_then_later_updates_post_individually(
             [],
             InjuryReport((baseline,)),
             TARGET_DATE,
-            scheduled_report_date=True,
         )
     )
     changed = InjuryUpdate(
@@ -600,11 +598,10 @@ def test_a_chart_establishes_the_baseline_then_later_updates_post_individually(
             [],
             InjuryReport((changed,)),
             TARGET_DATE,
-            scheduled_report_date=True,
         )
     )
 
-    assert titles(target.destination.posts) == ["TE Isaiah Likely — Out"]
+    assert target.destination.posts == []
 
 
 def test_a_first_run_posts_only_the_move_with_its_injury_context(

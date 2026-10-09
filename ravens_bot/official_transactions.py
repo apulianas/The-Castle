@@ -142,7 +142,7 @@ class OfficialTransactionsClient:
             ) as response:
                 response.raise_for_status()
                 page = await response.text()
-        except (aiohttp.ClientError, UnicodeError) as exc:
+        except (aiohttp.ClientError, TimeoutError, UnicodeError) as exc:
             raise OfficialTransactionsError(
                 "The official Ravens transaction log could not be fetched."
             ) from exc

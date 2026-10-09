@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -115,12 +117,27 @@ class AnnouncementState:
         self.save()
 
     def save(self) -> None:
+        temporary: Path | None = None
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             payload: dict[str, Any] = {
                 "announced": sorted(self._announced),
                 "current": dict(sorted(self._current.items())),
             }
-            self._path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self._path.parent,
+                prefix=f".{self._path.name}.", suffix=".tmp", delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                json.dump(payload, output, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, self._path)
         except OSError as exc:
             LOGGER.warning("Could not write announcement state: %s", exc)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as exc:
+                    LOGGER.warning("Could not remove temporary announcement state: %s", exc)

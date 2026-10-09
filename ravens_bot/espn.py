@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable, Iterable, Sequence
@@ -1754,6 +1755,8 @@ class EspnClient:
                 data = await response.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise EspnApiError(f"Could not reach ESPN API: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise EspnApiError("ESPN API returned an invalid JSON response") from exc
         if not isinstance(data, dict):
             raise EspnApiError("ESPN API returned an unexpected response")
         return data
