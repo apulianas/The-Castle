@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import discord
 
+from .draft import (
+    CHART_NAMES,
+    DRAFTTEK_URL,
+    MAX_PACKAGE_PICKS,
+    RICH_HILL_URL,
+    DraftSnapshot,
+    TradePlan,
+)
 from .espn_urls import (
     HEADSHOT_FEATURE_WIDTH,
     game_url,
@@ -944,6 +953,130 @@ def no_fourth_down_embed(message: str, game: Game | None = None) -> discord.Embe
     return embed
 
 
+def _draft_points(value: Decimal) -> str:
+    text = format(value, ",f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def draft_picks_embed(snapshot: DraftSnapshot, plan: TradePlan | None = None) -> discord.Embed:
+    chart = CHART_NAMES[snapshot.chart]
+    embed = _base_embed(
+        f"Ravens {snapshot.year} draft picks | {chart}",
+        "Projected slots and ownership as listed by Drafttek, not final draft positions. "
+        "Trades and compensatory-pick projections can change.",
+        url=DRAFTTEK_URL,
+    )
+    if plan is None:
+        for round_number in range(1, 8):
+            picks = [pick for pick in snapshot.ravens if pick.round == round_number]
+            if picks:
+                embed.add_field(
+                    name=f"Round {round_number}",
+                    value="\n".join(
+                        f"#{pick.number} - **{_draft_points(pick.value)} pts**" for pick in picks
+                    ),
+                    inline=True,
+                )
+        total = sum((pick.value for pick in snapshot.ravens), Decimal(0))
+        embed.add_field(
+            name="Current-draft total",
+            value=f"**{len(snapshot.ravens)} picks | {_draft_points(total)} pts**",
+            inline=False,
+        )
+        if not snapshot.ravens:
+            embed.add_field(
+                name="No Ravens picks listed",
+                value="Drafttek's current inventory contains no picks assigned to BAL.",
+                inline=False,
+            )
+        if snapshot.ravens_future:
+            embed.add_field(
+                name="Hypothetical next-year assets (not included in total)",
+                value="\n".join(
+                    f"{pick.label} - {_draft_points(pick.value)} pts"
+                    for pick in snapshot.ravens_future
+                ),
+                inline=False,
+            )
+    else:
+        target = plan.target
+        embed.title = f"{snapshot.year} pick #{target.number} | {chart}"
+        embed.add_field(
+            name=f"Round {target.round} | Listed owner: {target.team}",
+            value=f"**{_draft_points(target.value)} pts**",
+            inline=False,
+        )
+        if target.team == "BAL":
+            embed.add_field(
+                name="Already a Ravens pick",
+                value="Drafttek currently lists Baltimore as the owner; no trade is needed.",
+                inline=False,
+            )
+        else:
+            for index, package in enumerate(plan.current + plan.future, 1):
+                surplus = package.value - target.value
+                future = any(pick.future for pick in package.picks)
+                embed.add_field(
+                    name=f"Option {index}" + (" | Includes hypothetical future picks" if future else " | Current draft only"),
+                    value="\n".join(
+                        f"{pick.label}: {_draft_points(pick.value)} pts" for pick in package.picks
+                    ) + (
+                        f"\n**Total: {_draft_points(package.value)} pts**"
+                        f" | Extra: {_draft_points(surplus)} pts ({surplus / target.value:.1%})"
+                    ),
+                    inline=False,
+                )
+            if not plan.current:
+                embed.add_field(
+                    name="Current-draft picks cannot cover the target",
+                    value=f"No package of up to {MAX_PACKAGE_PICKS} listed Ravens picks reaches the target value.",
+                    inline=False,
+                )
+            if not plan.current and not plan.future and plan.strongest is not None:
+                shortfall = target.value - plan.strongest.value
+                embed.add_field(
+                    name="Still short with hypothetical future assets",
+                    value=(
+                        f"The strongest available package of up to {MAX_PACKAGE_PICKS} picks is worth "
+                        f"{_draft_points(plan.strongest.value)} pts, short by {_draft_points(shortfall)} pts. "
+                        "No chart-equivalent package was found within these assumptions."
+                    ),
+                    inline=False,
+                )
+            embed.add_field(
+                name="How options are chosen",
+                value=(
+                    f"Searches packages of up to {MAX_PACKAGE_PICKS} picks that meet or exceed the target; "
+                    "smallest surplus first, then fewest picks. Shows up to two current-only options "
+                    "and one with future assets. No players, return picks, or trade premiums modeled. "
+                    "Chart equivalence does not mean the other team would accept."
+                ),
+                inline=False,
+            )
+    future_note = (
+        "Next-year R1/R2 assets are hypothetical: ownership is unverified. "
+        "Values use Drafttek's projected team quartile, discounted one round. "
+        + (
+            "Rich Hill estimates apply that same method to Rich Hill points. "
+            if snapshot.chart == "rich_hill" else ""
+        )
+        + "No later years or unlisted future rounds are assumed."
+    )
+    if not snapshot.future_available:
+        future_note += " Drafttek's Ravens future estimates are missing or incomplete."
+    embed.add_field(name="Future-pick assumptions", value=future_note, inline=False)
+    sources = f"[Ownership and JJ values]({DRAFTTEK_URL})"
+    if snapshot.chart == "rich_hill":
+        sources += f" | [Rich Hill values]({RICH_HILL_URL})"
+    embed.add_field(name="Drafttek sources", value=sources, inline=False)
+    embed.set_footer(text=_footer(
+        f"Source update: {snapshot.updated}" if snapshot.updated else "Source update not published",
+        f"Fetched {snapshot.fetched_at:%Y-%m-%d %H:%M UTC} | Cached up to 1 hour",
+        source="Drafttek",
+    ))
+    return embed
+
+
 def help_embed() -> discord.Embed:
     embed = _base_embed(
         "The Castle commands",
@@ -1009,6 +1142,15 @@ def help_embed() -> discord.Embed:
     embed.add_field(
         name="/recap [date]",
         value="Postgame final score, Ravens efficiency, passing/rushing leaders, and win-probability swings. Omit the date for the latest completed REG/POST game. NFLverse batch data can lag.",
+        inline=False,
+    )
+    embed.add_field(
+        name="/draftpicks [pick] [chart]",
+        value=(
+            "Ravens projected picks and Jimmy Johnson points. Supply an overall pick "
+            "for chart-equivalent trade packages, including clearly labeled hypothetical "
+            "next-year assets. Choose rich_hill for Rich Hill values."
+        ),
         inline=False,
     )
     embed.add_field(

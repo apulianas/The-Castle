@@ -38,8 +38,10 @@ from .dates import (
     today_in_zone,
     upcoming_window,
 )
+from .draft import Chart, DraftClient, DraftError, MAX_PICK_NUMBER
 from .embeds import (
     INACTIVE_CHART_FILENAME,
+    draft_picks_embed,
     error_embed,
     field_goal_embed,
     fourth_down_chart_embed,
@@ -168,6 +170,7 @@ LOGGER = logging.getLogger(__name__)
 ScheduleDays = app_commands.Range[int, 1, MAX_SCHEDULE_DAYS]
 SnapWeeks = app_commands.Range[int, 1, MAX_SNAP_GAMES]
 KickYards = app_commands.Range[int, MIN_FIELD_GOAL_YARDS, LONGEST_ASKABLE_FIELD_GOAL]
+DraftPickNumber = app_commands.Range[int, 1, MAX_PICK_NUMBER]
 # More fourth downs than this in one game has never happened, so a larger number
 # is a typo rather than a row of the chart.
 FourthDownInstance = app_commands.Range[int, 1, MAX_FOURTH_DOWN_INSTANCE]
@@ -225,6 +228,7 @@ class RavensBot(commands.Bot):
         self.bluesky: BlueskyClient | None = None
         self.snap_counts: SnapCountClient | None = None
         self.recaps: RecapClient | None = None
+        self.draft_picks: DraftClient | None = None
         self.announcement_state = AnnouncementState(config.state_file)
         self.fourth_downs = FourthDownMemory()
         self._idle_track_ticks = 0
@@ -240,6 +244,7 @@ class RavensBot(commands.Bot):
         self.bluesky = BlueskyClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.recaps = RecapClient(self.session)
+        self.draft_picks = DraftClient(self.session)
         self.announcement_state.load()
         self.tree.add_command(_transactions_command(self))
         self.tree.add_command(_inactives_command(self))
@@ -249,6 +254,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_live_command(self))
         self.tree.add_command(_schedule_command(self))
         self.tree.add_command(_recap_command(self))
+        self.tree.add_command(_draftpicks_command(self))
         self.tree.add_command(_snapcounts_command(self))
         self.tree.add_command(_fourthdown_command(self))
         self.tree.add_command(_fourthdowns_command(self))
@@ -1128,6 +1134,35 @@ def _recap_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         await interaction.followup.send(embed=recap_embed(report, bot.config.time_zone))
 
     return recap
+
+
+def _draftpicks_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(name="draftpicks", description="Value the Ravens' projected draft picks or plan a trade for a pick.")
+    @app_commands.describe(
+        pick="Overall pick to acquire; omit for the Ravens' projected inventory",
+        chart="Value chart: Jimmy Johnson (default) or Rich Hill",
+    )
+    async def draftpicks(
+        interaction: discord.Interaction,
+        pick: DraftPickNumber | None = None,
+        chart: Chart = "jj",
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if bot.draft_picks is None:
+                raise DraftError("The draft-pick client is not ready.")
+            snapshot = await bot.draft_picks.fetch(chart)
+            plan = await bot.draft_picks.trade(snapshot, pick) if pick is not None else None
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except DraftError as exc:
+            LOGGER.warning("Draft picks unavailable: %s", exc)
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.followup.send(embed=draft_picks_embed(snapshot, plan))
+
+    return draftpicks
 
 
 def _snapcounts_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
