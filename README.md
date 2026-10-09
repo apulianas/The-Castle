@@ -12,6 +12,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
     as `week 5` or `wk5`, or a postseason round such as `wild card`.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/standings` — AFC North standings, with the Ravens highlighted.
+  - `/draftpicks [pick] [chart]` — the Ravens' projected draft inventory and Jimmy
+    Johnson points; supply an overall pick number for trade-package estimates.
+    Choose `chart:rich_hill` for Rich Hill values instead.
   - `/nextgame` — the next Ravens matchup.
   - `/live [all_stats]` — live score, clock, possession, and a player-first stats graphic for today's game. Use `/live all_stats:true` for the full player box score.
   - `/recap [date]` — final score, offensive efficiency, passing/rushing leaders,
@@ -90,6 +93,41 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 Slash-command replies are on-demand snapshots, not background subscriptions;
 running a command again intentionally produces a new reply.
+
+## Draft-pick values and trade estimates
+
+`/draftpicks` reads the current draft year, projected slots, and pick ownership
+from [Drafttek's trade-value chart](https://www.drafttek.com/nfl-trade-value-chart.asp).
+It lists each Baltimore pick by round and overall number, its Jimmy Johnson (JJ)
+value, and the current-draft total. These are Drafttek projections, not the final
+draft order or a live standings calculation. Traded and compensatory picks are
+included only as listed by that source. The report shows the source update and
+fetch time; successful reads are cached for an hour. Fetch failures or invalid
+inventories produce an explicit error rather than fabricated picks or values.
+
+`/draftpicks pick:10` values that pick and finds packages of up to five Ravens
+picks worth at least that many points. Options minimize surplus points, then
+the number of picks; the report shows up to two current-draft packages and one
+package containing hypothetical future picks, with totals and overpayment.
+It identifies picks already owned by Baltimore and reports when no package can
+reach the target within the search limits. Players, return picks, and market
+premiums (especially for quarterbacks) are not modeled. These are chart-equivalent
+offers, not predictions that another team would accept a trade.
+
+Future assets are **hypothetical, not a verified ownership ledger**: only the
+next year's first- and second-round estimates published by Drafttek are used.
+Drafttek discounts these one round, using the midpoint of the corresponding
+eight-slot quartile in the next round of the current draft. Future assets are
+listed separately and never included in the current-draft total. Missing future
+estimates are disclosed; no later years or other future rounds are invented.
+
+Use `/draftpicks chart:rich_hill` (also supported with `pick`) to substitute
+[Rich Hill values](https://www.drafttek.com/NFL-Trade-Value-Chart-Rich-Hill.asp).
+Ownership always comes from the main chart, since alternate-chart inventories
+can differ. Hypothetical Rich Hill future values apply the same quartile and
+one-round-discount method to Rich Hill points; they are calculated estimates,
+not Drafttek-published future Rich Hill values. Points from different charts
+are never mixed. Fitzgerald-Spielberger values are not currently supported.
 
 ## Postgame recaps and data freshness
 

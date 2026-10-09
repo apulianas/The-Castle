@@ -405,6 +405,7 @@ def test_help_embed_documents_every_command() -> None:
         "/nextgame",
         "/live",
         "/recap",
+        "/draftpicks",
         "/schedule",
         "/snapcounts",
         "/fourthdown",
