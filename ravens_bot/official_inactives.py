@@ -27,7 +27,7 @@ INACTIVES_URL = "https://www.baltimoreravens.com/news/inactives"
 # navigation or a related-articles rail rather than an inactive list.
 MAX_OFFICIAL_INACTIVES = 20
 # Headlines date themselves as "Week 3" or by opponent; the published stamp is
-# what a date is matched on, so a listing entry without one is skipped.
+# what a date is matched on. An undated listing needs a stamp in its article.
 _DATE_ATTRIBUTES = ("datetime", "data-date", "content")
 
 
@@ -55,6 +55,14 @@ def _parse_stamp(raw: str | None) -> date | None:
     return None
 
 
+def _attribute_stamp(attrs: list[tuple[str, str | None]]) -> date | None:
+    for name in _DATE_ATTRIBUTES:
+        stamp = _parse_stamp(_attribute(attrs, name))
+        if stamp is not None:
+            return stamp
+    return None
+
+
 class _ListingParser(HTMLParser):
     """Article links on the inactives news page, with whatever date they carry."""
 
@@ -72,7 +80,7 @@ class _ListingParser(HTMLParser):
             if "/news/" in href:
                 self._href = href
                 self._text = []
-                self._stamp = None
+                self._stamp = _attribute_stamp(attrs)
                 self._depth = 1
                 return
         if self._href is None:
@@ -80,11 +88,7 @@ class _ListingParser(HTMLParser):
         if tag == "a":
             self._depth += 1
         if self._stamp is None:
-            for name in _DATE_ATTRIBUTES:
-                stamp = _parse_stamp(_attribute(attrs, name))
-                if stamp is not None:
-                    self._stamp = stamp
-                    break
+            self._stamp = _attribute_stamp(attrs)
 
     def handle_data(self, data: str) -> None:
         if self._href is not None:
@@ -122,11 +126,7 @@ class _ArticleParser(HTMLParser):
             self._skipping += 1
             return
         if self.stamp is None:
-            for name in _DATE_ATTRIBUTES:
-                stamp = _parse_stamp(_attribute(attrs, name))
-                if stamp is not None:
-                    self.stamp = stamp
-                    break
+            self.stamp = _attribute_stamp(attrs)
         if tag in self._BLOCKS:
             self._flush()
             self._text = []
@@ -156,7 +156,7 @@ class _ArticleParser(HTMLParser):
 
 
 def _week_label(week: str | None) -> str | None:
-    match = re.search(r"week\s*#?\s*(\d{1,2})", (week or "").casefold())
+    match = re.search(r"\bweek\s*#?\s*(\d{1,2})\b", (week or "").casefold())
     return f"week {int(match.group(1))}" if match else None
 
 
@@ -169,7 +169,7 @@ def article_matches(
         # kickoff and the club's own time zone.
         return abs((stamp - target_date).days) <= 1
     label = _week_label(week)
-    return bool(label) and label in headline.casefold()
+    return bool(label) and label == _week_label(headline)
 
 
 def parse_inactive_names(page: str) -> tuple[InactivePlayer, ...]:
@@ -234,7 +234,7 @@ class OfficialInactivesClient:
             ) as response:
                 response.raise_for_status()
                 return await response.text()
-        except (aiohttp.ClientError, UnicodeError) as exc:
+        except (aiohttp.ClientError, TimeoutError, UnicodeError) as exc:
             raise OfficialInactivesError(
                 "The official Ravens inactives page could not be fetched."
             ) from exc
@@ -250,6 +250,16 @@ class OfficialInactivesClient:
             if not article_matches(headline, stamp, target_date, week):
                 continue
             page = await self._page(urljoin(INACTIVES_URL, href))
+            if stamp is None:
+                # A week repeats every season; only a publication date can
+                # confirm that an undated listing is for the requested game.
+                article = _ArticleParser()
+                article.feed(page)
+                article.close()
+                if article.stamp is None or not article_matches(
+                    headline, article.stamp, target_date, week
+                ):
+                    continue
             players = parse_inactive_names(page)
             if players:
                 return players

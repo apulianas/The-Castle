@@ -255,7 +255,8 @@ def _latest_practice_day(table: InjuryTable) -> str | None:
         return None
     for column in range(game_status_column - 1, injury_column, -1):
         if any(
-            column < len(row) and row[column] not in {"", "-"} for row in table.rows
+            column < len(row) and row[column].strip() not in _BLANK_CELLS
+            for row in table.rows
         ):
             return table.headers[column]
     return None
@@ -291,7 +292,7 @@ class InjuryReportClient:
             ) as response:
                 response.raise_for_status()
                 page = await response.text()
-        except (aiohttp.ClientError, UnicodeError) as exc:
+        except (aiohttp.ClientError, TimeoutError, UnicodeError) as exc:
             raise InjuryReportError(
                 "The official Ravens injury report could not be fetched."
             ) from exc

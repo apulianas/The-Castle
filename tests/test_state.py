@@ -93,3 +93,31 @@ def test_invalid_saved_message_id_is_logged(tmp_path, caplog) -> None:
     state.mark_current("official-injury@123:message-id", "invalid")
     assert state.message_id("official-injury@123") is None
     assert "Invalid saved message ID" in caplog.text
+
+
+def test_failed_atomic_replace_preserves_previous_state(tmp_path, monkeypatch, caplog) -> None:
+    path = tmp_path / "state.json"
+    state = AnnouncementState(str(path))
+    state.mark_message("roster-post:one@123", "first", 987)
+    original = path.read_bytes()
+
+    def fail_replace(source, destination):
+        assert json.loads(source.read_text(encoding="utf-8"))["current"]["roster-post:one@123"] == "new"
+        assert destination == path
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("ravens_bot.state.os.replace", fail_replace)
+    state.mark_message("roster-post:one@123", "new", 987)
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+    assert "Could not write announcement state" in caplog.text
+
+
+def test_successful_atomic_save_leaves_no_temporary_files(tmp_path) -> None:
+    state = AnnouncementState(str(tmp_path / "state.json"))
+    state.mark_message("roster-post:one@123", "first", 987)
+    state.mark_message("roster-post:one@123", "updated", 987)
+    state.load()
+    assert state.current_version("roster-post:one@123") == "updated"
+    assert state.message_id("roster-post:one@123") == 987
+    assert [path.name for path in tmp_path.iterdir()] == ["state.json"]

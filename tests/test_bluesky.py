@@ -782,13 +782,13 @@ def test_a_club_post_espn_already_lists_is_left_out() -> None:
     assert merge_roster_moves([], [move]) == [move]
 
 
-def test_a_partly_listed_club_post_is_still_added() -> None:
+def test_a_partly_listed_club_post_enriches_the_same_move() -> None:
     move = parse_roster_move(
         _move_post("We have placed C Jovaughn Gwyn and C Ethan Pocic on Injured Reserve."), EASTERN
     )
     espn = _espn("Placed C Ethan Pocic on injured reserve.", PlayerRef("Ethan Pocic", position="C"))
 
-    assert merge_roster_moves([espn], [move]) == [espn, move]
+    assert merge_roster_moves([espn], [move]) == [move]
 
 
 def test_espn_s_copy_of_a_posted_club_move_is_not_posted_again(tmp_path) -> None:

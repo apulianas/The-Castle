@@ -48,7 +48,6 @@ from .embeds import (
     game_injury_embed,
     help_embed,
     inactive_embeds,
-    injury_embeds,
     live_game_embed,
     next_game_embed,
     no_field_goal_embed,
@@ -153,6 +152,7 @@ from .snapcounts import (
 from .recall import FourthDownMemory, RememberedSituation
 from .recap import RecapClient, RecapError, find_recap_game
 from .state import AnnouncementState, channel_key
+from .roster_updates import prefer_roster_move, same_roster_move
 from .trade_news import (
     announcement_trade,
     decode_news,
@@ -281,7 +281,6 @@ class RavensBot(commands.Bot):
         if not targets:
             return
         target_date = today_in_zone(self.config.time_zone)
-        scheduled_report_date = False
         try:
             official_report: OfficialInjuryReport | None = await _require_injury_reports(
                 self
@@ -293,7 +292,6 @@ class RavensBot(commands.Bot):
         if official_report is not None:
             official_report = await self._add_official_injury_matchup(official_report)
             report_date = practice_report_date(official_report, self.config.time_zone)
-            scheduled_report_date = report_date == target_date
             if report_date is None:
                 LOGGER.warning(
                     "Official injury report has no dated practice data: %s",
@@ -302,16 +300,20 @@ class RavensBot(commands.Bot):
             elif report_date <= target_date:
                 await self._post_official_injury_report(
                     targets, official_report, report_date,
-                    allow_new=scheduled_report_date,
+                    allow_new=report_date == target_date,
                 )
 
         client = _require_espn(self)
         try:
             transactions = await client.fetch_transactions(target_date)
+        except EspnApiError as exc:
+            LOGGER.warning("ESPN transaction polling skipped: %s", exc)
+            transactions = []
+        try:
             injuries = await client.fetch_injuries()
         except EspnApiError as exc:
-            LOGGER.warning("Polling skipped because ESPN data could not be fetched: %s", exc)
-            return
+            LOGGER.warning("Roster injury context unavailable: %s", exc)
+            injuries = InjuryReport()
         try:
             elevations = await _require_official_transactions(
                 self
@@ -326,7 +328,6 @@ class RavensBot(commands.Bot):
             transactions,
             injuries,
             target_date,
-            scheduled_report_date=scheduled_report_date,
         )
 
     async def _post_official_injury_report(
@@ -350,7 +351,14 @@ class RavensBot(commands.Bot):
                 pending.append(target)
         if not pending:
             return
-        image = image or await self._render_official_injury_report(report)
+        try:
+            image = image or await self._render_official_injury_report(report)
+        except (InjuryReportError, OSError, ValueError) as exc:
+            LOGGER.warning("Official injury chart could not be drawn; will retry: %s", exc)
+            return
+        if len(image) > MAX_ATTACHMENT_BYTES:
+            LOGGER.warning("Official injury chart is too large to post: %d bytes", len(image))
+            return
         for target in pending:
             await self._announce_report(
                 target,
@@ -474,88 +482,12 @@ class RavensBot(commands.Bot):
         transactions: list[Transaction],
         report: InjuryReport,
         target_date: date,
-        scheduled_report_date: bool = False,
     ) -> None:
-        """Post roster moves and individual injury news without chart repeats.
-
-        A move and the injury report entry it produces are the same news, so a
-        player activated off injured reserve gets one informative post. On a
-        scheduled report day, the chart establishes the injury baseline; later
-        changes are posted one player at a time.
-        """
+        """Keep roster posts current; routine injuries belong to the daily chart."""
         for target in targets:
-            had_injury_history = self.announcement_state.has_target_keys(
-                INJURY_KEY_PREFIX, target.key_id
-            )
-            unseen_updates = [
-                update
-                for update in report.updates
-                if self._unseen(target, injury_announcement_key(update))
-            ]
-            moves, standalone = combine_roster_news(
-                [
-                    transaction
-                    for transaction in transactions
-                    if self._pending_roster_transaction(target, transaction)
-                ],
-                unseen_updates,
-            )
+            moves, _ = combine_roster_news(transactions, report.updates)
             for news in moves:
-                if announcement_trade(news.transaction) is not None:
-                    await self._announce_trade(target, news, target_date)
-                    continue
-                embeds, carried = roster_news_post(news, target_date)
-                transaction_key = transaction_announcement_key(news.transaction)
-                await self._announce(
-                    target,
-                    [
-                        transaction_key,
-                        *moved_player_keys(news.transaction),
-                        *(injury_announcement_key(update) for update in carried),
-                    ],
-                    embeds,
-                )
-                if not self._unseen(target, transaction_key):
-                    for update in news.injuries:
-                        self.announcement_state.mark(
-                            channel_key(
-                                injury_announcement_key(update),
-                                target.key_id,
-                            )
-                        )
-            remaining = [
-                update
-                for update in standalone
-                if self._unseen(target, injury_announcement_key(update))
-            ]
-            chart_is_current = self.announcement_state.current_version(
-                _official_injury_slot(target_date, target.key_id)
-            ) is not None
-            baseline_slot = _injury_baseline_slot(target_date, target.key_id)
-            needs_chart_baseline = (
-                scheduled_report_date
-                and chart_is_current
-                and not self.announcement_state.is_current(baseline_slot, "applied")
-            )
-            if not had_injury_history or needs_chart_baseline:
-                for update in remaining:
-                    self.announcement_state.mark(
-                        channel_key(
-                            injury_announcement_key(update),
-                            target.key_id,
-                        )
-                    )
-                if needs_chart_baseline:
-                    self.announcement_state.mark_current(baseline_slot, "applied")
-                continue
-            if scheduled_report_date and not chart_is_current:
-                continue
-            for update in remaining:
-                await self._announce(
-                    target,
-                    [injury_announcement_key(update)],
-                    injury_embeds(InjuryReport((update,))),
-                )
+                await self._announce_roster_news(target, news, target_date)
 
     async def _post_new_inactives(
         self,
@@ -690,13 +622,10 @@ class RavensBot(commands.Bot):
         return self.announcement_state.unseen(channel_key(key, target.key_id))
 
     def _already_moved(self, target: _AnnouncementTarget, transaction: Transaction) -> bool:
-        """Whether the other source already posted this move to the target.
+        """Suppress legacy cross-source posts whose message IDs were not saved.
 
-        The club's post and ESPN's entry describe the same move in different
-        words, so they are matched by player and day. Only the other source
-        counts: ESPN files a release and the practice squad signing that follows
-        as two moves, and both are news. A move found to be a repeat is recorded
-        so it is not weighed again.
+        Legacy state only knows player/day, not actions. New posts use the
+        complete saved transaction instead.
         """
         names = player_keys(transaction)
         if not names:
@@ -716,123 +645,95 @@ class RavensBot(commands.Bot):
         )
         return True
 
-    def _pending_roster_transaction(
-        self, target: _AnnouncementTarget, transaction: Transaction
-    ) -> bool:
-        if announcement_trade(transaction) is not None:
-            if (
-                not self._unseen(target, transaction_announcement_key(transaction))
-                and not self.announcement_state.current_entries("trade-post:", target.key_id)
-            ):
-                return False
-            return self._unseen(target, trade_version(transaction))
-        return (
-            self._unseen(target, transaction_announcement_key(transaction))
-            and not self._already_moved(target, transaction)
-        )
-
-    async def _announce_trade(
+    async def _announce_roster_news(
         self, target: _AnnouncementTarget, news: RosterNews, target_date: date
     ) -> None:
         transaction = news.transaction
         key = transaction_announcement_key(transaction)
-        version = trade_version(transaction)
+        trade = announcement_trade(transaction) is not None
+        kind = "trade" if trade else "roster"
+        prefix = f"{kind}-post:"
         records: list[tuple[str, RosterNews]] = []
-        for slot, raw in self.announcement_state.current_entries("trade-post:", target.key_id).items():
+        for slot, raw in self.announcement_state.current_entries(prefix, target.key_id).items():
             try:
                 records.append((slot, decode_news(raw)))
             except (ValueError, TypeError, KeyError) as exc:
-                LOGGER.warning("Invalid saved trade post %s; leaving it alone: %s", slot, exc)
+                LOGGER.warning("Invalid saved %s post %s; leaving it alone: %s", kind, slot, exc)
                 return
         exact = [
             record for record in records
             if record[1].transaction.transaction_id == transaction.transaction_id
         ]
         matches = exact or [
-            record for record in records if same_trade(transaction, record[1].transaction)
+            record for record in records
+            if (same_trade if trade else same_roster_move)(transaction, record[1].transaction)
         ]
         if len(matches) > 1:
-            LOGGER.warning("Ambiguous saved trade posts for %s; not posting to %s", key, target.label)
+            LOGGER.warning("Ambiguous saved %s posts for %s; not posting to %s", kind, key, target.label)
             return
-        keys = [key, version]
+        keys = [key]
+        if trade:
+            keys.append(trade_version(transaction))
         if matches:
             slot, previous = matches[0]
-            if prefer_trade(transaction, previous.transaction):
-                selected = retain_trade_context(transaction, previous.transaction)
+            if (prefer_trade if trade else prefer_roster_move)(transaction, previous.transaction):
+                selected, other = transaction, previous.transaction
             else:
-                selected = retain_trade_context(previous.transaction, transaction)
-            if selected == previous.transaction:
-                for item in keys:
-                    self.announcement_state.mark(channel_key(item, target.key_id))
-                return
+                selected, other = previous.transaction, transaction
+            if trade:
+                selected = retain_trade_context(selected, other)
             injuries = tuple(
                 update for update in previous.injuries
                 if not any(same_player(update.player, new.player) for new in news.injuries)
             ) + news.injuries
             news = RosterNews(selected, injuries)
+            if news == previous:
+                for item in keys:
+                    if self._unseen(target, item):
+                        self.announcement_state.mark(channel_key(item, target.key_id))
+                return
         else:
             # Old releases did not save IDs; suppress known posts rather than duplicate them.
-            if not self._unseen(target, key) or (
-                not records and self._already_moved(target, transaction)
-            ):
-                self.announcement_state.mark(channel_key(version, target.key_id))
+            if not self._unseen(target, key) or self._already_moved(target, transaction):
+                for item in keys:
+                    if self._unseen(target, item):
+                        self.announcement_state.mark(channel_key(item, target.key_id))
                 return
-            slot = channel_key(f"trade-post:{transaction.transaction_id}", target.key_id)
+            slot = channel_key(f"{prefix}{transaction.transaction_id}", target.key_id)
         message_id = self.announcement_state.message_id(slot)
         if matches and message_id is None:
-            LOGGER.warning("Trade post %s has no message ID; not duplicating it", slot)
+            LOGGER.warning("%s post %s has no message ID; not duplicating it", kind, slot)
             return
         embeds, _ = roster_news_post(news, target_date)
         try:
-            if message_id is not None:
-                if isinstance(target.destination, discord.Webhook):
-                    await target.destination.edit_message(
-                        message_id, embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
-                    )
-                else:
-                    channel = self.get_partial_messageable(int(target.key_id))
-                    await channel.get_partial_message(message_id).edit(
-                        embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
-                    )
-            else:
-                kwargs = {"wait": True} if isinstance(target.destination, discord.Webhook) else {}
-                message = await target.destination.send(embeds=embeds, **kwargs)
-                message_id = message.id
+            message_id = await self._send_or_edit_embeds(target, embeds, message_id)
         except discord.DiscordException as exc:
-            LOGGER.warning("Could not post or edit trade in %s: %s", target.label, exc)
+            LOGGER.warning("Could not post or edit %s in %s: %s", kind, target.label, exc)
             return
         self.announcement_state.mark_message(slot, encode_news(news), message_id)
         for item in (*keys, *(injury_announcement_key(update) for update in news.injuries)):
             self.announcement_state.mark(channel_key(item, target.key_id))
 
-    async def _announce(
+    async def _send_or_edit_embeds(
         self,
         target: _AnnouncementTarget,
-        keys: Sequence[str],
         embeds: list[discord.Embed],
-        image: bytes | None = None,
-        filename: str = INACTIVE_CHART_FILENAME,
-    ) -> None:
-        """Post to one target and record every piece of news the post covers.
-
-        The embed is the whole message: a line of text above it would only
-        restate the title Discord is already showing.
-
-        A failed post records nothing, so the next poll tries it again.
-        """
-        try:
-            if image is None:
-                await target.destination.send(embeds=embeds)
-            else:
-                await target.destination.send(
-                    embeds=embeds,
-                    file=discord.File(io.BytesIO(image), filename=filename),
+        message_id: int | None,
+    ) -> int:
+        if message_id is not None:
+            if isinstance(target.destination, discord.Webhook):
+                await target.destination.edit_message(
+                    message_id, embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
                 )
-        except discord.DiscordException as exc:
-            LOGGER.warning("Could not post to %s: %s", target.label, exc)
-            return
-        for key in keys:
-            self.announcement_state.mark(channel_key(key, target.key_id))
+            else:
+                channel = self.get_partial_messageable(int(target.key_id))
+                await channel.get_partial_message(message_id).edit(
+                    embeds=embeds, allowed_mentions=discord.AllowedMentions.none()
+                )
+            return message_id
+        kwargs = {"wait": True} if isinstance(target.destination, discord.Webhook) else {}
+        message = await target.destination.send(embeds=embeds, **kwargs)
+        return message.id
 
     async def _announce_report(
         self,
@@ -959,7 +860,7 @@ class RavensBot(commands.Bot):
                 await self._post_game_injuries(game)
 
     async def _post_game_injuries(self, game: Game) -> None:
-        """Post each in-game injury line the club puts on Bluesky, once per target.
+        """Post each in-game status update, editing corrections to the source post.
 
         The club posts these within a minute or two, well ahead of ESPN's
         injury feed. Only lines since kickoff count, so a restart mid-game
@@ -983,7 +884,7 @@ class RavensBot(commands.Bot):
         pending = [
             update
             for update in updates
-            if any(self._unseen(target, game_injury_key(update)) for target in targets)
+            if any(self._pending_game_injury(target, update) for target in targets)
         ]
         if not pending:
             return
@@ -992,8 +893,26 @@ class RavensBot(commands.Bot):
             key = game_injury_key(update)
             embed = game_injury_embed(update, matcher.find(update.name), game)
             for target in targets:
-                if self._unseen(target, key):
-                    await self._announce(target, [key], [embed])
+                if not self._pending_game_injury(target, update):
+                    continue
+                slot = channel_key(f"game-injury-post:{update.post.uri}", target.key_id)
+                try:
+                    message_id = await self._send_or_edit_embeds(
+                        target, [embed], self.announcement_state.message_id(slot)
+                    )
+                except discord.DiscordException as exc:
+                    LOGGER.warning("Could not post or edit in-game injury in %s: %s", target.label, exc)
+                    continue
+                self.announcement_state.mark_message(slot, game_injury_version(update), message_id)
+                self.announcement_state.mark(channel_key(key, target.key_id))
+
+    def _pending_game_injury(self, target: _AnnouncementTarget, update: GameInjuryUpdate) -> bool:
+        slot = channel_key(f"game-injury-post:{update.post.uri}", target.key_id)
+        if self.announcement_state.is_current(slot, game_injury_version(update)):
+            return False
+        if self.announcement_state.message_id(slot) is not None:
+            return True
+        return self._unseen(target, game_injury_key(update))
 
     @track_fourth_downs.before_loop
     async def before_track_fourth_downs(self) -> None:
@@ -1778,25 +1697,16 @@ def game_injury_key(update: GameInjuryUpdate) -> str:
     return f"{GAME_INJURY_KEY_PREFIX}{update.post.uri}"
 
 
+def game_injury_version(update: GameInjuryUpdate) -> str:
+    return json.dumps((update.post.text, update.name, update.position, update.injury, update.status))
+
+
 def _moved_player_key(source: str, day: date, name: str) -> str:
     return f"{MOVED_PLAYER_KEY_PREFIX}{source}:{day.isoformat()}:{name}"
 
 
-def moved_player_keys(transaction: Transaction) -> list[str]:
-    """Who a posted move covered, by source, so the other source's copy is skipped."""
-    source = "bluesky" if is_roster_move_post(transaction) else "espn"
-    return [
-        _moved_player_key(source, transaction.date, name)
-        for name in sorted(player_keys(transaction))
-    ]
-
-
 def _official_injury_slot(report_date: date, target: int | str) -> str:
     return channel_key(f"official-injury:{report_date.isoformat()}", target)
-
-
-def _injury_baseline_slot(report_date: date, target: int | str) -> str:
-    return channel_key(f"injury-baseline:{report_date.isoformat()}", target)
 
 
 def watching_inactives(games: Sequence[Game], moment: datetime) -> bool:

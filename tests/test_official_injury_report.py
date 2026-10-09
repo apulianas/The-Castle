@@ -409,7 +409,6 @@ def test_first_poll_posts_partial_then_immediately_edits_complete_report(tmp_pat
     asyncio.run(bot.poll_updates())
     assert len(destination.posts) == 1
     assert "Partial report" in destination.posts[0][0].description
-    assert bot._post_new_roster_news.call_args.kwargs["scheduled_report_date"]
 
     complete = _wednesday_report()
     bot.injury_reports.fetch.return_value = complete
