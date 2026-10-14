@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ravens public feed</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Ravens public feed</h1>
+  <p>Use only your dedicated <strong>1 Winning Pod</strong> Edge profile. Sign in to X manually and open <strong>https://x.com/Ravens</strong>.</p>
+  <p>Start reads that tab and enables a one-minute refresh. It may scroll the timeline. No other tab is refreshed.</p>
+  <div class="actions"><button id="start">Start</button><button id="stop">Stop</button></div>
+  <p><button id="copy-diagnostics">Copy diagnostics</button></p>
+  <p id="copy-feedback" role="status" aria-live="polite"></p>
+  <section aria-live="polite">
+    <p id="status">Loading status…</p>
+    <p id="updated"></p>
+    <p id="count"></p>
+    <p id="error" role="alert"></p>
+    <p id="freshness" role="status"></p>
+    <details id="lifecycle-panel" open>
+      <summary>Refresh lifecycle (local timing only)</summary>
+      <pre id="lifecycle"></pre>
+    </details>
+    <details id="diagnostics-panel" hidden open>
+      <summary>Collector diagnostics (counts only)</summary>
+      <p class="note">Totals across up to eight reads; the same article may appear more than once. No page text or identifiers.</p>
+      <pre id="diagnostics"></pre>
+    </details>
+  </section>
+  <p class="note">Off by default. Start again after restarting Edge. Only public original Ravens posts and public images are sent to the local feed host.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

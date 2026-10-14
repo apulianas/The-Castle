@@ -99,7 +99,7 @@ def trade_quality(transaction: Transaction) -> tuple[int, ...]:
         len(re.findall(r"\b(?:20\d{2}|[1-7](?:st|nd|rd|th)?|conditional)\b", _asset_key(assets))),
         int(_AGREEMENT.match(transaction.description) is None),
         sum(bool(player.athlete_id) + bool(player.position) for player in players),
-        int(not transaction.transaction_id.startswith("bluesky:")),
+        int(not transaction.transaction_id.startswith(("bluesky:", "x:"))),
     )
 
 

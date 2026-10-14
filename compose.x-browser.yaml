@@ -1,0 +1,9 @@
+services:
+  ravens-bot:
+    environment:
+      X_FEED_FILE: /x-feed/ravens.json
+    volumes:
+      - type: bind
+        source: ${X_FEED_DIRECTORY:-./.x-feed}
+        target: /x-feed
+        read_only: true

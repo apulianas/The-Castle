@@ -211,6 +211,36 @@ def game_poll(bot, target, updates):
 
 
 @pytest.mark.parametrize("webhook", [False, True])
+@pytest.mark.parametrize("x_first", [False, True])
+def test_mirrored_game_injuries_are_not_reposted_after_restart(tmp_path, webhook, x_first):
+    bot, target, edit = setup_bot(tmp_path, webhook)
+    mirror = game_update("WR Chris Moore (knee) is questionable to return.")
+    direct = replace(mirror, post=replace(
+        mirror.post, uri="https://x.com/Ravens/status/123", source="X", handle="Ravens",
+    ))
+    first, second = (direct, mirror) if x_first else (mirror, direct)
+    game_poll(bot, target, [first])
+    bot.announcement_state.load()
+    game_poll(bot, target, [second])
+    assert target.destination.send.await_count == 1
+    assert edit.await_count == 0
+    corrected = game_update("WR Chris Moore (ankle) has been ruled out.", "next")
+    game_poll(bot, target, [corrected])
+    assert target.destination.send.await_count == 2
+
+
+def test_x_move_and_bluesky_move_share_roster_deduplication(tmp_path):
+    bot, target, edit = setup_bot(tmp_path, False)
+    mirror = move(source="bluesky")
+    direct = replace(mirror, transaction_id="x:123", source_url="https://x.com/Ravens/status/123")
+    poll(bot, target, [direct])
+    bot.announcement_state.load()
+    poll(bot, target, [mirror])
+    assert target.destination.send.await_count == 1
+    assert len(merge_roster_moves([direct], [mirror])) == 1
+
+
+@pytest.mark.parametrize("webhook", [False, True])
 def test_game_status_posts_stay_separate_but_source_corrections_edit(tmp_path, webhook):
     bot, target, edit = setup_bot(tmp_path, webhook)
     initial = game_update("WR Chris Moore (knee) is questionable to return.")
