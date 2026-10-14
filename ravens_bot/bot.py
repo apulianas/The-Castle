@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import re
 from collections.abc import Sequence
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -241,7 +243,12 @@ class RavensBot(commands.Bot):
         self.artwork = ArtworkLoader(self.session)
         self.official_transactions = OfficialTransactionsClient(self.session)
         self.official_inactives = OfficialInactivesClient(self.session)
-        self.bluesky = BlueskyClient(self.session)
+        if self.config.x_feed_file:
+            from .x_feed import XFeedClient
+
+            self.bluesky = XFeedClient(self.session, self.config.x_feed_file)
+        else:
+            self.bluesky = BlueskyClient(self.session)
         self.snap_counts = SnapCountClient(self.session)
         self.recaps = RecapClient(self.session)
         self.draft_picks = DraftClient(self.session)
@@ -910,6 +917,8 @@ class RavensBot(commands.Bot):
                     LOGGER.warning("Could not post or edit in-game injury in %s: %s", target.label, exc)
                     continue
                 self.announcement_state.mark_message(slot, game_injury_version(update), message_id)
+                mirror_slot = channel_key(game_injury_mirror_key(update), target.key_id)
+                self.announcement_state.mark_current(mirror_slot, update.post.source)
                 self.announcement_state.mark(channel_key(key, target.key_id))
 
     def _pending_game_injury(self, target: _AnnouncementTarget, update: GameInjuryUpdate) -> bool:
@@ -918,6 +927,10 @@ class RavensBot(commands.Bot):
             return False
         if self.announcement_state.message_id(slot) is not None:
             return True
+        mirror_slot = channel_key(game_injury_mirror_key(update), target.key_id)
+        source = self.announcement_state.current_version(mirror_slot)
+        if source is not None and source != update.post.source:
+            return False
         return self._unseen(target, game_injury_key(update))
 
     @track_fourth_downs.before_loop
@@ -1730,6 +1743,14 @@ def injury_announcement_key(update: InjuryUpdate) -> str:
 
 def game_injury_key(update: GameInjuryUpdate) -> str:
     return f"{GAME_INJURY_KEY_PREFIX}{update.post.uri}"
+
+
+def game_injury_mirror_key(update: GameInjuryUpdate) -> str:
+    # Mirror posts can arrive later and have different URLs, but the same text.
+    text = " ".join(re.sub(r"https?://\S+", "", update.text).casefold().split())
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    day = update.post.created_at.astimezone(timezone.utc).date().isoformat()
+    return f"game-injury-mirror:{day}:{digest}"
 
 
 def game_injury_version(update: GameInjuryUpdate) -> str:

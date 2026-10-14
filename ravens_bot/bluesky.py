@@ -22,7 +22,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from statistics import median
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -117,9 +117,12 @@ class BlueskyPost:
     created_at: datetime
     image_urls: tuple[str, ...]
     handle: str = BLUESKY_HANDLE
+    source: Literal["Bluesky", "X"] = "Bluesky"
 
     @property
     def url(self) -> str:
+        if self.source == "X":
+            return self.uri
         return BLUESKY_PROFILE_URL.format(
             handle=self.handle, rkey=self.uri.rsplit("/", 1)[-1]
         )
@@ -624,7 +627,7 @@ def parse_roster_move(post: BlueskyPost, time_zone: ZoneInfo) -> Transaction | N
     if not players and not agreement and trade is None:
         return None
     return Transaction(
-        transaction_id=f"{ROSTER_MOVE_ID_PREFIX}{post.uri.rsplit('/', 1)[-1]}",
+        transaction_id=f"{'x:' if post.source == 'X' else ROSTER_MOVE_ID_PREFIX}{post.uri.rsplit('/', 1)[-1]}",
         date=post.created_at.astimezone(time_zone).date(),
         description=description,
         type_text="Trade agreement" if agreement else transaction_action(description),
@@ -650,7 +653,7 @@ def roster_moves_on(
 
 
 def is_roster_move_post(transaction: Transaction) -> bool:
-    return transaction.transaction_id.startswith(ROSTER_MOVE_ID_PREFIX)
+    return transaction.transaction_id.startswith((ROSTER_MOVE_ID_PREFIX, "x:"))
 
 
 def player_keys(transaction: Transaction) -> frozenset[str]:

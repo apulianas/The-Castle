@@ -5,6 +5,9 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 ## Features
 
+For direct X updates instead of waiting for the mirror, see
+[Optional Windows X browser collector](#optional-windows-x-browser-collector).
+
 - Slash commands:
   - `/transactions [date]` — Ravens roster transactions for today or a `YYYY-MM-DD` date.
   - `/inactives [date]` — game day inactive reports as a chart image. The date
@@ -93,6 +96,157 @@ day inactives, injuries, standings, live in-game stats, and upcoming games.
 
 Slash-command replies are on-demand snapshots, not background subscriptions;
 running a command again intentionally produces a new reply.
+
+## Optional Windows X browser collector
+
+### Recommended: extension in a manually signed-in Edge profile
+
+If X accepts manual sign-in but rejects Playwright, use the unpacked extension
+in `edge_extension` inside a dedicated Edge UI profile. This does not attach to
+Edge's shared profile directory or read cookies. It uses the Ravens page you
+explicitly authorize and a local native-messaging host to write the same public
+snapshot consumed by Docker. Do not run the Playwright collector at the same time.
+
+1. In the dedicated Edge profile, open `edge://extensions`, turn on **Developer
+   mode**, choose **Load unpacked**, and select this checkout's `edge_extension`
+   directory. Load it only in the dedicated profile.
+2. Copy the extension's ID from that page. From this checkout in PowerShell,
+   register its local writer (replace the placeholder with the actual ID):
+
+   ```powershell
+   python -m ravens_bot.x_native_host --register YOUR_EXTENSION_ID --output "$env:LOCALAPPDATA\The-Castle\x-feed"
+   ```
+
+3. Open `https://x.com/Ravens` in that profile and sign in manually if needed.
+   Click the extension's toolbar button and start collection on that tab.
+   Keep Edge and the Ravens tab open. After restarting Edge, start collection
+   again explicitly.
+4. Once the extension reports a successful write, enable the read-only feed mount
+   with the Docker Compose command below, using your existing Compose project
+   name. Set `X_FEED_DIRECTORY` in the bot's `.env` to the absolute public-feed
+   directory above (for this machine, `C:\Users\apuli\AppData\Local\The-Castle\x-feed`)
+   so the mount matches the writer. Do not launch a second copy of the bot.
+
+The extension refreshes only its selected Ravens tab roughly once a minute and
+reads a bounded portion of the rendered timeline. Tab closure, navigating away,
+sign-in challenges, browser suspension, or changed page markup can interrupt
+collection. Status and errors appear in the popup. Stop collection with its
+Stop button. There is no background account login or private API access.
+
+The extension asks for `activeTab`, scripting, alarms, session storage, and
+native messaging, not cookie access or blanket access to websites. Authorization
+is granted when you use its toolbar action on the Ravens tab. Native messaging
+is restricted to the registered extension ID; the writer accepts only the public
+post schema and does not accept arbitrary commands or output paths from messages.
+The native host registration is per Windows user, not system-wide, and does not
+read an Edge profile. Its launcher/manifest live in
+`%LOCALAPPDATA%\The-Castle\x-native-host`; the registry entry is
+`HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.thecastle.ravens_feed`.
+These files contain paths and the extension ID, not credentials.
+
+The native writer needs only Python's standard library (no Playwright or browser
+download). Registration installs its small Python package beside the launcher,
+outside the checkout. It stamps successful reads, retains up to 300 observed posts
+from the last seven days, and writes `ravens.json` atomically in the selected output
+directory. Stop/error messages
+invalidate the feed immediately; if the browser cannot contact the writer, the
+existing two-minute stale-file fallback still applies. Docker sees only this
+public feed directory. Existing source attribution and deduplication are shared
+with the Playwright option below.
+
+Keep the Python installation available. Rerun registration after writer updates
+or changing Python, the output directory, or the extension ID. The installed writer
+does not depend on keeping the checkout; the unpacked extension still does, so copy
+its folder to a permanent location and load that copy before removing the checkout,
+then register its new ID. To uninstall, stop collection, remove the
+extension from Edge, and remove the specific native-host registry key above.
+No scheduled task or always-running host process is installed.
+
+### Alternative: Playwright with a standalone profile
+
+This opt-in source reads the Ravens' rendered X timeline using a dedicated
+Chromium or Microsoft Edge profile on Windows. You sign in manually; the bot never needs your
+password. X can expire sessions or block automation: this does not bypass
+challenges or guarantee timely/complete access. Use it subject to X's rules.
+Bluesky remains the default when the collector is not configured.
+
+For Docker Desktop on the same Windows machine, run these commands from this
+checkout in PowerShell:
+
+```powershell
+python -m venv .x-browser-venv
+.\.x-browser-venv\Scripts\python.exe -m pip install -r requirements-x-browser.txt
+.\.x-browser-venv\Scripts\python.exe -m playwright install chromium
+.\.x-browser-venv\Scripts\python.exe -m ravens_bot.x_browser --login --once
+```
+
+Sign in in the browser window (including any verification X requests). The
+collector waits up to ten minutes, reads the Ravens timeline, writes
+`.x-feed\ravens.json`, then closes. The dedicated profile is stored at
+`%LOCALAPPDATA%\The-Castle\x-browser`, **outside Git and outside Docker**.
+Treat that entire directory as a credential: do not share, commit, or mount it
+into the container. It is not your everyday browser profile.
+
+To use **Microsoft Edge already installed on Windows**, add `--browser edge`
+to both the login and continuous collector commands:
+
+```powershell
+.\.x-browser-venv\Scripts\python.exe -m ravens_bot.x_browser --browser edge --login --once
+.\.x-browser-venv\Scripts\python.exe -m ravens_bot.x_browser --browser edge
+```
+
+Edge uses its own dedicated profile at
+`%LOCALAPPDATA%\The-Castle\x-edge-browser`. It does not read or copy your normal
+Edge profile, cookies, or tabs, and does not reuse the collector's Chromium
+profile. Sign in manually in the new window; do not enable browser sync or import
+your everyday browsing data. Edge still runs through Playwright, so X may reject
+it too. This is browser selection, not a way to bypass login restrictions.
+Playwright's Python package is required for either browser, but the Chromium
+download step is unnecessary when using only an already-installed Edge.
+
+Start the continuous collector in a separate terminal:
+
+```powershell
+.\.x-browser-venv\Scripts\python.exe -m ravens_bot.x_browser
+```
+
+Keep that terminal running; it checks X about every 40 seconds, retaining up to
+300 posts observed within the last seven days. Each check reads a bounded part
+of the rendered timeline, not the complete account history. It collects only
+original Ravens posts, excluding reposts and quoted content. Initial history
+coverage depends on what X loads. This is a host process, not part of the
+container: restart it after Windows restarts. Stop it with Ctrl+C. To renew
+the session, stop the collector and repeat `--login --once`; do not open two
+collectors against the same profile.
+
+On collection failures it publishes an error for immediate Bluesky fallback
+and waits five minutes before retrying. If X says "Could not log you in now;
+try again later", stop the login attempt and retry later rather than repeatedly
+submitting credentials. There is no challenge bypass or alternative private API.
+
+After setting up the normal bot `.env`, enable the read-only public-feed mount:
+
+```powershell
+docker compose -f compose.yaml -f compose.x-browser.yaml up -d --build
+```
+
+Use the same Compose project name as your existing deployment (with `-p` if
+needed), and stop the old bot before switching checkouts; do not run two bots.
+The container receives only public post text, timestamps, URLs, and image URLs.
+It has no browser-control port and no access to X credentials. Snapshot writes
+are atomic, and snapshots older than two minutes, unreadable files, or explicit
+collector errors trigger a logged Bluesky fallback. Recovery is logged too.
+X posts feed the existing roster/trade, injury-graphic, inactives, and live
+injury parsers; links and source attribution identify X. Matching roster moves
+reuse existing deduplication. Identical live injury text on the same UTC date
+is suppressed across X/Bluesky, including restarts; reworded mirrors may still
+appear separately. Existing pre-upgrade injury history has no mirror key.
+
+Do not point `--profile` at an everyday browser profile or at the shared feed
+directory. `--output` can move the public snapshot directory; update the
+Compose bind mount to match. For a non-Docker bot, set `X_FEED_FILE` to the
+snapshot's full path. The optional browser dependencies are host-only; the
+normal Docker image and default Compose setup are unchanged.
 
 ## Draft-pick values and trade estimates
 

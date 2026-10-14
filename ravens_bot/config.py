@@ -26,6 +26,7 @@ class BotConfig:
     # A second team to fall back on for live insight commands when the Ravens
     # are not playing.
     secondary_team: str | None = None
+    x_feed_file: str | None = None
 
     @property
     def has_announcement_targets(self) -> bool:
@@ -120,4 +121,5 @@ def load_config() -> BotConfig:
         poll_interval_seconds=poll_interval,
         time_zone=time_zone,
         secondary_team=_team_name(os.getenv("SECONDARY_TEAM")),
+        x_feed_file=os.getenv("X_FEED_FILE", "").strip() or None,
     )

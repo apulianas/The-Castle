@@ -12,6 +12,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("POLL_INTERVAL_SECONDS", raising=False)
     monkeypatch.delenv("TIME_ZONE", raising=False)
     monkeypatch.delenv("SECONDARY_TEAM", raising=False)
+    monkeypatch.delenv("X_FEED_FILE", raising=False)
 
 
 def test_load_config_reads_multiple_channels(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -21,6 +22,13 @@ def test_load_config_reads_multiple_channels(monkeypatch: pytest.MonkeyPatch) ->
     config = load_config()
 
     assert config.discord_channel_ids == (123, 456)
+
+
+def test_x_feed_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    assert load_config().x_feed_file is None
+    monkeypatch.setenv("X_FEED_FILE", " /x-feed/ravens.json ")
+    assert load_config().x_feed_file == "/x-feed/ravens.json"
 
 
 def test_load_config_rejects_short_poll_interval(monkeypatch: pytest.MonkeyPatch) -> None:

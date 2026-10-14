@@ -1,0 +1,8 @@
+body { width: 320px; margin: 16px; font: 14px/1.45 system-ui, sans-serif; color: #222; }
+h1 { font-size: 19px; margin: 0; }
+.actions { display: flex; gap: 10px; }
+button { padding: 7px 22px; cursor: pointer; }
+#error { color: #9b2020; overflow-wrap: anywhere; }
+.note { color: #555; font-size: 12px; }
+#diagnostics, #lifecycle { font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+#freshness { color: #9b2020; }

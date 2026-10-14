@@ -177,12 +177,14 @@ def _footer(*parts: str | None, source: str = DATA_SOURCE) -> str:
 
 
 def _moves_source(transactions: Sequence[Transaction]) -> str:
-    """Credit the club's Bluesky for moves read from it, ESPN for the rest."""
-    from_bluesky = [is_roster_move_post(item) for item in transactions]
-    if from_bluesky and all(from_bluesky):
-        return GAME_INJURY_SOURCE
-    if any(from_bluesky):
-        return f"{DATA_SOURCE}; Baltimore Ravens via Bluesky"
+    """Credit the actual social source for the club's announcements."""
+    social = [item for item in transactions if is_roster_move_post(item)]
+    if social:
+        sources = sorted({
+            "X" if item.transaction_id.startswith("x:") else "Bluesky" for item in social
+        })
+        credit = f"Baltimore Ravens via {' and '.join(sources)}"
+        return f"Source: {credit}" if len(social) == len(transactions) else f"{DATA_SOURCE}; {credit}"
     return DATA_SOURCE
 
 
@@ -586,7 +588,7 @@ def game_injury_embed(
     embed.set_thumbnail(url=photo or team_logo_url(RAVENS_SLUG))
     opponent = game.opponent if game is not None else None
     context = f"In-game update vs. {opponent.team.name}" if opponent is not None else "In-game update"
-    embed.set_footer(text=f"{context} • {GAME_INJURY_SOURCE}")
+    embed.set_footer(text=f"{context} • Source: Baltimore Ravens via {update.post.source}")
     embed.timestamp = update.post.created_at
     return embed
 
@@ -636,7 +638,8 @@ def official_injury_embed(report: OfficialInjuryReport) -> discord.Embed:
     embed.set_image(url="attachment://ravens-injury-report.png")
     footer = OFFICIAL_INJURY_DATA_SOURCE
     if report.graphic_url:
-        footer += " (Ravens list read from the club's Bluesky graphic)"
+        source = "X" if report.graphic_url.startswith("https://x.com/") else "Bluesky"
+        footer += f" (Ravens list read from the club's {source} graphic)"
     embed.set_footer(text=footer)
     return embed
 
