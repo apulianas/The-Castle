@@ -1,0 +1,28 @@
+instructions: |
+  The Ravens Edge extension has a permanent local installation at
+  %LOCALAPPDATA%\The-Castle\edge-extension. Never load it from a Copilot
+  session worktree or change that installation path between sessions.
+
+  When building or changing the Edge extension:
+  - Increment edge_extension\manifest.json's version for shipped runtime
+    changes (patch for fixes, minor for features).
+  - Run the relevant extension tests before deployment.
+  - On the local Windows machine, run .\tools\install-edge-extension.ps1
+    from the current checkout as part of completing the build/update.
+    Do this yourself rather than only telling the user to copy the files.
+    Coordinate Pause with the user before replacing a running installation.
+  - Verify that the installed manifest has the intended version. If copying
+    or verification fails, report it explicitly and do not claim deployment.
+  - Tell the user to Reload the permanent copy in edge://extensions, approve
+    any added permissions, and Start / Resume. Copying files does not reload
+    the running extension. Keep only one collector enabled.
+  - Preserve the existing native-host registration and feed output directory.
+    Re-register only when the extension ID, native host, Python installation,
+    or feed location actually changes; keeping the permanent path keeps the
+    extension ID stable.
+  - On cloud/non-Windows agents, do not claim the user's local installation
+    was updated. State that local deployment and Edge Reload are still needed.
+
+  Do not deploy automatically on session creation or for unrelated changes:
+  another checkout may contain an older extension. See edge_extension\SETUP.md
+  for installation, migration, diagnostics, and update details.

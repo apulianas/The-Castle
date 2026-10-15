@@ -9,8 +9,8 @@
 <body>
   <h1>Ravens public feed</h1>
   <p>Use only your dedicated <strong>1 Winning Pod</strong> Edge profile. Sign in to X manually and open <strong>https://x.com/Ravens</strong>.</p>
-  <p>Start reads that tab and enables a one-minute refresh. It may scroll the timeline. No other tab is refreshed.</p>
-  <div class="actions"><button id="start">Start</button><button id="stop">Stop</button></div>
+  <p>Start enables persistent collection. A Ravens tab is recovered automatically if closed. Only that tab is refreshed or scrolled. Pause for maintenance or to leave collection off.</p>
+  <div class="actions"><button id="start">Start / Resume</button><button id="stop">Pause</button></div>
   <p><button id="copy-diagnostics">Copy diagnostics</button></p>
   <p id="copy-feedback" role="status" aria-live="polite"></p>
   <section aria-live="polite">
@@ -28,8 +28,13 @@
       <p class="note">Totals across up to eight reads; the same article may appear more than once. No page text or identifiers.</p>
       <pre id="diagnostics"></pre>
     </details>
+    <details>
+      <summary>Persistent event history</summary>
+      <p class="note">Last 200 events plus the most recent failure, retained across Start, Pause, extension reloads and Edge restarts. No page content or account identifiers.</p>
+      <pre id="history"></pre>
+    </details>
   </section>
-  <p class="note">Off by default. Start again after restarting Edge. Only public original Ravens posts and public images are sent to the local feed host.</p>
+  <p class="note">Off until first Start; then resumes when Edge opens. Failures retry automatically, with delays up to 15 minutes. Sign-in and challenges need manual attention. Only public original Ravens posts and public images are sent to the local feed host.</p>
   <script src="popup.js"></script>
 </body>
 </html>
