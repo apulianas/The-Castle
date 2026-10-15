@@ -21,7 +21,7 @@ HARNESS = r"""
             fire: (...args) => handlers.forEach(fn => fn(...args)), handlers};
     };
     window.mock = {
-        session: {}, calls: [], ports: [], reloads: [], injections: [], alarms: {}, scheduledTimes: {},
+        session: {}, local: {}, calls: [], ports: [], reloads: [], injections: [], alarms: {}, scheduledTimes: {},
         tabs: {1: {id: 1, url: "https://x.com/Ravens", status: "complete"}},
         activeId: 1, nativeError: false, nativeReject: false,
         scriptError: null, scriptGate: null, nativeGate: null,
@@ -35,6 +35,7 @@ HARNESS = r"""
     window.chrome = {
         runtime: {
             id: "test-extension",
+            getManifest: () => ({version: "1.1.0"}),
             getURL: path => "chrome-extension://test-extension/" + path,
             onMessage: event(), onStartup: event(), onInstalled: event(),
             connectNative: host => {
@@ -65,12 +66,22 @@ HARNESS = r"""
                 return port;
             }
         },
-        storage: {session: {
+        storage: {local: {
+            get: async key => ({[key]: structuredClone(mock.local[key])}),
+            set: async data => Object.assign(mock.local, structuredClone(data))
+        }, session: {
             get: async key => ({[key]: structuredClone(mock.session[key])}),
             set: async data => Object.assign(mock.session, structuredClone(data))
         }},
         tabs: {
-            query: async () => [structuredClone(mock.tabs[mock.activeId])],
+            query: async options => structuredClone(options.active
+                ? [mock.tabs[mock.activeId]] : Object.values(mock.tabs)),
+            create: async options => {
+                const id = Math.max(0, ...Object.keys(mock.tabs).map(Number)) + 1;
+                const tab = {id, url: options.url, status: "complete", active: options.active};
+                mock.tabs[id] = tab;
+                return structuredClone(tab);
+            },
             get: async id => {
                 if (!mock.tabs[id]) throw new Error("missing");
                 return structuredClone(mock.tabs[id]);
@@ -107,6 +118,7 @@ HARNESS = r"""
     });
     window.state = () => mock.session.ravensCollector;
     window.alarm = () => chrome.alarms.onAlarm.fire({name: "ravens-refresh"});
+    window.retryNow = () => { mock.session.ravensCollector.retryAt = new Date(0).toISOString(); alarm(); };
 }
 """
 
@@ -117,7 +129,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest["manifest_version"], 3)
         self.assertEqual(set(manifest["permissions"]),
                          {"activeTab", "scripting", "alarms", "storage", "nativeMessaging"})
-        for key in ("host_permissions", "optional_host_permissions", "content_scripts",
+        self.assertEqual(manifest["host_permissions"], ["https://x.com/*"])
+        for key in ("optional_host_permissions", "content_scripts",
                     "externally_connectable", "web_accessible_resources"):
             self.assertNotIn(key, manifest)
         self.assertEqual(manifest["incognito"], "not_allowed")
@@ -188,9 +201,9 @@ class BrowserTests(unittest.TestCase):
     def wait_collected(self):
         self.page.wait_for_function("state()?.enabled && !state().busy && state().lastUpdated")
 
-    def wait_stopped(self):
-        self.page.wait_for_function("state() && !state().enabled")
-        self.page.evaluate("request('status')")
+    def wait_retry(self):
+        self.page.wait_for_function("state()?.enabled && state().failures > 0 && !state().busy")
+        self.page.wait_for_function("mock.ports.every(port => port.closed)")
 
     @staticmethod
     def article(status="123", text="Ravens signed a player.", extra="", timestamp=None):
@@ -427,17 +440,17 @@ class BrowserTests(unittest.TestCase):
         self.page.evaluate("request('start')")
         self.wait_collected()
         self.page.evaluate("mock.tabs[1].pendingUrl = 'https://x.com/Other'; alarm()")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertEqual(self.page.evaluate("mock.reloads"), [])
         self.assertIn("left", self.page.evaluate("state().error"))
         self.assertEqual(self.page.evaluate("mock.calls.at(-1).payload.error"), "collector_unavailable")
 
-    def test_tab_close_and_navigation_event_clear_state(self):
+    def test_tab_close_and_navigation_event_schedule_recovery(self):
         self.worker()
         self.page.evaluate("request('start')")
         self.wait_collected()
         self.page.evaluate("chrome.tabs.onRemoved.fire(1)")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("closed", self.page.evaluate("state().error"))
         self.page.evaluate("request('start')")
         self.wait_collected()
@@ -445,8 +458,8 @@ class BrowserTests(unittest.TestCase):
             mock.tabs[1].url = 'https://x.com/home';
             chrome.tabs.onUpdated.fire(1, {url: mock.tabs[1].url}, mock.tabs[1]);
         }""")
-        self.wait_stopped()
-        self.assertEqual(self.page.evaluate("mock.alarms"), {})
+        self.wait_retry()
+        self.assertIn("ravens-refresh", self.page.evaluate("mock.alarms"))
 
     def test_stop_during_extraction_prevents_stale_send(self):
         self.worker()
@@ -476,23 +489,23 @@ class BrowserTests(unittest.TestCase):
         self.wait_collected()
         self.assertEqual(self.page.evaluate("mock.calls.filter(call => call.payload.posts).length"), 1)
 
-    def test_native_failure_stops_and_does_not_expose_host_details(self):
+    def test_native_failure_retries_and_does_not_expose_host_details(self):
         self.worker()
         self.page.evaluate("request('start')")
         self.wait_collected()
         self.page.evaluate("mock.nativeReject = true; alarm()")
-        self.wait_stopped()
+        self.wait_retry()
         error = self.page.evaluate("state().error")
         self.assertIn("native", error)
         self.assertNotIn("secret", error)
         self.assertIn("could not be invalidated", error)
-        self.assertEqual(self.page.evaluate("mock.alarms"), {})
+        self.assertIn("ravens-refresh", self.page.evaluate("mock.alarms"))
 
-    def test_native_unavailable_on_start_leaves_off(self):
+    def test_native_unavailable_on_start_keeps_retrying(self):
         self.worker()
         self.page.evaluate("mock.nativeError = true")
         result = self.page.evaluate("request('start')")
-        self.assertFalse(result["enabled"])
+        self.assertTrue(result["enabled"])
         self.assertIn("native", result["error"])
         self.assertIn("not yet registered", result["error"])
         self.assertIn("extension ID", result["error"])
@@ -532,7 +545,7 @@ class BrowserTests(unittest.TestCase):
         self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
         self.assertEqual(self.page.evaluate("mock.ports.length"), connections + 1)
 
-    def test_host_disconnect_during_write_stops_and_invalidates(self):
+    def test_host_disconnect_during_write_retries_and_invalidates(self):
         self.worker()
         self.page.evaluate("request('start')")
         self.wait_collected()
@@ -547,7 +560,7 @@ class BrowserTests(unittest.TestCase):
             mock.release();
             mock.nativeGate = null;
         }""")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("native", self.page.evaluate("state().error"))
         self.assertEqual(self.page.evaluate("mock.calls.at(-1).payload.error"), "collector_unavailable")
         self.assertTrue(self.page.evaluate("mock.ports.every(port => port.closed)"))
@@ -562,7 +575,7 @@ class BrowserTests(unittest.TestCase):
         self.page.evaluate("request('stop')")
         self.page.evaluate("mock.batch.posts = []")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("truncated", self.page.evaluate("state().error"))
 
     def test_reload_waits_for_load_completion(self):
@@ -629,14 +642,14 @@ class BrowserTests(unittest.TestCase):
         self.worker()
         self.page.evaluate("mock.batch = {error: 'sign_in_required'}")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("Sign in manually", self.page.evaluate("state().error"))
         self.page.evaluate("""mock.batch = {posts: [{
             url: 'https://x.com/Ravens/status/1', text: 'Old', image_urls: [],
             created_at: '2000-01-01T00:00:00Z'
         }]}""")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("No recent", self.page.evaluate("state().error"))
         self.assertFalse(self.page.evaluate("mock.calls.some(call => call.payload.posts)"))
 
@@ -657,7 +670,7 @@ class BrowserTests(unittest.TestCase):
             }];
         }""")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         counts = self.page.evaluate("state().diagnostics")
         self.assertEqual(counts["pages"], 8)
         self.assertEqual(counts["articles_seen"], 80)
@@ -680,7 +693,7 @@ class BrowserTests(unittest.TestCase):
         self.worker()
         self.page.evaluate("mock.batch = {posts: [], diagnostics: {articles_seen: 2, missing_outer_time: 2}}")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         html = (EXTENSION / "popup.html").read_text(encoding="utf-8")
         self.page.set_content(html.replace('<script src="popup.js"></script>', ""))
         self.page.evaluate("() => { chrome.runtime.sendMessage = message => request(message.action); }")
@@ -704,6 +717,8 @@ class BrowserTests(unittest.TestCase):
                 error: "Check the tab manually.", diagnostics: {pages: 8, accepted: 26},
                 lifecycle: {phase: "off", cycles_completed: 2},
                 scheduler: {alarm_present: false, last_update_age_seconds: 130},
+                history: {events: [{event: "failure", code: "load_failed"}],
+                    last_failure: {event: "failure", code: "load_failed"}},
                 tabId: 98765, generation: "PRIVATE-GENERATION",
                 posts: [{text: "PRIVATE-POST"}], credentials: "PRIVATE-CREDENTIALS"
             };
@@ -725,13 +740,14 @@ class BrowserTests(unittest.TestCase):
         copied = self.page.evaluate("clipboardWrites[0]")
         payload = json.loads(copied)
         self.assertEqual(set(payload), {"status", "last_updated", "feed_count", "error", "freshness",
-                                       "extraction_counts", "refresh_lifecycle"})
+                                       "extraction_counts", "refresh_lifecycle", "persistent_history"})
         self.assertEqual(payload["status"], self.page.locator("#status").inner_text())
         self.assertEqual(payload["last_updated"], self.page.locator("#updated").inner_text())
         self.assertEqual(payload["feed_count"], "Last feed count: 26")
         self.assertEqual(payload["error"], "Check the tab manually.")
         self.assertEqual(payload["extraction_counts"], {"pages": 8, "accepted": 26})
         self.assertEqual(payload["refresh_lifecycle"]["cycles_completed"], 2)
+        self.assertEqual(payload["persistent_history"]["last_failure"]["code"], "load_failed")
         self.assertNotIn("PRIVATE", copied)
         self.assertNotIn("98765", copied)
         self.page.evaluate("""() => {
@@ -760,15 +776,20 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate("clipboardWrites"), [])
         self.assertTrue(self.page.locator("#copy-diagnostics").is_enabled())
 
-    def test_startup_clears_residual_session_and_alarm(self):
+    def test_browser_restart_restores_intent_without_session_or_alarm(self):
         self.worker()
         self.page.evaluate("request('start')")
         self.wait_collected()
+        self.page.evaluate("mock.session = {}; mock.alarms = {}; mock.tabs = {}")
+        self.recreate_worker()
         self.page.evaluate("chrome.runtime.onStartup.fire()")
-        self.wait_stopped()
-        self.assertIsNone(self.page.evaluate("state().generation"))
-        self.assertEqual(self.page.evaluate("mock.alarms"), {})
-        self.assertEqual(self.page.evaluate("mock.calls.at(-1).payload.error"), "collector_unavailable")
+        self.wait_collected()
+        self.assertTrue(self.page.evaluate("mock.local.ravensCollectorSettings.enabled"))
+        self.assertEqual(self.page.evaluate("mock.tabs[state().tabId].url"), "https://x.com/Ravens")
+        self.assertFalse(self.page.evaluate("mock.tabs[state().tabId].active"))
+        self.assertIn("ravens-refresh", self.page.evaluate("mock.alarms"))
+        self.assertTrue(self.page.evaluate(
+            "mock.local.ravensCollectorHistory.events.some(event => event.event === 'browser_resumed')"))
 
     def test_worker_recreation_resumes_session_without_restarting(self):
         self.worker()
@@ -866,7 +887,7 @@ class BrowserTests(unittest.TestCase):
             mock.tabs[1].url = "https://x.com/Other";
             chrome.tabs.onUpdated.fire(1, {status: "loading"}, {id: 1, status: "loading"});
         }""")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("left", self.page.evaluate("state().error"))
 
     def test_suspended_page_times_out_and_cannot_send_late_snapshot(self):
@@ -877,9 +898,9 @@ class BrowserTests(unittest.TestCase):
             mock.scriptGate = new Promise(resolve => { mock.release = resolve; });
         }""")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("stalled or was suspended", self.page.evaluate("state().error"))
-        self.assertEqual(self.page.evaluate("state().lifecycle.phase"), "off")
+        self.assertEqual(self.page.evaluate("state().lifecycle.phase"), "retry_wait")
         self.assertFalse(self.page.evaluate("mock.calls.some(call => call.payload.posts)"))
         self.page.evaluate("mock.release(); mock.scriptGate = null")
         self.page.wait_for_timeout(20)
@@ -899,7 +920,7 @@ class BrowserTests(unittest.TestCase):
             };
         }""")
         self.page.evaluate("request('start')")
-        self.wait_stopped()
+        self.wait_retry()
         self.assertIn("stalled or was suspended", self.page.evaluate("state().error"))
         self.assertEqual(self.page.evaluate("mock.injections.length"), 3)
         self.assertFalse(self.page.evaluate("mock.calls.some(call => call.payload.posts)"))
@@ -947,11 +968,221 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(response, "rejected")
         self.assertEqual(self.page.evaluate("mock.calls"), [])
 
+    def test_transient_failure_backoff_is_capped_and_success_resets_it(self):
+        self.worker()
+        self.page.evaluate("mock.batch.posts = []; request('start')")
+        self.wait_retry()
+        for failures, delay in enumerate((1, 2, 4, 8, 15, 15), start=1):
+            self.assertEqual(self.page.evaluate("state().failures"), failures)
+            remaining = self.page.evaluate("(Date.parse(state().retryAt) - Date.now()) / 60000")
+            self.assertGreater(remaining, delay - 0.1)
+            self.assertLessEqual(remaining, delay)
+            count = self.page.evaluate("mock.injections.length")
+            self.page.evaluate("alarm()")
+            self.page.wait_for_timeout(20)
+            self.assertEqual(self.page.evaluate("mock.injections.length"), count)
+            if failures < 6:
+                self.page.evaluate("retryNow()")
+                self.page.wait_for_function(f"state().failures === {failures + 1}")
+                self.wait_retry()
+        self.page.evaluate("""() => {
+            mock.batch.posts = [{url: "https://x.com/Ravens/status/123", text: "Recovered",
+                created_at: new Date().toISOString(), image_urls: []}];
+            retryNow();
+        }""")
+        self.wait_collected()
+        self.assertEqual(self.page.evaluate("state().failures"), 0)
+        self.assertIsNone(self.page.evaluate("state().retryAt"))
+        self.assertIsNone(self.page.evaluate("state().error"))
+        history = self.page.evaluate("request('status')")["history"]
+        self.assertEqual(history["last_failure"]["code"], "no_posts")
+        self.assertEqual(history["events"][-1]["event"], "recovered")
+
+    def test_closed_tab_is_replaced_without_selecting_it(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            delete mock.tabs[1];
+            mock.tabs[2] = {id: 2, url: "https://x.com/Other", status: "complete"};
+            mock.activeId = 2;
+            chrome.tabs.onRemoved.fire(1);
+        }""")
+        self.wait_retry()
+        self.assertIsNone(self.page.evaluate("state().tabId"))
+        self.page.evaluate("retryNow()")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.assertEqual(self.page.evaluate("state().tabId"), 3)
+        self.assertEqual(self.page.evaluate("mock.activeId"), 2)
+        self.assertFalse(self.page.evaluate("mock.tabs[3].active"))
+        self.assertEqual(self.page.evaluate("mock.reloads"), [3])
+
+    def test_recovery_reuses_approved_tab_and_ignores_incognito_and_pending_navigation(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            mock.tabs[1].url = "https://x.com/Other";
+            mock.tabs[2] = {id: 2, url: "https://x.com/Ravens", incognito: true};
+            mock.tabs[3] = {id: 3, url: "https://x.com/Ravens", pendingUrl: "https://x.com/home"};
+            mock.tabs[4] = {id: 4, url: "https://x.com/ravens/?lang=en", status: "complete"};
+            chrome.tabs.onUpdated.fire(1, {url: mock.tabs[1].url});
+        }""")
+        self.wait_retry()
+        self.page.evaluate("retryNow()")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.assertEqual(self.page.evaluate("mock.reloads"), [4])
+        self.assertEqual(self.page.evaluate("Object.keys(mock.tabs).length"), 4)
+
+    def test_sign_in_redirect_waits_without_reload_or_duplicate_tabs(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            mock.tabs[1].url = "https://x.com/i/flow/login";
+            chrome.tabs.onUpdated.fire(1, {url: mock.tabs[1].url});
+        }""")
+        self.wait_retry()
+        self.assertEqual(self.page.evaluate("state().lifecycle.phase"), "needs_attention")
+        for _ in range(3):
+            self.page.evaluate("retryNow()")
+            self.page.wait_for_timeout(20)
+        self.assertEqual(self.page.evaluate("mock.reloads"), [])
+        self.assertEqual(self.page.evaluate("Object.keys(mock.tabs).length"), 1)
+        self.assertEqual(self.page.evaluate("mock.injections.length"), 8)
+        self.page.evaluate("mock.tabs[1].url = 'https://x.com/Ravens'; retryNow()")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.assertEqual(self.page.evaluate("mock.reloads"), [])
+        self.assertFalse(self.page.evaluate("state().attention"))
+
+    def test_challenge_waits_for_manual_resolution_then_resumes(self):
+        self.worker()
+        self.page.evaluate("mock.batch = {error: 'challenge'}; request('start')")
+        self.wait_retry()
+        self.assertEqual(self.page.evaluate("state().lifecycle.phase"), "needs_attention")
+        self.page.evaluate("retryNow()")
+        self.page.wait_for_function("state().failures === 2")
+        self.wait_retry()
+        self.assertEqual(self.page.evaluate("mock.reloads"), [])
+        self.page.evaluate("""() => {
+            mock.batch = {posts: [{url: "https://x.com/Ravens/status/123", text: "Public",
+                created_at: new Date().toISOString(), image_urls: []}]};
+            retryNow();
+        }""")
+        self.wait_collected()
+        self.assertFalse(self.page.evaluate("state().attention"))
+
+    def test_native_timeout_releases_queue_and_late_reply_cannot_send(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            const timer = window.setTimeout.bind(window);
+            window.setTimeout = (fn, ms) => timer(fn, ms === 10000 ? 50 : ms);
+            mock.nativeGate = new Promise(resolve => { mock.release = resolve; });
+            alarm();
+        }""")
+        self.wait_retry()
+        self.assertIn("ten seconds", self.page.evaluate("state().error"))
+        self.assertEqual(self.page.evaluate("request('status')")["history"]["last_failure"]["code"], "native_timeout")
+        self.page.evaluate("mock.release(); mock.nativeGate = null; retryNow()")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.page.evaluate("request('stop')")
+        self.assertFalse(self.page.evaluate("state().enabled"))
+
+    def test_history_survives_pause_start_and_browser_restart_and_is_bounded(self):
+        self.worker()
+        self.page.evaluate("mock.batch.error = 'SECRET-ERROR'; request('start')")
+        self.wait_retry()
+        failure = self.page.evaluate("request('status')")["history"]["last_failure"]
+        self.assertEqual(failure["code"], "extraction_failed")
+        self.assertEqual(failure["phase"], "extracting")
+        self.assertEqual(failure["version"], "1.1.0")
+        self.page.evaluate("request('stop'); delete mock.batch.error")
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.assertEqual(self.page.evaluate("request('status')")["history"]["last_failure"], failure)
+        self.page.evaluate("request('stop')")
+        self.page.evaluate("""() => {
+            const history = mock.local.ravensCollectorHistory;
+            history.events = Array.from({length: 200}, () => structuredClone(history.events[0]));
+            mock.session = {};
+            mock.alarms = {};
+        }""")
+        self.recreate_worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        history = self.page.evaluate("request('status')")["history"]
+        self.assertEqual(len(history["events"]), 200)
+        self.assertEqual(history["last_failure"], failure)
+        for private in ("SECRET", "tabId", "generation", "https://", "Ravens roster news"):
+            self.assertNotIn(private, json.dumps(history))
+
+    def test_pause_survives_browser_restart_and_install_event(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("request('stop')")
+        self.page.evaluate("mock.session = {}; mock.alarms = {}; mock.tabs = {}")
+        self.recreate_worker()
+        self.page.evaluate("chrome.runtime.onStartup.fire(); chrome.runtime.onInstalled.fire()")
+        self.page.wait_for_timeout(30)
+        self.assertFalse(self.page.evaluate("request('status')")["enabled"])
+        self.assertFalse(self.page.evaluate("mock.local.ravensCollectorSettings.enabled"))
+        self.assertEqual(self.page.evaluate("mock.alarms"), {})
+        self.assertEqual(self.page.evaluate("mock.tabs"), {})
+
+    def test_update_migrates_enabled_session_without_clearing_history(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("delete mock.local.ravensCollectorSettings")
+        self.recreate_worker()
+        self.page.wait_for_function("mock.local.ravensCollectorSettings?.enabled")
+        self.assertTrue(self.page.evaluate("state().enabled"))
+        self.assertTrue(self.page.evaluate(
+            "mock.local.ravensCollectorHistory.events.some(event => event.event === 'first_save')"))
+
+    def test_saved_pause_wins_over_interrupted_session_write(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("mock.local.ravensCollectorSettings.enabled = false")
+        self.recreate_worker()
+        self.page.wait_for_function("!state().enabled")
+        self.assertFalse(self.page.evaluate("request('status')")["enabled"])
+        self.assertFalse(self.page.evaluate("mock.local.ravensCollectorSettings.enabled"))
+
+    def test_reload_and_tab_creation_failures_have_specific_safe_codes(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            chrome.tabs.reload = async () => { throw new Error("PRIVATE-RELOAD"); };
+            alarm();
+        }""")
+        self.wait_retry()
+        self.assertEqual(self.page.evaluate("request('status')")["history"]["last_failure"]["code"], "reload_failed")
+        self.page.evaluate("""() => {
+            delete mock.tabs[1];
+            chrome.tabs.onRemoved.fire(1);
+        }""")
+        self.page.wait_for_function("state().tabId === null")
+        self.wait_retry()
+        self.page.evaluate("""() => {
+            chrome.tabs.create = async () => { throw new Error("PRIVATE-CREATE"); };
+            retryNow();
+        }""")
+        self.page.wait_for_function(
+            "mock.local.ravensCollectorHistory.last_failure.code === 'tab_recovery_failed'")
+        self.wait_retry()
+        self.assertNotIn("PRIVATE", json.dumps(self.page.evaluate("request('status')")))
+
 
 @unittest.skipUnless(HAS_PLAYWRIGHT and os.environ.get("EDGE_EXTENSION_REAL_BROWSER_TEST") == "1",
                      "opt-in real MV3 test takes approximately 150 seconds")
 class RealMV3Tests(unittest.TestCase):
-    def test_real_alarm_reload_and_active_tab_permission(self):
+    def test_real_alarm_reload_and_host_permission(self):
         """Only native I/O is replaced; permissions, alarms, reload, scripts and storage are real."""
         from playwright.sync_api import sync_playwright
         owned = EXTENSION / (".browser-verification-" + uuid.uuid4().hex)
@@ -1018,7 +1249,7 @@ chrome.runtime.connectNative = host => {
                     ravens.goto("https://x.com/Ravens")
                     before = service.evaluate("""async () =>
                         (await chrome.tabs.query({active: true, currentWindow: true}))[0].url || null""")
-                    self.assertIsNone(before, "Fixture must not silently pregrant host permissions")
+                    self.assertEqual(before, "https://x.com/Ravens")
                     browser_protocol = context.browser.new_browser_cdp_session()
                     targets = browser_protocol.send("Target.getTargets", {
                         "filter": [{"type": "tab", "exclude": False}, {"exclude": True}]

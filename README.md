@@ -107,9 +107,11 @@ Edge's shared profile directory or read cookies. It uses the Ravens page you
 explicitly authorize and a local native-messaging host to write the same public
 snapshot consumed by Docker. Do not run the Playwright collector at the same time.
 
-1. In the dedicated Edge profile, open `edge://extensions`, turn on **Developer
-   mode**, choose **Load unpacked**, and select this checkout's `edge_extension`
-   directory. Load it only in the dedicated profile.
+1. Run `.\tools\install-edge-extension.ps1` from this checkout to install the
+   extension at `%LOCALAPPDATA%\The-Castle\edge-extension`, outside session
+   worktrees. In the dedicated Edge profile, open `edge://extensions`, turn on
+   **Developer mode**, choose **Load unpacked**, and select that permanent folder.
+   Load it only in the dedicated profile.
 2. Copy the extension's ID from that page. From this checkout in PowerShell,
    register its local writer (replace the placeholder with the actual ID):
 
@@ -119,8 +121,8 @@ snapshot consumed by Docker. Do not run the Playwright collector at the same tim
 
 3. Open `https://x.com/Ravens` in that profile and sign in manually if needed.
    Click the extension's toolbar button and start collection on that tab.
-   Keep Edge and the Ravens tab open. After restarting Edge, start collection
-   again explicitly.
+   Keep the dedicated Edge profile open. After the first Start, collection resumes
+   automatically when Edge reopens and recovers a closed Ravens tab.
 4. Once the extension reports a successful write, enable the read-only feed mount
    with the Docker Compose command below, using your existing Compose project
    name. Set `X_FEED_DIRECTORY` in the bot's `.env` to the absolute public-feed
@@ -130,12 +132,18 @@ snapshot consumed by Docker. Do not run the Playwright collector at the same tim
 The extension refreshes only its selected Ravens tab roughly once a minute and
 reads a bounded portion of the rendered timeline. Tab closure, navigating away,
 sign-in challenges, browser suspension, or changed page markup can interrupt
-collection. Status and errors appear in the popup. Stop collection with its
-Stop button. There is no background account login or private API access.
+collection. Transient failures retry automatically with delays of 1, 2, 4, 8,
+then at most 15 minutes. A closed or navigated-away tab is replaced by an existing
+approved Ravens tab or a new inactive one. Sign-in/challenges wait for manual
+resolution without reloading the challenge page. **Pause** intentionally disables
+collection and persists across restarts; uninstalling/reinstalling is unnecessary.
+There is no background account login or private API access.
 
-The extension asks for `activeTab`, scripting, alarms, session storage, and
-native messaging, not cookie access or blanket access to websites. Authorization
-is granted when you use its toolbar action on the Ravens tab. Native messaging
+The extension asks for `activeTab`, scripting, alarms, storage, native messaging,
+and host permission for `https://x.com/*`, not cookie access or access to other
+websites. The X permission enables unattended recovery, but collection is still
+restricted to the exact Ravens profile URL. Approve this added permission when
+updating to extension **1.1.0**. Native messaging
 is restricted to the registered extension ID; the writer accepts only the public
 post schema and does not accept arbitrary commands or output paths from messages.
 The native host registration is per Windows user, not system-wide, and does not
@@ -148,7 +156,7 @@ The native writer needs only Python's standard library (no Playwright or browser
 download). Registration installs its small Python package beside the launcher,
 outside the checkout. It stamps successful reads, retains up to 300 observed posts
 from the last seven days, and writes `ravens.json` atomically in the selected output
-directory. Stop/error messages
+directory. Pause/error messages
 invalidate the feed immediately; if the browser cannot contact the writer, the
 existing two-minute stale-file fallback still applies. Docker sees only this
 public feed directory. Existing source attribution and deduplication are shared
@@ -168,15 +176,28 @@ While collection is on, the extension keeps one native writer connection open
 instead of launching a Windows command/Python process on each refresh. It does
 not activate the Ravens tab or focus its window. This removes repeated writer
 launches as a possible source of screen flashes; it does not prevent Edge's own
-reload rendering or GPU/desktop flicker. Stop closes the connection after
+reload rendering or GPU/desktop flicker. Pause closes the connection after
 invalidating the feed. A worker/browser restart or host disconnect can require
-a new process.
+a new process. Native responses time out after ten seconds so a hung writer
+cannot block recovery indefinitely.
+
+The popup's **Copy diagnostics** includes the last 200 local lifecycle/recovery
+events and a separately retained latest failure, with timestamps, version, fixed
+reason codes, and safe timing/count diagnostics. This history survives Start,
+Pause, extension reloads, and Edge restarts, but not uninstalling or clearing
+extension storage. It contains no post text, credentials, or tab identifiers.
+Versions before 1.1.0 had session-only snapshots, so restarting could erase the
+failure cause. See [collector setup and diagnostics](edge_extension/SETUP.md).
 
 Keep the Python installation available. Rerun registration after writer updates
 or changing Python, the output directory, or the extension ID. The installed writer
-does not depend on keeping the checkout; the unpacked extension still does, so copy
-its folder to a permanent location and load that copy before removing the checkout,
-then register its new ID. To uninstall, stop collection, remove the
+does not depend on keeping the checkout. The extension installer above also makes
+the loaded copy independent of session cleanup. If migrating an extension loaded
+from a worktree, Stop/Pause and disable the old copy, load the permanent folder,
+and register its new ID with the same feed output directory. Keep only one copy
+enabled. Future updates use the same installer, then Reload and Start / Resume
+in Edge; the permanent path keeps the extension ID stable. Reload alone does not
+copy new files from a worktree. To uninstall, stop collection, remove the
 extension from Edge, and remove the specific native-host registry key above.
 No scheduled task or always-running host process is installed.
 For the persistent-writer update, stop collection, rerun the registration command

@@ -3,6 +3,9 @@ importScripts("collector.js");
 const HOST = "com.thecastle.ravens_feed";
 const ALARM = "ravens-refresh";
 const KEY = "ravensCollector";
+const SETTINGS = "ravensCollectorSettings";
+const HISTORY = "ravensCollectorHistory";
+const NATIVE_TIMEOUT_MS = 10000;
 const LIFECYCLE_EMPTY = {
     phase: "off", worker_resumes: 0, alarms_seen: 0, alarms_skipped_busy: 0,
     alarm_repairs: 0, cycles_started: 0, cycles_completed: 0, pages_completed: 0,
@@ -13,7 +16,8 @@ const LIFECYCLE_EMPTY = {
 };
 const EMPTY = {
     enabled: false, tabId: null, generation: null, busy: null,
-    lastUpdated: null, count: 0, error: null, diagnostics: null, lifecycle: null
+    lastUpdated: null, count: 0, error: null, diagnostics: null, lifecycle: null,
+    failures: 0, retryAt: null, attention: false
 };
 function lifecycle(state, updates = {}) {
     return {...state, lifecycle: {...LIFECYCLE_EMPTY, ...state.lifecycle, ...updates}};
@@ -38,17 +42,20 @@ function safeDiagnostics(value) {
         Number.isSafeInteger(value?.[key]) && value[key] >= 0 ? Math.min(value[key], 99999) : 0]));
 }
 const ERRORS = {
-    page_changed: "The tracked tab left https://x.com/Ravens. Open that page and press Start again.",
-    sign_in_required: "Sign in manually to X in the dedicated Edge profile, then press Start.",
-    challenge: "X needs your attention. Resolve it manually; collection has stopped.",
-    extraction_failed: "The Ravens timeline could not be read. Check the page and press Start.",
+    page_changed: "The tracked tab left https://x.com/Ravens. A Ravens tab will be recovered automatically.",
+    sign_in_required: "Sign in manually to X in the dedicated Edge profile and return to the Ravens page. Collection will resume automatically.",
+    challenge: "X needs your attention. Resolve it manually and return to the Ravens page. Collection will resume automatically.",
+    extraction_failed: "The Ravens timeline could not be read. Collection will retry automatically.",
     truncated: "A post was truncated (Show more). It was not sent. Check X manually.",
     oversized: "A post exceeded the 25,000-character feed limit and was not sent. Check X manually.",
-    no_posts: "No recent, complete original Ravens posts were visible. Check X and press Start.",
+    no_posts: "No recent, complete original Ravens posts were visible. Collection will retry automatically.",
     native_failed: "The native feed host is unavailable, not yet registered, or rejected the update. Load this unpacked extension in Edge and give its extension ID to the native-host setup process.",
-    tab_closed: "The tracked Ravens tab was closed. Open it and press Start again.",
-    load_failed: "The Ravens tab did not finish loading. Check X and press Start again.",
-    extraction_timeout: "The Ravens tab's read stalled or was suspended. Check the tab manually, keep it awake, and press Start again.",
+    native_timeout: "The native feed host did not respond within ten seconds. Collection will reconnect and retry.",
+    tab_closed: "The tracked Ravens tab was closed. A Ravens tab will be reopened automatically.",
+    tab_recovery_failed: "A Ravens tab could not be recovered. Check the extension's X site permission and keep the dedicated Edge profile open. Collection will retry.",
+    reload_failed: "The Ravens tab could not be reloaded. Collection will retry automatically.",
+    load_failed: "The Ravens tab did not finish loading. Collection will retry automatically.",
+    extraction_timeout: "The Ravens tab's read stalled or was suspended. Collection will retry automatically.",
     alarm_failed: "The refresh alarm is unavailable. Reload the extension and press Start again."
 };
 let queue = Promise.resolve();
@@ -65,14 +72,31 @@ async function readState() {
 async function saveState(state) {
     await chrome.storage.session.set({[KEY]: state});
 }
+async function recordEvent(event, state, code = null) {
+    const history = (await chrome.storage.local.get(HISTORY))[HISTORY] || {events: [], last_failure: null};
+    const entry = {
+        at: new Date().toISOString(), version: chrome.runtime.getManifest().version, event, code,
+        phase: state.lifecycle?.phase || "off", failures: state.failures || 0,
+        retry_at: state.retryAt, last_updated: state.lastUpdated,
+        busy_seconds: state.busy ? elapsedSeconds(state.busy, Date.now()) : null,
+        cycle_seconds: elapsedSeconds(state.lifecycle?.last_cycle_started_at, Date.now()),
+        native_seconds: elapsedSeconds(state.lifecycle?.native_write_started_at, Date.now()),
+        diagnostics: state.diagnostics ? safeDiagnostics(state.diagnostics) : null
+    };
+    await chrome.storage.local.set({[HISTORY]: {
+        events: [...history.events, entry].slice(-200),
+        last_failure: event === "failure" ? entry : history.last_failure
+    }});
+}
 async function readStatus() {
     const state = await readState();
+    const history = (await chrome.storage.local.get(HISTORY))[HISTORY] || {events: [], last_failure: null};
     let alarm;
     let alarmReadFailed = false;
     try { alarm = await chrome.alarms.get(ALARM); }
     catch { alarmReadFailed = true; }
     const secondsSince = value => elapsedSeconds(value, Date.now());
-    return {...state, scheduler: {
+    return {...state, history, scheduler: {
         alarm_present: !!alarm, alarm_read_failed: alarmReadFailed,
         next_alarm_at: Number.isFinite(alarm?.scheduledTime)
             ? new Date(alarm.scheduledTime).toISOString() : null,
@@ -97,8 +121,37 @@ function approvedUrl(value) {
     } catch { return false; }
 }
 function approvedTab(tab) {
-    return tab && !tab.incognito && approvedUrl(tab.url) &&
+    return tab && !tab.incognito && (approvedUrl(tab.url) ||
+        (!tab.url && tab.status === "loading" && approvedUrl(tab.pendingUrl))) &&
         (!tab.pendingUrl || approvedUrl(tab.pendingUrl));
+}
+function attentionCode(tab) {
+    try {
+        const url = new URL(tab.pendingUrl || tab.url);
+        if (url.origin !== "https://x.com") return null;
+        if (/^\/i\/flow\/login\/?$/.test(url.pathname) || /^\/login\/?$/.test(url.pathname)) return "sign_in_required";
+        if (/^\/account\/access\/?$/.test(url.pathname)) return "challenge";
+    } catch { /* Missing tab URLs are handled as page changes. */ }
+    return null;
+}
+async function recoverTab(state) {
+    if (state.tabId !== null) {
+        let tab;
+        try { tab = await chrome.tabs.get(state.tabId); }
+        catch { throw new Error("tab_closed"); }
+        if (approvedTab(tab)) return {state, tab};
+        throw new Error(attentionCode(tab) || "page_changed");
+    }
+    let tab;
+    try {
+        const tabs = await chrome.tabs.query({url: "https://x.com/*"});
+        tab = tabs.find(approvedTab) || await chrome.tabs.create({url: "https://x.com/Ravens", active: false});
+    } catch { throw new Error("tab_recovery_failed"); }
+    if (!approvedTab(tab)) throw new Error("page_changed");
+    state = {...state, tabId: tab.id};
+    await saveState(state);
+    await recordEvent("tab_recovered", state);
+    return {state, tab};
 }
 let nativePort = null;
 let nativePending = null;
@@ -111,6 +164,12 @@ function nativeMessage(payload) {
     // Calls are serialized by the control queue. Reuse one writer instead of
     // launching a Windows console process on every minute's refresh.
     return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            nativePending = null;
+            closeNativePort();
+            reject(new Error("native_timeout"));
+        }, NATIVE_TIMEOUT_MS);
+        const finish = callback => value => { clearTimeout(timer); callback(value); };
         try {
             if (!nativePort) {
                 const port = chrome.runtime.connectNative(HOST);
@@ -132,9 +191,10 @@ function nativeMessage(payload) {
                     if (pending) pending.reject(new Error("native_failed"));
                 });
             }
-            nativePending = {resolve, reject};
+            nativePending = {resolve: finish(resolve), reject: finish(reject)};
             nativePort.postMessage(payload);
         } catch {
+            clearTimeout(timer);
             nativePending = null;
             closeNativePort();
             reject(new Error("native_failed"));
@@ -144,18 +204,21 @@ function nativeMessage(payload) {
 // Called only in the control queue, so an invalidation follows any earlier native write.
 async function disable(error = null, diagnostics = null) {
     const previous = await readState();
+    await chrome.storage.local.set({[SETTINGS]: {enabled: false}});
     const state = lifecycle({...EMPTY, lastUpdated: previous.lastUpdated, count: previous.count, error,
         diagnostics: diagnostics ? safeDiagnostics(diagnostics) : null}, {
         ...previous.lifecycle, phase: "off", last_progress_at: new Date().toISOString()
     });
     await saveState(state);
+    await recordEvent("paused", state);
     await chrome.alarms.clear(ALARM);
     try {
         await nativeMessage({version: 1, error: "collector_unavailable"});
-    } catch {
+    } catch (nativeError) {
         state.error = [error, ERRORS.native_failed + " The old feed could not be invalidated."]
             .filter(Boolean).join(" ");
         await saveState(state);
+        await recordEvent("failure", state, nativeError.message === "native_timeout" ? "native_timeout" : "native_failed");
     } finally {
         closeNativePort();
     }
@@ -167,14 +230,41 @@ async function checkedState(generation) {
     let tab;
     try { tab = await chrome.tabs.get(state.tabId); }
     catch { throw new Error("tab_closed"); }
-    if (!approvedTab(tab)) throw new Error("page_changed");
+    if (!approvedTab(tab)) throw new Error(attentionCode(tab) || "page_changed");
     return {state, tab};
+}
+// The caller holds the queue; keep the user's intent enabled even when a cycle fails.
+async function retry(state, code, diagnostics = null) {
+    code = Object.hasOwn(ERRORS, code) ? code : "extraction_failed";
+    const failures = increment(state.failures);
+    const attention = code === "sign_in_required" || code === "challenge";
+    const delayMinutes = attention ? 1 : Math.min(15, 2 ** Math.min(failures - 1, 4));
+    const next = lifecycle({...state, busy: null, generation: crypto.randomUUID(),
+        tabId: code === "tab_closed" || code === "page_changed" ? null : state.tabId,
+        error: ERRORS[code], diagnostics: diagnostics ? safeDiagnostics(diagnostics) : state.diagnostics,
+        failures, attention, retryAt: new Date(Date.now() + delayMinutes * 60000).toISOString()
+    }, {phase: attention ? "needs_attention" : "retry_wait", last_progress_at: new Date().toISOString()});
+    await saveState(next);
+    await recordEvent("failure", {...next, busy: state.busy, lifecycle: state.lifecycle}, code);
+    try { await ensureAlarm(); }
+    catch {
+        next.error += " " + ERRORS.alarm_failed;
+        await saveState(next);
+        await recordEvent("failure", next, "alarm_failed");
+    }
+    try { await nativeMessage({version: 1, error: "collector_unavailable"}); }
+    catch (error) {
+        next.error += " The old feed could not be invalidated; it must expire under the freshness limit.";
+        await saveState(next);
+        await recordEvent("invalidation_failed", next, error.message === "native_timeout" ? "native_timeout" : "native_failed");
+    } finally { closeNativePort(); }
+    return next;
 }
 async function fail(generation, code, diagnostics = null) {
     return exclusive(async () => {
         const state = await readState();
         if (state.enabled && state.generation === generation) {
-            await disable(ERRORS[code] || ERRORS.extraction_failed, diagnostics);
+            await retry(state, code, diagnostics);
         }
     });
 }
@@ -268,7 +358,8 @@ async function collect(generation) {
             diagnostics.sent_posts = posts.length;
             const sending = await readState();
             const completedAt = Date.now();
-            await saveState(lifecycle({...sending, busy: null, lastUpdated: reply.fetched_at,
+            const completed = lifecycle({...sending, busy: null, lastUpdated: reply.fetched_at,
+                failures: 0, retryAt: null, attention: false,
                 diagnostics: safeDiagnostics(diagnostics),
                 count: reply.count, error: [truncated ? ERRORS.truncated : null,
                     oversized ? ERRORS.oversized : null].filter(Boolean).join(" ") || null}, {
@@ -279,7 +370,10 @@ async function collect(generation) {
                 last_native_duration_seconds: elapsedSeconds(sending.lifecycle?.native_write_started_at, completedAt),
                 last_reload_to_save_seconds: elapsedSeconds(sending.lifecycle?.last_reload_at, completedAt),
                 last_save_gap_seconds: elapsedSeconds(sending.lastUpdated, reply.fetched_at)
-            }));
+            });
+            await saveState(completed);
+            if (sending.failures || !sending.lastUpdated) await recordEvent(
+                sending.failures ? "recovered" : "first_save", completed);
         });
     } catch (error) {
         await fail(generation, error.message, diagnostics);
@@ -294,13 +388,17 @@ async function start() {
             return disable("Start only on https://x.com/Ravens in your dedicated '1 Winning Pod' Edge profile.");
         }
         // Starting a new generation invalidates any outstanding extraction before enabling it.
-        const cleared = await disable();
-        if (cleared.error) return cleared;
-        const state = lifecycle({...EMPTY, enabled: true, tabId: tab.id, generation: crypto.randomUUID(),
+        const previous = await readState();
+        await chrome.storage.local.set({[SETTINGS]: {enabled: true}});
+        const state = lifecycle({...EMPTY, lastUpdated: previous.lastUpdated, count: previous.count,
+            enabled: true, tabId: tab.id, generation: crypto.randomUUID(),
             busy: Date.now()}, {phase: "starting", last_progress_at: new Date().toISOString()});
         await saveState(state);
-        try { await ensureAlarm(); }
-        catch { return disable("The refresh alarm could not be created. Try Start again."); }
+        await recordEvent("started", state);
+        try {
+            await ensureAlarm();
+            await nativeMessage({version: 1, error: "collector_unavailable"});
+        } catch (error) { return retry(state, Object.hasOwn(ERRORS, error.message) ? error.message : "alarm_failed"); }
         void collect(state.generation);
         return state;
     });
@@ -320,7 +418,18 @@ async function refresh(alarm) {
                 last_alarm_lag_seconds: elapsedSeconds(alarm?.scheduledTime, receivedAt)
             });
             await saveState(state);
-            const current = await checkedState(generation);
+            if (state.retryAt && Date.now() < Date.parse(state.retryAt)) return;
+            if (state.attention && state.tabId !== null) {
+                let tab;
+                try { tab = await chrome.tabs.get(state.tabId); }
+                catch { throw new Error("tab_closed"); }
+                // Do not reload or replace a page while the user is signing in or solving a challenge.
+                if (!approvedTab(tab)) {
+                    if (attentionCode(tab)) return;
+                    throw new Error("page_changed");
+                }
+            }
+            const current = await recoverTab(state);
             // Persisted lease prevents duplicate reloads; a killed worker recovers next minute.
             if (running.has(generation) ||
                 (current.state.busy && Date.now() - current.state.busy < 45000)) {
@@ -330,10 +439,14 @@ async function refresh(alarm) {
                 return;
             }
             await saveState(lifecycle({...current.state, busy: Date.now()}, {
-                phase: "reloading", last_reload_at: new Date().toISOString(),
+                phase: state.attention ? "waiting_load" : "reloading",
+                last_reload_at: state.attention ? null : new Date().toISOString(),
                 last_progress_at: new Date().toISOString()
             }));
-            await chrome.tabs.reload(current.state.tabId);
+            if (!state.attention) {
+                try { await chrome.tabs.reload(current.state.tabId); }
+                catch { throw new Error("reload_failed"); }
+            }
             void collect(generation);
         });
     } catch (error) {
@@ -350,7 +463,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Read-only status must remain available while a native response holds the write queue.
     else if (message?.action === "status") operation = readStatus();
     else return false;
-    operation.then(sendResponse, () => sendResponse({...EMPTY, error: "Extension operation failed. Try Stop, then Start."}));
+    operation.then(sendResponse, () => sendResponse({...EMPTY, error: "Extension operation failed. Check extension storage and reload the extension."}));
     return true;
 });
 chrome.alarms.onAlarm.addListener(alarm => {
@@ -358,32 +471,48 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 chrome.tabs.onRemoved.addListener(tabId => {
     void exclusive(async () => {
-        if ((await readState()).tabId === tabId) await disable(ERRORS.tab_closed);
+        const state = await readState();
+        if (state.enabled && state.tabId === tabId) await retry(state, "tab_closed");
     });
 });
-chrome.tabs.onUpdated.addListener((tabId, change) => {
+chrome.tabs.onUpdated.addListener(tabId => {
     void exclusive(async () => {
         const state = await readState();
         if (state.tabId !== tabId) return;
-        if (change.url && !approvedUrl(change.url)) { await disable(ERRORS.page_changed); return; }
         try { await checkedState(state.generation); }
-        catch (error) { await disable(ERRORS[error.message] || ERRORS.page_changed); }
+        catch (error) {
+            if (state.attention && (error.message === "sign_in_required" || error.message === "challenge")) return;
+            await retry(state, error.message);
+        }
     });
 });
-chrome.runtime.onStartup.addListener(() => { void exclusive(() => disable()); });
-chrome.runtime.onInstalled.addListener(() => { void exclusive(() => disable()); });
-// Alarms can disappear across browser updates. Restore only an explicitly started session.
+// Top-level initialization also runs when startup/install events wake a fresh worker.
+chrome.runtime.onStartup.addListener(() => {});
+chrome.runtime.onInstalled.addListener(() => {});
 void exclusive(async () => {
-    const state = await readState();
+    let state = await readState();
+    const settings = (await chrome.storage.local.get(SETTINGS))[SETTINGS];
+    if (settings?.enabled === false && state.enabled) {
+        await disable();
+        return;
+    }
+    if (!settings && state.enabled) await chrome.storage.local.set({[SETTINGS]: {enabled: true}});
+    const restoring = !state.enabled && settings?.enabled === true;
+    if (restoring) {
+        state = lifecycle({...EMPTY, enabled: true, generation: crypto.randomUUID()}, {phase: "starting"});
+        await saveState(state);
+    }
     if (!state.enabled) return;
     try {
-        await checkedState(state.generation);
         const repaired = await ensureAlarm();
-        await saveState(lifecycle(state, {
+        state = lifecycle(state, {
             worker_resumes: increment(state.lifecycle?.worker_resumes),
             alarm_repairs: repaired ? increment(state.lifecycle?.alarm_repairs) : state.lifecycle?.alarm_repairs || 0
-        }));
+        });
+        await saveState(state);
+        await recordEvent(restoring ? "browser_resumed" : "worker_resumed", state);
+        if (restoring) void refresh();
     } catch (error) {
-        await disable(ERRORS[error.message] || ERRORS.alarm_failed);
+        await retry(state, "alarm_failed");
     }
 });
