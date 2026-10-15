@@ -100,12 +100,46 @@ function approvedTab(tab) {
     return tab && !tab.incognito && approvedUrl(tab.url) &&
         (!tab.pendingUrl || approvedUrl(tab.pendingUrl));
 }
-async function nativeMessage(payload) {
-    try {
-        const reply = await chrome.runtime.sendNativeMessage(HOST, payload);
-        if (!reply || reply.ok !== true) throw new Error("native_failed");
-        return reply;
-    } catch { throw new Error("native_failed"); }
+let nativePort = null;
+let nativePending = null;
+function closeNativePort() {
+    const port = nativePort;
+    nativePort = null;
+    if (port) port.disconnect();
+}
+function nativeMessage(payload) {
+    // Calls are serialized by the control queue. Reuse one writer instead of
+    // launching a Windows console process on every minute's refresh.
+    return new Promise((resolve, reject) => {
+        try {
+            if (!nativePort) {
+                const port = chrome.runtime.connectNative(HOST);
+                nativePort = port;
+                port.onMessage.addListener(reply => {
+                    if (nativePort !== port || !nativePending) return;
+                    const pending = nativePending;
+                    nativePending = null;
+                    if (reply?.ok === true) pending.resolve(reply);
+                    else pending.reject(new Error("native_failed"));
+                });
+                port.onDisconnect.addListener(() => {
+                    // Consume Chrome's lastError without exposing host output.
+                    void chrome.runtime.lastError;
+                    if (nativePort !== port) return;
+                    nativePort = null;
+                    const pending = nativePending;
+                    nativePending = null;
+                    if (pending) pending.reject(new Error("native_failed"));
+                });
+            }
+            nativePending = {resolve, reject};
+            nativePort.postMessage(payload);
+        } catch {
+            nativePending = null;
+            closeNativePort();
+            reject(new Error("native_failed"));
+        }
+    });
 }
 // Called only in the control queue, so an invalidation follows any earlier native write.
 async function disable(error = null, diagnostics = null) {
@@ -122,6 +156,8 @@ async function disable(error = null, diagnostics = null) {
         state.error = [error, ERRORS.native_failed + " The old feed could not be invalidated."]
             .filter(Boolean).join(" ");
         await saveState(state);
+    } finally {
+        closeNativePort();
     }
     return state;
 }
