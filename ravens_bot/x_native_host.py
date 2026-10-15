@@ -33,8 +33,13 @@ def read_exact(source: BinaryIO, size: int) -> bytes:
     return bytes(parts)
 
 
-def read_message(source: BinaryIO) -> object:
-    header = read_exact(source, 4)
+def read_message(source: BinaryIO, *, allow_eof: bool = False) -> object:
+    first = source.read(1)
+    if not first:
+        if allow_eof:
+            raise EOFError
+        raise ValueError("Truncated native message")
+    header = first + read_exact(source, 3)
     size, = struct.unpack("=I", header)
     if not 0 < size <= MAX_SNAPSHOT_BYTES:
         raise ValueError("Invalid native message size")
@@ -89,16 +94,38 @@ def update_feed(directory: Path, payload: object, now: datetime) -> dict[str, ob
 
 
 def serve(source: BinaryIO, destination: BinaryIO, directory: Path) -> None:
+    """Serve one frame (also used by one-shot native messaging clients)."""
     try:
         result = update_feed(directory, read_message(source), datetime.now(timezone.utc))
     except (OSError, ValueError, RecursionError):
-        LOGGER.warning("Rejected or could not save the public X feed.")
-        try:
-            write_snapshot(directory, {"version": 1, "error": "X extension feed unavailable"})
-        except OSError:
-            LOGGER.error("Could not invalidate the public feed; the bot will fall back when it expires.")
-        result = {"ok": False, "error": "Could not validate or save public Ravens posts. Check the feed folder."}
+        result = failed_update(directory)
     send_message(destination, result)
+
+
+def failed_update(directory: Path) -> dict[str, object]:
+    LOGGER.warning("Rejected or could not save the public X feed.")
+    try:
+        write_snapshot(directory, {"version": 1, "error": "X extension feed unavailable"})
+    except OSError:
+        LOGGER.error("Could not invalidate the public feed; the bot will fall back when it expires.")
+    return {"ok": False, "error": "Could not validate or save public Ravens posts. Check the feed folder."}
+
+
+def serve_connection(source: BinaryIO, destination: BinaryIO, directory: Path) -> None:
+    """Keep the writer alive until Edge closes its native messaging port."""
+    while True:
+        try:
+            payload = read_message(source, allow_eof=True)
+        except EOFError:
+            return
+        except (OSError, ValueError, RecursionError):
+            send_message(destination, failed_update(directory))
+            return  # A malformed frame cannot safely be resynchronized.
+        try:
+            result = update_feed(directory, payload, datetime.now(timezone.utc))
+        except (OSError, ValueError, RecursionError):
+            result = failed_update(directory)
+        send_message(destination, result)
 
 
 def batch_path(path: Path) -> str:
@@ -173,7 +200,7 @@ def main() -> None:
 
         msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
-    serve(sys.stdin.buffer, sys.stdout.buffer, args.output)
+    serve_connection(sys.stdin.buffer, sys.stdout.buffer, args.output)
 
 
 if __name__ == "__main__":

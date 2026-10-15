@@ -21,7 +21,7 @@ HARNESS = r"""
             fire: (...args) => handlers.forEach(fn => fn(...args)), handlers};
     };
     window.mock = {
-        session: {}, calls: [], reloads: [], injections: [], alarms: {}, scheduledTimes: {},
+        session: {}, calls: [], ports: [], reloads: [], injections: [], alarms: {}, scheduledTimes: {},
         tabs: {1: {id: 1, url: "https://x.com/Ravens", status: "complete"}},
         activeId: 1, nativeError: false, nativeReject: false,
         scriptError: null, scriptGate: null, nativeGate: null,
@@ -37,13 +37,32 @@ HARNESS = r"""
             id: "test-extension",
             getURL: path => "chrome-extension://test-extension/" + path,
             onMessage: event(), onStartup: event(), onInstalled: event(),
-            sendNativeMessage: async (host, payload) => {
-                mock.calls.push({host, payload: structuredClone(payload)});
-                if (mock.nativeGate) await mock.nativeGate;
-                if (mock.nativeError) throw new Error("sensitive browser detail");
-                if (mock.nativeReject) return {ok: false, error: "<secret host content>"};
-                return payload.error ? {ok: true} :
-                    {ok: true, count: payload.posts.length, fetched_at: new Date().toISOString()};
+            connectNative: host => {
+                const port = {
+                    onMessage: event(), onDisconnect: event(), closed: false,
+                    disconnect: () => { port.closed = true; },
+                    postMessage: payload => {
+                        if (port.closed) throw new Error("port disconnected");
+                        mock.calls.push({host, payload: structuredClone(payload)});
+                        void (async () => {
+                            if (mock.nativeGate) await mock.nativeGate;
+                            if (port.closed) return;
+                            if (mock.nativeError) {
+                                port.closed = true;
+                                port.onDisconnect.fire();
+                                return;
+                            }
+                            port.onMessage.fire(mock.nativeReject
+                                ? {ok: false, error: "<secret host content>"}
+                                : payload.error ? {ok: true} : {
+                                    ok: true, count: payload.posts.length,
+                                    fetched_at: new Date().toISOString()
+                                });
+                        })();
+                    }
+                };
+                mock.ports.push(port);
+                return port;
             }
         },
         storage: {session: {
@@ -103,9 +122,10 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn(key, manifest)
         self.assertEqual(manifest["incognito"], "not_allowed")
         code = "\n".join(path.read_text(encoding="utf-8") for path in EXTENSION.glob("*.js"))
-        for forbidden in ("fetch(", "XMLHttpRequest", "postMessage(", "document.cookie",
+        for forbidden in ("fetch(", "XMLHttpRequest", "window.postMessage(", "document.cookie",
                           "chrome.debugger", "chrome.cookies"):
             self.assertNotIn(forbidden, code)
+        self.assertEqual(code.count(".postMessage("), code.count("nativePort.postMessage("))
 
 
 @unittest.skipUnless(HAS_PLAYWRIGHT, "optional Playwright is not installed")
@@ -478,6 +498,59 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("extension ID", result["error"])
         self.assertNotIn("sensitive", result["error"])
         self.assertEqual(self.page.evaluate("mock.injections"), [])
+
+    def test_unchanged_refresh_reuses_writer_and_advances_heartbeat_without_focus(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        first = self.page.evaluate("state().lastUpdated")
+        connections = self.page.evaluate("mock.ports.length")
+        self.page.evaluate("""() => {
+            mock.tabs[2] = {id: 2, url: "https://offline.invalid", status: "complete"};
+            mock.activeId = 2;
+            alarm();
+        }""")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.assertGreater(self.page.evaluate("state().lastUpdated"), first)
+        self.assertEqual(self.page.evaluate("mock.ports.length"), connections)
+        self.assertEqual(self.page.evaluate("mock.activeId"), 2)
+        self.assertEqual(self.page.evaluate("mock.reloads"), [1])
+        self.assertTrue(self.page.evaluate("""() => {
+            const writes = mock.calls.filter(call => call.payload.posts);
+            return JSON.stringify(writes[0].payload) === JSON.stringify(writes[1].payload);
+        }"""))
+        self.page.evaluate("request('stop')")
+        self.assertTrue(self.page.evaluate("mock.ports.every(port => port.closed)"))
+        self.assertEqual(self.page.evaluate("mock.calls.at(-1).payload.error"), "collector_unavailable")
+
+    def test_host_disconnect_between_cycles_reconnects_on_next_refresh(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        connections = self.page.evaluate("mock.ports.length")
+        self.page.evaluate("mock.ports.at(-1).closed = true; mock.ports.at(-1).onDisconnect.fire(); alarm()")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
+        self.assertEqual(self.page.evaluate("mock.ports.length"), connections + 1)
+
+    def test_host_disconnect_during_write_stops_and_invalidates(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("""() => {
+            mock.nativeGate = new Promise(resolve => { mock.release = resolve; });
+            alarm();
+        }""")
+        self.page.wait_for_function("mock.calls.filter(call => call.payload.posts).length === 2")
+        self.page.evaluate("""() => {
+            mock.ports.at(-1).closed = true;
+            mock.ports.at(-1).onDisconnect.fire();
+            mock.release();
+            mock.nativeGate = null;
+        }""")
+        self.wait_stopped()
+        self.assertIn("native", self.page.evaluate("state().error"))
+        self.assertEqual(self.page.evaluate("mock.calls.at(-1).payload.error"), "collector_unavailable")
+        self.assertTrue(self.page.evaluate("mock.ports.every(port => port.closed)"))
 
     def test_truncation_warning_is_explicit_and_skipped_posts_not_sent(self):
         self.worker()
@@ -889,13 +962,23 @@ class RealMV3Tests(unittest.TestCase):
                 shutil.copyfile(EXTENSION / name, extension / name)
             original = (extension / "worker.js").read_text(encoding="utf-8")
             native_fixture = r"""
-chrome.runtime.sendNativeMessage = async (host, payload) => {
-    const previous = (await chrome.storage.session.get("testNativeWrites")).testNativeWrites || [];
-    const fetched_at = new Date().toISOString();
-    previous.push({at: fetched_at, kind: payload.posts ? "posts" : "invalidate",
-        count: payload.posts?.length || 0, host_ok: host === "com.thecastle.ravens_feed"});
-    await chrome.storage.session.set({testNativeWrites: previous});
-    return payload.error ? {ok: true} : {ok: true, count: payload.posts.length, fetched_at};
+chrome.runtime.connectNative = host => {
+    let listener;
+    return {
+        onMessage: {addListener: fn => { listener = fn; }},
+        onDisconnect: {addListener: () => {}},
+        disconnect: () => {},
+        postMessage: payload => {
+            void (async () => {
+                const previous = (await chrome.storage.session.get("testNativeWrites")).testNativeWrites || [];
+                const fetched_at = new Date().toISOString();
+                previous.push({at: fetched_at, kind: payload.posts ? "posts" : "invalidate",
+                    count: payload.posts?.length || 0, host_ok: host === "com.thecastle.ravens_feed"});
+                await chrome.storage.session.set({testNativeWrites: previous});
+                listener(payload.error ? {ok: true} : {ok: true, count: payload.posts.length, fetched_at});
+            })();
+        }
+    };
 };
 """
             (extension / "worker.js").write_text(native_fixture + original, encoding="utf-8")

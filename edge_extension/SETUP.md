@@ -27,7 +27,31 @@ collection. Restarting Edge requires another explicit Start. The extension canno
 make native writes while Edge is closed; the host/consumer must also reject stale
 feeds. If the native host is unavailable, invalidation cannot be guaranteed.
 
+The popup's **Last updated** and `ravens.json`'s `fetched_at` advance on every
+successful collection, even when no post is new. They do not advance when reading
+fails or no recent complete posts can be extracted. For manager-only alerts,
+enable the `ravensXFeed` monitor in the live **ampx1-watchdog** configuration,
+pointed at the same public file. Its scheduled checks, failure grace period,
+private notification settings, and delivery state determine alert timing.
+Installing/merging that integration does not enable it. No health alert is sent
+to the bot's Discord announcement channels or by this extension.
+
+Collection holds a single native connection open, reusing the Python writer
+across refreshes rather than starting a console process each minute. It never
+focuses a window or selects a tab. Stop/error closes the connection after the
+invalidation response; a browser/worker restart or disconnected host may need
+a new process. To apply this change, Stop, rerun native-host registration, reload
+the extension, and Start. Updating only the extension leaves an old one-shot
+host launching on each refresh. This change removes those repeated launches;
+it cannot rule out browser-rendering or graphics-driver flicker.
+
 ## Diagnosing an empty collection
+
+Increment `manifest.json`'s extension version for every shipped extension update,
+including fixes, so the installed revision can be identified in `edge://extensions`.
+Use patch increments for fixes and minor increments for new features. Deploy the
+updated manifest with the changed extension files; Edge shows the new version
+after Reload.
 
 After an extension update, use **Reload** for this extension in
 `edge://extensions`. Return to the signed-in `https://x.com/Ravens` tab and press
@@ -83,8 +107,8 @@ freshness limit is not extended by this extension.
 
 ## Local protocol
 
-The extension sends `chrome.runtime.sendNativeMessage` to
-`com.thecastle.ravens_feed` with:
+The extension opens `chrome.runtime.connectNative` to
+`com.thecastle.ravens_feed` and sends framed messages over that port:
 
 ```json
 {"version":1,"posts":[{"url":"https://x.com/Ravens/status/123","text":"Public post text","created_at":"2026-10-13T12:00:00Z","image_urls":["https://pbs.twimg.com/media/example.jpg"]}]}
@@ -102,6 +126,10 @@ not in the future, text limited to 25,000 characters, and at most four public
 media images. Overlong text is skipped with an explicit warning, never cut short.
 Native writes are serialized through their responses, including Stop/error
 invalidation, so an earlier in-flight snapshot finishes before it is invalidated.
+The host reads successive frames until the port closes. Invalid message payloads
+invalidate the feed and return an error; malformed framing also ends the
+connection. A clean disconnect leaves the last snapshot to expire under the
+existing freshness limit if no explicit Stop/error was received.
 
 No cookies, credentials, HTML, quoted text/images, reposts, external network
 requests, page-message bridge, sign-in automation, or challenge bypass is used.

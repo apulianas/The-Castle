@@ -154,6 +154,24 @@ existing two-minute stale-file fallback still applies. Docker sees only this
 public feed directory. Existing source attribution and deduplication are shared
 with the Playwright option below.
 
+`fetched_at` and the popup's **Last updated** record every successful read,
+including reads with exactly the same posts. They are collector heartbeats, not
+the time of the newest post. A failed/empty extraction does not advance them.
+Private operator alerts belong in **ampx1-watchdog**, not the Discord news
+destinations: enable its opt-in `ravensXFeed` check against this same `ravens.json`.
+Merging the watchdog integration alone does not enable its live configuration.
+It checks missing/error/stale snapshots independently of Edge and sends through
+the watchdog's configured private channels after its failure grace period and
+scheduled checks. The bot's Bluesky fallback log is not a notification.
+
+While collection is on, the extension keeps one native writer connection open
+instead of launching a Windows command/Python process on each refresh. It does
+not activate the Ravens tab or focus its window. This removes repeated writer
+launches as a possible source of screen flashes; it does not prevent Edge's own
+reload rendering or GPU/desktop flicker. Stop closes the connection after
+invalidating the feed. A worker/browser restart or host disconnect can require
+a new process.
+
 Keep the Python installation available. Rerun registration after writer updates
 or changing Python, the output directory, or the extension ID. The installed writer
 does not depend on keeping the checkout; the unpacked extension still does, so copy
@@ -161,6 +179,10 @@ its folder to a permanent location and load that copy before removing the checko
 then register its new ID. To uninstall, stop collection, remove the
 extension from Edge, and remove the specific native-host registry key above.
 No scheduled task or always-running host process is installed.
+For the persistent-writer update, stop collection, rerun the registration command
+above, reload the extension in `edge://extensions`, then press Start. Both the
+installed writer and the extension must be updated; an old one-shot writer will
+still require a new process each refresh.
 
 ### Alternative: Playwright with a standalone profile
 

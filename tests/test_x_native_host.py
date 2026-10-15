@@ -13,7 +13,7 @@ import pytest
 
 from ravens_bot.x_feed import read_snapshot
 from ravens_bot.x_native_host import (
-    HOST_NAME, REGISTRY_KEY, batch_path, read_message, register, serve, update_feed,
+    HOST_NAME, REGISTRY_KEY, batch_path, read_message, register, serve, serve_connection, update_feed,
 )
 from ravens_bot.x_snapshot import MAX_SNAPSHOT_BYTES
 
@@ -53,6 +53,71 @@ def test_retains_recent_posts_and_updates_changed_post(tmp_path):
     posts = read_snapshot(tmp_path / "ravens.json", NOW)
     assert "ankle" in posts[0].text
     assert posts[1].url.endswith("/456")
+
+
+def test_unchanged_posts_advance_successful_read_timestamp(tmp_path):
+    update_feed(tmp_path, message(), NOW)
+    before = json.loads((tmp_path / "ravens.json").read_text())
+    later = NOW + timedelta(minutes=1)
+    reply = update_feed(tmp_path, message(), later)
+    after = json.loads((tmp_path / "ravens.json").read_text())
+    assert reply["fetched_at"] == after["fetched_at"] == later.isoformat()
+    assert before["posts"] == after["posts"]
+    assert before["fetched_at"] != after["fetched_at"]
+    assert read_snapshot(tmp_path / "ravens.json", later + timedelta(seconds=120))
+    with pytest.raises(ValueError, match="stale"):
+        read_snapshot(tmp_path / "ravens.json", later + timedelta(seconds=121))
+
+
+def test_connection_serves_multiple_frames_and_orders_stop_last(tmp_path):
+    payload = message()
+    payload["posts"][0]["created_at"] = datetime.now(timezone.utc).isoformat()
+    stopped = {"version": 1, "error": "collector_unavailable"}
+    output = io.BytesIO()
+    serve_connection(io.BytesIO(frame(payload) * 2 + frame(stopped)), output, tmp_path)
+    replies = io.BytesIO(output.getvalue())
+    assert read_message(replies)["count"] == 1
+    assert read_message(replies)["count"] == 1
+    assert read_message(replies) == {"ok": True}
+    assert replies.read() == b""
+    with pytest.raises(ValueError, match="unavailable"):
+        read_snapshot(tmp_path / "ravens.json", datetime.now(timezone.utc))
+
+
+def test_clean_disconnect_does_not_invalidate_last_heartbeat(tmp_path):
+    update_feed(tmp_path, message(), NOW)
+    before = (tmp_path / "ravens.json").read_bytes()
+    output = io.BytesIO()
+    serve_connection(io.BytesIO(), output, tmp_path)
+    assert output.getvalue() == b""
+    assert (tmp_path / "ravens.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("data", [
+    b"\x01", struct.pack("=I", 0), struct.pack("=I", MAX_SNAPSHOT_BYTES + 1),
+    struct.pack("=I", 10) + b"{}", struct.pack("=I", 1) + b"\xff",
+])
+def test_connection_malformed_frame_invalidates_and_ends(tmp_path, data):
+    update_feed(tmp_path, message(), NOW)
+    output = io.BytesIO()
+    serve_connection(io.BytesIO(data), output, tmp_path)
+    replies = io.BytesIO(output.getvalue())
+    assert read_message(replies)["ok"] is False
+    assert replies.read() == b""
+    with pytest.raises(ValueError, match="unavailable"):
+        read_snapshot(tmp_path / "ravens.json", NOW)
+
+
+def test_connection_recovers_after_rejected_payload(tmp_path):
+    payload = message()
+    payload["posts"][0]["created_at"] = datetime.now(timezone.utc).isoformat()
+    output = io.BytesIO()
+    serve_connection(io.BytesIO(frame({"version": 2}) + frame(payload)), output, tmp_path)
+    replies = io.BytesIO(output.getvalue())
+    assert read_message(replies)["ok"] is False
+    assert read_message(replies)["count"] == 1
+    assert replies.read() == b""
+    assert read_snapshot(tmp_path / "ravens.json", datetime.now(timezone.utc))
 
 
 def test_native_merge_is_bounded_and_prunes_old_posts(tmp_path):
@@ -123,6 +188,20 @@ def test_native_process_stdout_is_only_framed_json(tmp_path):
     assert read_message(output)["ok"] is True
     assert output.read() == b""
     assert (tmp_path / "ravens.json").exists()
+
+
+def test_native_process_handles_repeated_writes_on_one_connection(tmp_path):
+    payload = message()
+    payload["posts"][0]["created_at"] = datetime.now(timezone.utc).isoformat()
+    process = subprocess.run(
+        [sys.executable, "-m", "ravens_bot.x_native_host", "--output", str(tmp_path)],
+        input=frame(payload) * 3, capture_output=True, check=True, timeout=10,
+    )
+    output = io.BytesIO(process.stdout)
+    replies = [read_message(output) for _ in range(3)]
+    assert all(reply["ok"] and reply["count"] == 1 for reply in replies)
+    assert output.read() == b""
+    assert json.loads((tmp_path / "ravens.json").read_text())["fetched_at"] == replies[-1]["fetched_at"]
 
 
 def test_register_writes_scoped_manifest_and_quotes_paths(tmp_path):
