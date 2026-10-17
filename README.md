@@ -76,6 +76,9 @@ For direct X updates instead of waiting for the mirror, see
     the club's transaction log lists them. The same move from ESPN later is
     matched by player, action, roster destination, and day. Added details edit
     the original message instead of posting again, including after a restart.
+    Compound announcements match each player's own action, even when several
+    actions share a sentence. Shorter reports that repeat only part of a known
+    announcement are ignored; richer reports retain known roster destinations.
     Separate moves for one player (a release, then a practice squad signing)
     still get separate posts, even when they come from different sources.
   - Walkthrough weeks, when the graphic is captioned "the report is a

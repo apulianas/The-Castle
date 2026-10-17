@@ -153,6 +153,42 @@ def test_compound_roster_report_is_not_replaced_by_a_fragment(tmp_path):
     assert edit.await_count == 0
 
 
+@pytest.mark.parametrize("webhook", [False, True])
+@pytest.mark.parametrize("full_first", [False, True])
+@pytest.mark.parametrize("source", ["bluesky", "x"])
+def test_coordinated_roster_moves_update_one_post_across_sources(
+    tmp_path, webhook, full_first, source,
+):
+    bot, target, edit = setup_bot(tmp_path, webhook)
+    full = move(
+        "Activated WR Ja'Kobi Lane from Injured Reserve and signed LB Carl Jones "
+        "from the practice squad to the 53-man roster. Activated T Chuma Edoga and "
+        "G Kyle Hergel as standard practice squad elevations for tomorrow's game.",
+        source="bluesky",
+    )
+    if source == "x":
+        full = replace(full, transaction_id="x:123", source_url="https://x.com/Ravens/status/123")
+    short = move(
+        "Activated WR Ja'Kobi Lane from injured reserve. "
+        "Signed LB Carl Jones from the practice squad.",
+    )
+    for reports in ([short, full], [full, short]):
+        assert merge_roster_moves(reports[:1], reports[1:]) == [full]
+    first, later = (full, short) if full_first else (short, full)
+    poll(bot, target, [first])
+    bot.announcement_state.load()
+    poll(bot, target, [later])
+    bot.announcement_state.load()
+    poll(bot, target, [short, full])
+    assert target.destination.send.await_count == 1
+    assert edit.await_count == (0 if full_first else 1)
+    delivered = target.destination.send if full_first else edit
+    description = delivered.call_args.kwargs["embeds"][0].description
+    assert "Chuma Edoga" in description
+    assert "Kyle Hergel" in description
+    assert "53-man roster" in description
+
+
 def test_legacy_roster_post_is_not_reposted_even_with_other_saved_posts(tmp_path):
     bot, target, edit = setup_bot(tmp_path, False)
     legacy = move()
