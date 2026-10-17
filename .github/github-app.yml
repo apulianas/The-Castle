@@ -26,3 +26,29 @@ instructions: |
   Do not deploy automatically on session creation or for unrelated changes:
   another checkout may contain an older extension. See edge_extension\SETUP.md
   for installation, migration, diagnostics, and update details.
+
+  The local production Discord bot uses X as its primary social source, with
+  Bluesky only as fallback. A healthy collector alone does not prove the bot
+  is consuming X. Preserve this wiring whenever deploying/recreating the bot:
+  - Inspect the running container's Compose project, deployment directory,
+    environment, and mounts first. Reuse the existing project and /data volume;
+    never launch a second bot or discard announcement history.
+  - Use both compose.yaml and compose.x-browser.yaml. On this Windows deployment,
+    persist COMPOSE_FILE=compose.yaml;compose.x-browser.yaml and
+    X_FEED_DIRECTORY=C:\Users\apuli\AppData\Local\The-Castle\x-feed in the live
+    deployment's .env so plain docker compose up (including unattended updates)
+    retains the X feed. Preserve all other settings and never print credentials.
+    Explicit -f options override COMPOSE_FILE: never deploy with only -f compose.yaml.
+  - Inspect the resolved Compose configuration without exposing secrets before
+    deployment. Require X_FEED_FILE=/x-feed/ravens.json and a read-only /x-feed
+    bind mount from the permanent public-feed directory, plus the existing /data.
+  - After deployment, verify the actual running container's environment/mounts,
+    read a fresh snapshot from inside it using ravens_bot.x_feed.read_snapshot,
+    and confirm XFeedClient returns X-attributed posts. Confirm the bot reconnects
+    to Discord and only one production bot is running. Do not claim X is active
+    based only on container uptime, host-file freshness, or an Edge popup.
+  - Preserve these settings in unattended deployment paths too. If the feed is
+    missing/stale/error-marked, report Bluesky fallback explicitly; do not extend
+    freshness limits, fabricate a heartbeat, or reset announcement state.
+  - Bot-only deployment changes do not require replacing/reloading the extension
+    or re-registering the native host. Do not deploy on session creation.

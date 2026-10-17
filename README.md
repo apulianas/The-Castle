@@ -273,6 +273,31 @@ After setting up the normal bot `.env`, enable the read-only public-feed mount:
 docker compose -f compose.yaml -f compose.x-browser.yaml up -d --build
 ```
 
+For a permanent X-enabled deployment, also save the Compose file selection in
+that deployment's `.env`. Otherwise a later plain `docker compose up` (including
+an unattended update) can recreate the bot without X, even while the collector
+is healthy. On this Windows machine, keep:
+
+```dotenv
+COMPOSE_FILE=compose.yaml;compose.x-browser.yaml
+X_FEED_DIRECTORY=C:\Users\apuli\AppData\Local\The-Castle\x-feed
+```
+
+Windows separates Compose files with `;`; Linux/macOS use `:`. Explicit `-f`
+arguments override `COMPOSE_FILE`, so any deploy command using `-f` must include
+both files. Preserve existing credentials and other `.env` settings.
+
+Before and after every deployment, verify the resolved configuration and actual
+container have `X_FEED_FILE=/x-feed/ravens.json`, the permanent public-feed directory
+bound read-only at `/x-feed`, and the existing `/data` volume. Avoid printing the
+full configuration or environment because it contains Discord credentials.
+Verify a fresh snapshot can be read **inside the container** with
+`ravens_bot.x_feed.read_snapshot` and that `XFeedClient.fetch_posts` returns posts
+whose `source` is `X`; report any stale/error fallback instead of claiming success.
+Confirm the bot reconnects to Discord and only one production bot is running.
+An already-announced Bluesky mirror can keep its attribution under the existing
+deduplication rules; do not clear announcement history to force an X repost.
+
 Use the same Compose project name as your existing deployment (with `-p` if
 needed), and stop the old bot before switching checkouts; do not run two bots.
 The container receives only public post text, timestamps, URLs, and image URLs.
