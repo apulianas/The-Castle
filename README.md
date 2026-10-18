@@ -54,8 +54,11 @@ For direct X updates instead of waiting for the mirror, see
   statuses, and inactives are posted as images before the website or ESPN
   updates. The bot reads that day's graphic with RapidOCR (once per image, off
   the event loop) and matches each line to the ESPN roster, since OCR keeps the
-  letters but not the spaces. The graphic only covers the Ravens, so the
-  opponent still comes from the official report and ESPN:
+  letters but not the spaces. A given name printed in another common form
+  still matches ("MATTHEW HIBNER" finds the roster's "Matt Hibner", "PAT
+  RICARD" finds "Patrick Ricard"), unless that form could mean two players.
+  The graphic only covers the Ravens, so the opponent still comes from the
+  official report and ESPN:
   - Injury report: the Ravens table is taken from the graphic only while it has
     more practice days than the website, and is laid out under the website's
     columns. The website's own table takes over, editing the same post, once it

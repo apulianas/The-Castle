@@ -144,6 +144,73 @@ def test_matcher_ignores_a_name_suffix_the_graphic_leaves_off() -> None:
     assert matcher.find("S-KEVINWINSTON").name == "Kevin Winston Jr."
 
 
+WEEK_6_INACTIVES = (
+    PlayerRef("Elijah Sarratt", "5088338", "WR"),
+    PlayerRef("K'Von Wallace", "4035463", "CB"),
+    PlayerRef("Cam Jurgens", "4361178", "C"),
+    PlayerRef("Andrew Vorhees", "4243220", "G"),
+    PlayerRef("Matt Hibner", "4432260", "TE"),
+    PlayerRef("Broderick Washington Jr.", "3915837", "DT"),
+)
+
+
+def test_inactives_graphic_finds_a_player_whose_given_name_the_roster_shortens() -> None:
+    players = parse_inactives_graphic(
+        _ocr("bluesky_inactives_week6_ocr"), (*ROSTER, *WEEK_6_INACTIVES)
+    )
+
+    assert [(p.position, p.name, p.athlete_id) for p in players] == [
+        ("QB", "Lamar Jackson", "3916387"),
+        ("WR", "Elijah Sarratt", "5088338"),
+        ("FS", "K'Von Wallace", "4035463"),
+        ("C", "Cam Jurgens", "4361178"),
+        ("G", "Andrew Vorhees", "4243220"),
+        ("TE", "Matt Hibner", "4432260"),
+        ("DE", "Broderick Washington Jr.", "3915837"),
+    ]
+
+
+def test_matcher_reads_a_given_name_written_either_way() -> None:
+    matcher = NameMatcher((
+        PlayerRef("Matt Hibner", "4432260", "TE"),
+        PlayerRef("Patrick Ricard", "1", "FB"),
+        PlayerRef("Mike Hall Jr.", "2", "DT"),
+    ))
+
+    assert matcher.find("TE MATTHEWHIBNER").name == "Matt Hibner"
+    assert matcher.find("FB I PAT RICARD").name == "Patrick Ricard"
+    assert matcher.find("DT-MICHAELHALL").name == "Mike Hall Jr."
+    # An in-game post names the player without a position.
+    assert matcher.find("Matthew Hibner").name == "Matt Hibner"
+    assert matcher.find("TE-MATTHEWHIBNFR").name == "Matt Hibner"
+
+
+def test_a_listed_name_outranks_another_player_s_short_form() -> None:
+    matcher = NameMatcher((PlayerRef("Mike Smith", "1"), PlayerRef("Michael Smith", "2")))
+
+    assert matcher.find("LB MICHAEL SMITH").athlete_id == "2"
+    assert matcher.find("LB MIKE SMITH").athlete_id == "1"
+
+
+def test_a_given_name_form_two_players_share_names_neither() -> None:
+    matcher = NameMatcher((PlayerRef("Mike Green", "1"), PlayerRef("Mikey Green", "2")))
+
+    assert matcher.find("CB MICHAEL GREEN") is None
+
+
+def test_a_given_name_form_must_open_the_name() -> None:
+    matcher = NameMatcher((PlayerRef("Daniel Smith", "1"),))
+
+    assert matcher.find("WR JORDAN SMITH") is None
+    assert matcher.find("WR DAN SMITH").name == "Daniel Smith"
+
+
+def test_a_player_listed_twice_keeps_his_espn_id_under_another_form() -> None:
+    matcher = NameMatcher((PlayerRef("Matt Hibner"), PlayerRef("Matt Hibner", "4432260", "TE")))
+
+    assert matcher.find("TE MATTHEWHIBNER").athlete_id == "4432260"
+
+
 FEED = {
     "feed": [
         {
