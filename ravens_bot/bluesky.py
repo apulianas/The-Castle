@@ -7,8 +7,10 @@ the feed is read directly and each graphic is run through OCR once.
 
 OCR on these graphics reads the words reliably but not the gaps between them
 ("TE-MARKANDREWS"), and picks up stray marks from the layout, so every line is
-matched against the roster by its letters alone. The graphic only covers the
-Ravens; the opponent still comes from the official report and ESPN.
+matched against the roster by its letters alone, allowing for a given name
+written another common way ("MATTHEW HIBNER" for the roster's "Matt Hibner").
+The graphic only covers the Ravens; the opponent still comes from the official
+report and ESPN.
 """
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ from .models import (
     Transaction,
     normalize_name,
 )
+from .nicknames import name_variants
 from .roster_moves import extract_named_players, extract_players, transaction_action
 from .roster_updates import prefer_roster_move, same_roster_move
 from .trades import parse_trade
@@ -155,9 +158,17 @@ def compact(value: str) -> str:
 
 
 class NameMatcher:
-    """Finds a roster player inside a run-together OCR line."""
+    """Finds a roster player inside a run-together OCR line.
+
+    A graphic can write a given name another common way ("MATTHEW HIBNER" for
+    the roster's "Matt Hibner"). Those spellings are tried only after every
+    name as listed, only where the name opens the line or follows its position
+    code, and never when they could mean two players: "DANSMITH" inside
+    "WR JORDAN SMITH" is not Daniel Smith.
+    """
 
     def __init__(self, players: Iterable[PlayerRef]) -> None:
+        players = tuple(players)
         self._keys: list[tuple[str, PlayerRef]] = []
         seen: set[str] = set()
         for player in players:
@@ -167,6 +178,29 @@ class NameMatcher:
                     self._keys.append((key, player))
         # Longest first, so "Chris Moore" is not answered by a shorter name.
         self._keys.sort(key=lambda item: len(item[0]), reverse=True)
+        owners: dict[str, dict[str, PlayerRef]] = {}
+        for player in players:
+            # The roster and the website can list one player twice, once with
+            # an ESPN id; that is still one owner, and the id is kept.
+            person = _name_keys(player.name)[-1]
+            for variant in name_variants(player.name):
+                for key in _name_keys(variant):
+                    if len(key) < _MIN_KEY_LENGTH or key in seen:
+                        continue
+                    found = owners.setdefault(key, {})
+                    if person not in found or (
+                        player.athlete_id and not found[person].athlete_id
+                    ):
+                        found[person] = player
+        self._variants = sorted(
+            (
+                (key, next(iter(found.values())))
+                for key, found in owners.items()
+                if len(found) == 1
+            ),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
 
     def find(self, text: str) -> PlayerRef | None:
         line = compact(text)
@@ -175,13 +209,38 @@ class NameMatcher:
         for key, player in self._keys:
             if key in line:
                 return player
+        for key, player in self._variants:
+            if _opens_name(line, key):
+                return player
         best: tuple[float, PlayerRef | None] = (0.0, None)
-        for key, player in self._keys:
-            tail = line[-len(key):] if len(line) > len(key) else line
-            ratio = difflib.SequenceMatcher(None, key, tail).ratio()
-            if ratio > best[0]:
-                best = (ratio, player)
+        for keys, anchored in ((self._keys, False), (self._variants, True)):
+            for key, player in keys:
+                start = max(0, len(line) - len(key))
+                if anchored and not _name_starts_after(line[:start]):
+                    continue
+                ratio = difflib.SequenceMatcher(None, key, line[start:]).ratio()
+                if ratio > best[0]:
+                    best = (ratio, player)
         return best[1] if best[0] >= _FUZZY_RATIO else None
+
+
+def _name_starts_after(prefix: str) -> bool:
+    """Whether the OCR text ahead of a name is at most the row's position.
+
+    The bar between them can come through as an "I" or "L" ("QB I JOE FAGNANO").
+    """
+    if prefix[-1:] in ("I", "L"):
+        prefix = prefix[:-1]
+    return not prefix or prefix in POSITIONS
+
+
+def _opens_name(line: str, key: str) -> bool:
+    index = line.find(key)
+    while index >= 0:
+        if _name_starts_after(line[:index]):
+            return True
+        index = line.find(key, index + 1)
+    return False
 
 
 def _name_keys(name: str) -> tuple[str, ...]:
