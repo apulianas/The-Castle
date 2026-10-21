@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
@@ -14,8 +14,9 @@ from ravens_bot.bluesky import BlueskyPost, merge_roster_moves, parse_game_injur
 from ravens_bot.bot import RavensBot, _AnnouncementTarget, game_injury_key, transaction_announcement_key
 from ravens_bot.config import BotConfig
 from ravens_bot.espn import EspnApiError, parse_transactions
-from ravens_bot.models import Game, InjuryReport, InjuryUpdate, PlayerRef
+from ravens_bot.models import Game, InjuryReport, InjuryUpdate, PlayerRef, RosterNews
 from ravens_bot.state import channel_key
+from ravens_bot.trade_news import encode_news
 
 
 DAY = date(2026, 10, 7)
@@ -274,6 +275,103 @@ def test_x_move_and_bluesky_move_share_roster_deduplication(tmp_path):
     poll(bot, target, [mirror])
     assert target.destination.send.await_count == 1
     assert len(merge_roster_moves([direct], [mirror])) == 1
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+@pytest.mark.parametrize("club_first", [False, True])
+def test_espn_s_copy_of_a_club_x_post_hours_later_is_not_posted_again(
+    tmp_path, webhook, club_first,
+):
+    """The club's X post and ESPN's growing entry for the same two moves."""
+    bot, target, edit = setup_bot(tmp_path, webhook)
+    club = parse_roster_move(BlueskyPost(
+        uri="https://x.com/Ravens/status/2112636664657146271",
+        text="We have signed K Jake Moody to the Practice Squad and waived LB Carl Jones Jr.",
+        created_at=datetime(2026, 10, 7, 20, 6, tzinfo=timezone.utc),
+        image_urls=(), handle="Ravens", source="X",
+    ), ZONE)
+    espn = [
+        move("Waived LB Carl Jones Jr."),
+        move("Waived LB Carl Jones Jr. Signed K Jake Moody to the practice squad."),
+    ]
+    for report in [club, *espn] if club_first else [*espn, club]:
+        poll(bot, target, [report])
+        bot.announcement_state.load()
+    poll(bot, target, [*espn, club])
+    assert target.destination.send.await_count == 1
+    # ESPN's fuller entry grows its own first post; the club's post takes it over.
+    assert edit.await_count == (0 if club_first else 2)
+
+
+@pytest.mark.parametrize("webhook", [False, True])
+def test_a_fuller_report_edits_the_original_of_an_earlier_double_post(tmp_path, webhook, caplog):
+    """Two saved posts of one move must not make every later report ambiguous."""
+    bot, target, edit = setup_bot(tmp_path, webhook)
+    club = parse_roster_move(BlueskyPost(
+        uri="https://x.com/Ravens/status/2112636664657146271",
+        text="We have signed K Jake Moody to the Practice Squad and waived LB Carl Jones Jr.",
+        created_at=datetime(2026, 10, 7, 20, 6, tzinfo=timezone.utc),
+        image_urls=(), handle="Ravens", source="X",
+    ), ZONE)
+    poll(bot, target, [club])
+    duplicate = move("Waived LB Carl Jones Jr. Signed K Jake Moody to the practice squad.")
+    bot.announcement_state.mark_message(
+        channel_key(f"roster-post:{duplicate.transaction_id}", target.key_id),
+        encode_news(RosterNews(duplicate)), 988,
+    )
+    fuller = move(f"{duplicate.description} Released WR Deonte Harty.")
+    poll(bot, target, [fuller])
+    bot.announcement_state.load()
+    poll(bot, target, [club, duplicate, fuller])
+    assert target.destination.send.await_count == 1
+    assert edit.await_count == 1
+    assert "Deonte Harty" in edit.call_args.kwargs["embeds"][0].description
+    if webhook:
+        assert edit.call_args.args == (987,)
+    else:
+        bot.get_partial_messageable.return_value.get_partial_message.assert_called_with(987)
+    assert "Ambiguous" not in caplog.text
+
+
+def test_a_report_spanning_two_separate_posts_is_not_posted_again(tmp_path, caplog):
+    bot, target, edit = setup_bot(tmp_path, False)
+    waived = move("Waived LB Carl Jones Jr.", source="bluesky", key="waived")
+    signed = move("Signed K Jake Moody to the practice squad.", source="bluesky", key="signed")
+    poll(bot, target, [waived])
+    poll(bot, target, [signed])
+    poll(bot, target, [move("Waived LB Carl Jones Jr. Signed K Jake Moody to the practice squad.")])
+    assert target.destination.send.await_count == 2
+    assert edit.await_count == 0
+    assert "Ambiguous" in caplog.text
+
+
+def test_official_sunday_elevation_does_not_repeat_saturday_s_post(tmp_path):
+    bot, target, edit = setup_bot(tmp_path, False)
+    saturday = move(
+        "Activated T Chuma Edoga and G Kyle Hergel as standard practice squad "
+        "elevations for tomorrow's game.", source="bluesky",
+    )
+    sunday = replace(move(
+        "Activated OL Chuma Edoga and G Kyle Hergel from the practice squad "
+        "(standard elevation) at Atl.", key="ravens-official:2026-10-08:abc",
+    ), date=DAY + timedelta(days=1))
+    poll(bot, target, [saturday])
+    bot.announcement_state.load()
+    poll(bot, target, [sunday])
+    assert target.destination.send.await_count == 1
+    assert edit.await_count == 0
+
+
+def test_a_promotion_the_day_after_a_practice_squad_signing_is_posted(tmp_path):
+    bot, target, edit = setup_bot(tmp_path, False)
+    signed = move("Signed LB Carl Jones to the practice squad.", source="bluesky")
+    promoted = replace(
+        move("Signed LB Carl Jones from the practice squad."), date=DAY + timedelta(days=1),
+    )
+    poll(bot, target, [signed])
+    poll(bot, target, [promoted])
+    assert target.destination.send.await_count == 2
+    assert edit.await_count == 0
 
 
 @pytest.mark.parametrize("webhook", [False, True])
