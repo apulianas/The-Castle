@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from ravens_bot.espn import parse_transactions
 from ravens_bot.formatting import format_roster_cut_blocks
 from ravens_bot.roster_moves import extract_player_moves, position_group
@@ -120,3 +122,16 @@ def test_a_stop_that_only_ends_a_sentence_is_left_off_the_name() -> None:
     moves = extract_player_moves(CUT_DOWN_DAY)
 
     assert "Devin Leary" in [move.player.name for move in moves]
+
+
+@pytest.mark.parametrize("verb", ["Signed", "signed"])
+def test_a_suffix_does_not_carry_its_move_into_the_next_sentence(verb: str) -> None:
+    """A waiver ending in "Jr." is not also the next player's move."""
+    moves = extract_player_moves(
+        f"Waived LB Carl Jones Jr. {verb} K Jake Moody to the practice squad."
+    )
+
+    assert [(move.player.name, move.action) for move in moves] == [
+        ("Carl Jones Jr.", "waived"),
+        ("Jake Moody", "signed to the practice squad"),
+    ]

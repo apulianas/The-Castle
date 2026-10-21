@@ -6,10 +6,11 @@ import io
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from itertools import combinations
 from typing import Any
 
 import aiohttp
@@ -658,6 +659,31 @@ class RavensBot(commands.Bot):
         )
         return True
 
+    def _original_post(
+        self,
+        records: list[tuple[str, RosterNews]],
+        same: Callable[[Transaction, Transaction], bool],
+    ) -> list[tuple[str, RosterNews]]:
+        """The first of several saved posts that all report the same moves.
+
+        Two posts of one move are what an earlier double post leaves behind, and
+        every fuller report after it matches both. Dropping that report as
+        ambiguous would lose whatever it adds, so the earliest post takes it.
+        """
+        if not all(
+            same(left.transaction, right.transaction)
+            for (_, left), (_, right) in combinations(records, 2)
+        ):
+            return records
+        posted = [
+            record for record in records
+            if self.announcement_state.message_id(record[0]) is not None
+        ]
+        return [min(
+            posted or records,
+            key=lambda record: self.announcement_state.message_id(record[0]) or 0,
+        )]
+
     async def _announce_roster_news(
         self, target: _AnnouncementTarget, news: RosterNews, target_date: date
     ) -> None:
@@ -677,10 +703,12 @@ class RavensBot(commands.Bot):
             record for record in records
             if record[1].transaction.transaction_id == transaction.transaction_id
         ]
+        same = same_trade if trade else same_roster_move
         matches = exact or [
-            record for record in records
-            if (same_trade if trade else same_roster_move)(transaction, record[1].transaction)
+            record for record in records if same(transaction, record[1].transaction)
         ]
+        if len(matches) > 1:
+            matches = self._original_post(matches, same)
         if len(matches) > 1:
             LOGGER.warning("Ambiguous saved %s posts for %s; not posting to %s", kind, key, target.label)
             return

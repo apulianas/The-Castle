@@ -302,6 +302,25 @@ def test_sentences_split_without_cutting_names() -> None:
     ]
 
 
+def test_a_suffix_that_ends_a_sentence_still_ends_it() -> None:
+    """ESPN's own 10/20 entry: the stop after "Jr." also closes the waiver."""
+    assert split_sentences(
+        "Waived LB Carl Jones Jr. Signed K Jake Moody to the practice squad."
+    ) == [
+        "Waived LB Carl Jones Jr.",
+        "Signed K Jake Moody to the practice squad.",
+    ]
+    assert split_sentences("Traded LB A.J. Klein to Chicago. Re-signed WR B C.") == [
+        "Traded LB A.J. Klein to Chicago.",
+        "Re-signed WR B C.",
+    ]
+    # A move verb opens a sentence even in lower case.
+    assert split_sentences("Traded LB A.J. Klein to Chicago for a pick. signed WR B C.") == [
+        "Traded LB A.J. Klein to Chicago for a pick.",
+        "signed WR B C.",
+    ]
+
+
 def test_a_trade_is_announced_to_the_channel_once(tmp_path) -> None:
     """The whole path: ESPN's payload in, one post out, no repeat next poll."""
     from ravens_bot.models import InjuryReport

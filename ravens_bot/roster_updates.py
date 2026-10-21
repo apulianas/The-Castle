@@ -5,15 +5,28 @@ from __future__ import annotations
 import re
 
 from .models import Transaction, normalize_name
-from .roster_moves import extract_player_moves, split_sentences, transaction_action
+from .roster_moves import (
+    MOVE_VERB_PATTERN, extract_player_moves, split_sentences, transaction_action,
+)
 
 
 _ACTION_BOUNDARY = re.compile(
     r"(?:\s+and\s+|;\s*|,\s*(?:and\s+)?)(?:also\s+)?"
-    r"(?=(?:signed|re-signed|placed|waived|released|activated|elevated|claimed|"
-    r"traded|acquired|received|designated|reinstated|promoted|terminated|restored|added)\b)",
+    rf"(?=(?:{MOVE_VERB_PATTERN})\b)",
     re.IGNORECASE,
 )
+# One action under the spellings the sources trade between.
+_SAME_ACTION = {"resigned": "signed", "waiving": "waived"}
+# Suffixes the sources write or leave off as they please: ESPN has filed one
+# linebacker as both "Carl Jones" and "Carl Jones Jr.".
+_GENERATIONAL_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+
+
+def _player_key(name: str) -> str:
+    words = normalize_name(name).split()
+    while len(words) > 2 and words[-1] in _GENERATIONAL_SUFFIXES:
+        words.pop()
+    return " ".join(words)
 
 
 def move_details(transaction: Transaction) -> frozenset[tuple[str, str, str]]:
@@ -30,7 +43,7 @@ def move_details(transaction: Transaction) -> frozenset[tuple[str, str, str]]:
         if "elevat" in text and (verb == "elevated" or "standard" in text):
             verb, location = "elevated", "practice squad"
         else:
-            verb = {"resigned": "signed"}.get(verb, verb)
+            verb = _SAME_ACTION.get(verb, verb)
             if verb in {"signed", "promoted"}:
                 destination = re.search(r"\bto\s+(?:the\s+)?", text)
                 if destination is not None:
@@ -39,7 +52,7 @@ def move_details(transaction: Transaction) -> frozenset[tuple[str, str, str]]:
                 text = re.split(r"\bfrom\b", text, maxsplit=1)[0]
             location = next((
                 label for pattern, label in (
-                    (r"injured reserve|\bir\b", "injured reserve"),
+                    (r"injured reserve|reserve.injured|\bir\b", "injured reserve"),
                     (r"non.?football injury|\bnfi\b", "non-football injury"),
                     (r"physically unable|\bpup\b", "physically unable"),
                     (r"practice squad", "practice squad"),
@@ -48,7 +61,7 @@ def move_details(transaction: Transaction) -> frozenset[tuple[str, str, str]]:
                 if re.search(pattern, text)
             ), "")
         for move in extract_player_moves(sentence):
-            details.add((normalize_name(move.player.name), verb, location))
+            details.add((_player_key(move.player.name), verb, location))
     return frozenset(details)
 
 
@@ -72,10 +85,25 @@ def _covers(
 
 
 def same_roster_move(left: Transaction, right: Transaction) -> bool:
-    if left.date != right.date:
+    """Whether two reports describe the same moves, whichever source wrote them.
+
+    Reports of one move share its day, with one exception: a standard elevation
+    is announced by the club and ESPN the day before the game and filed by the
+    official log on game day. So a report a day later matches only when it
+    holds nothing but elevations the earlier one already announced; any other
+    repeat a day later can be a new move, such as a practice squad signing
+    undone and redone, and must not vanish into an edit of yesterday's post.
+    """
+    gap = abs((left.date - right.date).days)
+    if gap > 1:
         return False
     a, b = move_details(left), move_details(right)
-    return bool(a and b) and (_covers(a, b) or _covers(b, a))
+    if not (a and b):
+        return False
+    if gap:
+        earlier, later = (a, b) if left.date < right.date else (b, a)
+        return later <= earlier and all(verb == "elevated" for _, verb, _ in later)
+    return _covers(a, b) or _covers(b, a)
 
 
 def prefer_roster_move(candidate: Transaction, previous: Transaction) -> bool:

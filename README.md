@@ -80,8 +80,18 @@ For direct X updates instead of waiting for the mirror, see
     matched by player, action, roster destination, and day. Added details edit
     the original message instead of posting again, including after a restart.
     Compound announcements match each player's own action, even when several
-    actions share a sentence. Shorter reports that repeat only part of a known
-    announcement are ignored; richer reports retain known roster destinations.
+    actions share a sentence or a name ending in "Jr." closes one move right
+    before the next ("Waived LB Carl Jones Jr. Signed K Jake Moody …"). Names
+    match with or without a generational suffix, and ESPN's "Waiving" and
+    "Reserve/Injured" read as "Waived" and "injured reserve". Standard
+    elevations are matched across the day boundary too: the club and ESPN
+    announce them the day before the game and the official log files them on
+    game day, so that entry does not post again. No other move is matched a
+    day apart, so a practice squad signing redone or a promotion the next day
+    still posts. Shorter reports that repeat only part of a known announcement
+    are ignored; richer reports retain known roster destinations. If an
+    earlier bug left two posts of the same move, later reports edit the first
+    post rather than being dropped as ambiguous.
     Separate moves for one player (a release, then a practice squad signing)
     still get separate posts, even when they come from different sources.
   - Walkthrough weeks, when the graphic is captioned "the report is a

@@ -34,6 +34,17 @@ _SEPARATOR_RE = re.compile(r"\s*(?:,\s*and\s+|,\s*|\s+and\s+)")
 # A move opens with its verb, which ESPN hyphenates in "Re-signed" and nowhere
 # else; reading only the first half would leave the headline saying "Re".
 _ACTION_RE = re.compile(r"^\s*([A-Z][a-z]+(?:-[a-z]+)?)")
+# The verbs a move opens with, as the feeds and the club write them. "Waiving"
+# is a spelling ESPN has published for "Waived".
+MOVE_VERBS = (
+    "signed", "re-signed", "placed", "waived", "waiving", "released", "activated",
+    "elevated", "claimed", "traded", "acquired", "received", "designated",
+    "reinstated", "promoted", "terminated", "restored", "added",
+)
+MOVE_VERB_PATTERN = "|".join(MOVE_VERBS)
+# No name runs on into one of those verbs, so a stop in front of one ends the
+# sentence even when it also closes an initial or a suffix.
+_NEXT_MOVE_RE = re.compile(rf"\s+(?:{MOVE_VERB_PATTERN})\b", re.IGNORECASE)
 
 # The units a roster is built from, in depth chart order: offense, then defense,
 # then the kicking game. A cut list is read by unit, so this order is what gives
@@ -64,7 +75,7 @@ _NAME_SUFFIXES = frozenset({"jr", "sr", "st", "no"})
 # Suffixes whose full stop belongs to the name rather than to the sentence, so
 # a list of cuts reads "Emery Jones Jr." the way the player's own jersey does.
 _GENERATIONAL_SUFFIXES = frozenset({"jr", "sr"})
-_SENTENCE_END_RE = re.compile(r"\.(?=\s+[A-Z])")
+_SENTENCE_END_RE = re.compile(rf"\.(?=\s+(?:[A-Z]|(?i:{MOVE_VERB_PATTERN})\b))")
 _INITIALS_RE = re.compile(r"(?:[A-Z]\.)*[A-Z]$")
 _LAST_TOKEN_RE = re.compile(r"([A-Za-z.]+)$")
 # A name is read without the full stop that closes it, so the stop is still
@@ -95,21 +106,25 @@ def split_sentences(text: str) -> list[str]:
     OLBs B and C ..." — and only the first is the trade, so the rest has to be
     separated off before the trade's own wording can be read. Splitting on every
     full stop would cut "A.J. Klein" and "Irv Smith Jr." in half, so a stop that
-    closes an initial or a name suffix is not a sentence end.
+    closes an initial or a name suffix is not a sentence end — unless the next
+    word opens another move, in either case. "Waived LB Carl Jones Jr. Signed K
+    Jake Moody" is two moves, and reading it as one hands the waiver to both.
     """
+    text = text or ""
     sentences: list[str] = []
     start = 0
-    for match in _SENTENCE_END_RE.finditer(text or ""):
-        head = (text or "")[start : match.start()]
+    for match in _SENTENCE_END_RE.finditer(text):
+        head = text[start : match.start()]
         token_match = _LAST_TOKEN_RE.search(head)
         token = token_match.group(1) if token_match else ""
-        if _INITIALS_RE.fullmatch(token):
+        closes_name = bool(_INITIALS_RE.fullmatch(token)) or (
+            token.replace(".", "").lower() in _NAME_SUFFIXES
+        )
+        if closes_name and not _NEXT_MOVE_RE.match(text, match.end()):
             continue
-        if token.replace(".", "").lower() in _NAME_SUFFIXES:
-            continue
-        sentences.append((text or "")[start : match.end()].strip())
+        sentences.append(text[start : match.end()].strip())
         start = match.end()
-    tail = (text or "")[start:].strip()
+    tail = text[start:].strip()
     if tail:
         sentences.append(tail)
     return [sentence for sentence in sentences if sentence]
@@ -197,7 +212,7 @@ def _sentence_action(sentence: str, players: tuple[PlayerRef, ...]) -> str:
     a cut. Whatever the sentence says after its last name is the qualifier, so
     the verb and that remainder together state the move in full.
     """
-    verb = (transaction_action(sentence) or "").lower()
+    verb = (transaction_action(sentence[:1].upper() + sentence[1:]) or "").lower()
     last = players[-1].name
     index = sentence.rfind(last)
     tail = sentence[index + len(last) :] if index >= 0 else ""
