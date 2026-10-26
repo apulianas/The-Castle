@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "The Castle — Ravens public feed",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Read public Ravens posts from the tab you explicitly start in your dedicated Edge profile.",
   "permissions": ["activeTab", "scripting", "alarms", "storage", "nativeMessaging"],
   "host_permissions": ["https://x.com/*"],

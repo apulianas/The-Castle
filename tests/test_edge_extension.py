@@ -314,8 +314,25 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual([p["url"].rsplit("/", 1)[1] for p in result["posts"]], ["124"])
 
     def test_sign_in_required(self):
-        result = self.extractor(self.article())
+        body = '<a data-testid="loginButton" href="/login">Log in</a>' + self.article()
+        result = self.extractor(body)
         self.assertEqual(result, {"error": "sign_in_required"})
+
+    def test_unrecognized_layout_is_not_reported_as_signed_out(self):
+        result = self.extractor(self.article())
+        self.assertEqual(result, {"error": "session_unconfirmed"})
+
+    def test_narrow_layout_navigation_confirms_sign_in(self):
+        for marker in ("DashButton_ProfileIcon_Link", "AppTabBar_Notifications_Link",
+                       "AppTabBar_DirectMessage_Link", "AppTabBar_Profile_Link"):
+            with self.subTest(marker=marker):
+                body = f'<a data-testid="{marker}" href="/home"></a>' + self.article()
+                result = self.extractor(body)
+                self.assertEqual([p["url"].rsplit("/", 1)[1] for p in result["posts"]], ["123"])
+
+    def test_challenge_is_reported_even_without_navigation(self):
+        result = self.extractor('<div data-testid="challenge"></div>' + self.article())
+        self.assertEqual(result, {"error": "challenge"})
 
     def test_wrong_profile_url_rejected_in_page(self):
         result = self.extractor(self.article(), "https://x.com/Other")
@@ -1054,6 +1071,24 @@ class BrowserTests(unittest.TestCase):
         self.page.wait_for_function("state().lifecycle.cycles_completed === 2")
         self.assertEqual(self.page.evaluate("mock.reloads"), [])
         self.assertFalse(self.page.evaluate("state().attention"))
+
+    def test_unconfirmed_session_reloads_with_backoff_instead_of_waiting_for_attention(self):
+        self.worker()
+        self.page.evaluate("request('start')")
+        self.wait_collected()
+        self.page.evaluate("mock.batch = {error: 'session_unconfirmed'}; retryNow()")
+        self.wait_retry()
+        self.assertEqual(self.page.evaluate("state().lifecycle.phase"), "retry_wait")
+        self.assertFalse(self.page.evaluate("state().attention"))
+        self.assertIn("not recognized", self.page.evaluate("state().error"))
+        reloads = self.page.evaluate("mock.reloads.length")
+        self.page.evaluate("""() => {
+            mock.batch = {posts: [{url: "https://x.com/Ravens/status/123", text: "Public",
+                created_at: new Date().toISOString(), image_urls: []}]};
+            retryNow();
+        }""")
+        self.page.wait_for_function("state().lifecycle.cycles_completed === 2 && !state().failures")
+        self.assertEqual(self.page.evaluate("mock.reloads.length"), reloads + 1)
 
     def test_challenge_waits_for_manual_resolution_then_resumes(self):
         self.worker()

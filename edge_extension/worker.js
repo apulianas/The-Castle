@@ -45,6 +45,7 @@ const ERRORS = {
     page_changed: "The tracked tab left https://x.com/Ravens. A Ravens tab will be recovered automatically.",
     sign_in_required: "Sign in manually to X in the dedicated Edge profile and return to the Ravens page. Collection will resume automatically.",
     challenge: "X needs your attention. Resolve it manually and return to the Ravens page. Collection will resume automatically.",
+    session_unconfirmed: "X's signed-in navigation was not recognized (the page may still be loading or using an unfamiliar layout). Collection will reload and retry automatically; if this persists, check X sign-in in the dedicated Edge profile.",
     extraction_failed: "The Ravens timeline could not be read. Collection will retry automatically.",
     truncated: "A post was truncated (Show more). It was not sent. Check X manually.",
     oversized: "A post exceeded the 25,000-character feed limit and was not sent. Check X manually.",
