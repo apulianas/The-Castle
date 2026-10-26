@@ -62,7 +62,13 @@ Edge opens again, but cannot launch Edge or run while the browser/device is off.
 
 Sign-in screens and X challenges require manual attention. The popup shows
 `needs_attention`; the extension checks again on minute alarms without reloading
-the page, automating sign-in, or bypassing challenges. Resolve them and return to
+the page, automating sign-in, or bypassing challenges. Only X's login URLs or an
+explicit login/sign-up control count as signed out. Signed-in status is confirmed
+from either X's desktop side navigation or its narrow-window navigation, because
+a phone Remote Desktop session can leave Edge too narrow for the side navigation.
+A page showing neither is treated as a transient `session_unconfirmed` failure:
+it is reloaded and retried with the normal backoff rather than parked waiting
+for attention. Resolve them and return to
 `https://x.com/Ravens`; collection resumes automatically. **Pause** persists across
 restarts and prevents recovery until you explicitly Start again. If the native
 host is unavailable, invalidation cannot be guaranteed; the existing freshness

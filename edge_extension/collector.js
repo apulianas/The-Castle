@@ -6,14 +6,24 @@ async function extractRavensPage(scroll) {
             !url.port && !url.username && !url.password && !url.hash &&
             /^\/ravens\/?$/i.test(url.pathname);
     };
+    // X hides the desktop side navigation in its narrow layout (for example after a phone
+    // Remote Desktop session resizes the window), so accept either layout's signed-in controls.
+    const signedIn = [
+        "SideNav_AccountSwitcher_Button", "AppTabBar_Profile_Link", "DashButton_ProfileIcon_Link",
+        "AppTabBar_Notifications_Link", "AppTabBar_DirectMessage_Link"
+    ].map(id => `[data-testid="${id}"]`).join(", ");
+    const signedOut = '[data-testid="loginButton"], [data-testid="signupButton"], ' +
+        '[data-testid="login"], [data-testid="signup"], a[href="/login"], ' +
+        'a[href^="/i/flow/login"], a[href^="/i/flow/signup"]';
     const check = () => {
         if (!approved()) throw new Error("page_changed");
-        if (!document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]')) {
-            throw new Error("sign_in_required");
-        }
         if (document.querySelector(
             '[data-testid="challenge"], iframe[src*="captcha"], iframe[src*="arkoselabs"]'
         )) throw new Error("challenge");
+        if (!document.querySelector(signedIn)) {
+            // Only an explicit signed-out page needs the user; an unrecognized layout is retried.
+            throw new Error(document.querySelector(signedOut) ? "sign_in_required" : "session_unconfirmed");
+        }
     };
     // Allow the initial signed-in timeline to render, but never interact with a login/challenge.
     if (!approved()) return {error: "page_changed"};
@@ -132,7 +142,7 @@ async function extractRavensPage(scroll) {
         }
         return {posts, truncated, oversized, diagnostics};
     } catch (error) {
-        return {error: ["page_changed", "sign_in_required", "challenge"].includes(error.message)
+        return {error: ["page_changed", "sign_in_required", "challenge", "session_unconfirmed"].includes(error.message)
             ? error.message : "extraction_failed"};
     }
 }
