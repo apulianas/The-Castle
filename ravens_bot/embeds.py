@@ -1114,7 +1114,7 @@ def help_embed() -> discord.Embed:
         name="/guesswho",
         value=(
             "A random Ravens roster photo; three seconds later the player's "
-            "name, number, and position."
+            "name, number, and position. Only you can see it."
         ),
         inline=False,
     )

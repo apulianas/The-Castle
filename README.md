@@ -15,7 +15,7 @@ For direct X updates instead of waiting for the mirror, see
     as `week 5` or `wk5`, or a postseason round such as `wild card`.
   - `/injuries` — the current Ravens injury report, grouped by status.
   - `/guesswho` — a random Ravens roster photo, then the player's name, number,
-    and position three seconds later.
+    and position three seconds later, visible only to the person who ran it.
   - `/standings` — AFC North standings, with the Ravens highlighted.
   - `/draftpicks [pick] [chart]` — the Ravens' projected draft inventory and Jimmy
     Johnson points; supply an overall pick number for trade-package estimates.

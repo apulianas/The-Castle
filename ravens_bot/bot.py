@@ -1106,7 +1106,7 @@ def _guesswho_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         name="guesswho", description="Guess the Ravens player from his roster photo."
     )
     async def guesswho(interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         try:
             roster = await _require_espn(bot).fetch_roster()
         except EspnApiError as exc:
@@ -1123,12 +1123,14 @@ def _guesswho_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         await interaction.followup.send(
             embed=discord.Embed(title="Guess who?", color=0x241773).set_image(
                 url=player.photo_url(FEATURE_WIDTH)
-            )
+            ),
+            ephemeral=True,
         )
         await asyncio.sleep(GUESSWHO_REVEAL_SECONDS)
         number = f"#{player.jersey}" if player.jersey else "no number listed"
         await interaction.followup.send(
-            f"It's **{player.name}** — {number}, {player.position or 'position unknown'}"
+            f"It's **{player.name}** — {number}, {player.position or 'position unknown'}",
+            ephemeral=True,
         )
 
     return guesswho
