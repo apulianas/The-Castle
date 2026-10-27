@@ -737,6 +737,7 @@ def parse_roster(payload: dict[str, Any]) -> dict[str, PlayerRef]:
                 or _text(position.get("displayName")),
                 headshot=headshot if isinstance(headshot, str) and headshot else None,
                 link=player_url(athlete_id),
+                jersey=_text(item.get("jersey")),
             )
             key = normalize_name(name)
             if key in index and index[key].athlete_id != player.athlete_id:

@@ -1111,6 +1111,14 @@ def help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="/guesswho",
+        value=(
+            "A random Ravens roster photo; three seconds later the player's "
+            "name, number, and position."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="/standings",
         value=(
             "AFC North standings with record, win percentage, games back, and streak, "

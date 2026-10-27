@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import random
 import re
 from collections.abc import Callable, Sequence
 from contextlib import closing, nullcontext
@@ -42,6 +43,7 @@ from .dates import (
     upcoming_window,
 )
 from .draft import Chart, DraftClient, DraftError, MAX_PICK_NUMBER
+from .espn_urls import HEADSHOT_FEATURE_WIDTH as FEATURE_WIDTH
 from .embeds import (
     INACTIVE_CHART_FILENAME,
     draft_picks_embed,
@@ -257,6 +259,7 @@ class RavensBot(commands.Bot):
         self.tree.add_command(_transactions_command(self))
         self.tree.add_command(_inactives_command(self))
         self.tree.add_command(_injuries_command(self))
+        self.tree.add_command(_guesswho_command(self))
         self.tree.add_command(_standings_command(self))
         self.tree.add_command(_next_game_command(self))
         self.tree.add_command(_live_command(self))
@@ -1093,6 +1096,42 @@ def _injuries_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
         )
 
     return injuries
+
+
+GUESSWHO_REVEAL_SECONDS = 3
+
+
+def _guesswho_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:
+    @app_commands.command(
+        name="guesswho", description="Guess the Ravens player from his roster photo."
+    )
+    async def guesswho(interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            roster = await _require_espn(bot).fetch_roster()
+        except EspnApiError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        candidates = [p for p in roster.values() if p.photo_url(FEATURE_WIDTH)]
+        if not candidates:
+            await interaction.followup.send(
+                embed=error_embed("No Ravens roster photos are available."),
+                ephemeral=True,
+            )
+            return
+        player = random.choice(candidates)
+        await interaction.followup.send(
+            embed=discord.Embed(title="Guess who?", color=0x241773).set_image(
+                url=player.photo_url(FEATURE_WIDTH)
+            )
+        )
+        await asyncio.sleep(GUESSWHO_REVEAL_SECONDS)
+        number = f"#{player.jersey}" if player.jersey else "no number listed"
+        await interaction.followup.send(
+            f"It's **{player.name}** — {number}, {player.position or 'position unknown'}"
+        )
+
+    return guesswho
 
 
 def _standings_command(bot: RavensBot) -> app_commands.Command[Any, ..., None]:

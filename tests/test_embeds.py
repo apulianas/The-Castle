@@ -401,6 +401,7 @@ def test_help_embed_documents_every_command() -> None:
         "/transactions",
         "/inactives",
         "/injuries",
+        "/guesswho",
         "/standings",
         "/nextgame",
         "/live",
