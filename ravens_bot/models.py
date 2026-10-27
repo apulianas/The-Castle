@@ -72,6 +72,7 @@ class PlayerRef:
     position: str | None = None
     headshot: str | None = None
     link: str | None = None
+    jersey: str | None = None
 
     @property
     def page_url(self) -> str | None:
